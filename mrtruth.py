@@ -1788,15 +1788,15 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
         out.append(sc)
         frame += n
     # the dust plate: on about DUST_SHARE of ALL shots, chosen among plain archive photographs (no AI picture, no
-    # template) of 2 s or more, the 3 s+ ones first, darker before brighter, never two dusty shots back to back
+    # template) of 2 s or more, the 3 s+ ones first, darker before brighter, spread out
     want = round(DUST_SHARE * len(out))
     ranked = sorted(((at, _luma(photo), n) for at, photo, n in dusty),
                     key=lambda d: (d[2] < DUST_PREFER_S * FPS, d[1]))
-    took = set()
+    took, gap = set(), max(2, len(out) // max(1, 2 * want))     # spread across the film, not bunched in one stretch
     for at, lum, n in ranked:
         if len(took) >= want:
             break
-        if at - 1 in took or at + 1 in took:
+        if any(abs(at - t) < gap for t in took):
             continue
         out[at]["ambience"] = {"clip": "dust", "durationFrames": n,
                                "shadow": DUST_SHADOW if lum >= DUST_SHADOW_MIN_LUMA else 0}
