@@ -100,7 +100,7 @@ JOINING = {"the", "a", "an", "of", "and", "in", "at", "on", "for", "to", "from",
 FLASH_SHARE, PUSH_SHARE, SLIDE_SHARE = 0.05, 0.08, 0.03
 BURN_SHARE, BURN_PER_MIN, BURN_GAP_S, BURN_MAX_RUN = 0.2, 4.0, 6.0, 2
 DIP_FRAMES, FLASH_FRAMES, PUSH_FRAMES, SLIDE_FRAMES, BURN_IN, BURN_OUT = 18, 8, 11, 18, 14, 12
-DUST_SHARE, DUST_MIN_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.06, 3.0, 0.25, 0.45
+DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.10, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
 
@@ -1541,10 +1541,17 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
         base = base.replace(f"{row.get('visualIntent') or row['text']}.",
                             f"A photograph of {role}{(' — ' + look) if look else ''}, the main subject of the frame "
                             f"(portrait or at work), for the line: {row['text']}.")
-    tries = [base + "No signs, labels, plaques or captions; any book or page is closed, seen from its edge or lost in "
-                    "shadow, so no writing can be read. No border, no frame, no burnt edges, nothing modern.",
-             base + "Show it WITHOUT any page, document, book opening, sign or screen in view at all — objects, light, "
-                    "architecture and the figure only. No border or frame. Nothing modern."]
+    tries = [base + "Very shallow depth of field: the subject sharp, every page, book and wall softly out of focus so "
+                    "no letter can be read. No signs, labels, plaques or captions. No border, no frame, no burnt edges, "
+                    "nothing modern.",
+             # the line's intent often names a manuscript and the model draws its letters anyway: drop the intent
+             f"{b.get('aiLook') or 'Documentary archive photograph, natural light'}. 16:9, full-bleed. "
+             f"{('Era and place: ' + era + '. ') if era else ''}{('Mood: ' + b['tone'] + '. ') if b.get('tone') else ''}"
+             + (f"{role}{(' — ' + look) if look else ''}, alone in a dim stone corridor or archive aisle, lost in "
+                f"thought, seen from the side; anonymous, not a real identifiable person. " if about_him else
+                f"{row.get('visualIntent') or row['text']} — shown only through closed objects: a shut book's worn "
+                f"cover, spine, clasps or binding, seals, cords, stone, candlelight and shadow. ")
+             + "No book open, no page, document, sign or screen in view. No border or frame. Nothing modern."]
     home = job / "mrtruth" / "pictures" / ("s" + hashlib.sha1(row["text"].encode()).hexdigest()[:14])
     for k, prompt in enumerate(tries):
         dest = home / f"ai_{hashlib.sha1(prompt.encode()).hexdigest()[:8]}.jpg"
@@ -1733,7 +1740,7 @@ def _word_times(cues: list) -> list:
 
 def scenes(rows: list, storage: Path, cues: list = None) -> list:
     """The PlannedScene list (packages/core/src/schemas.ts); the compositor validates each with zod."""
-    out, frame = [], 0
+    out, frame, dusty = [], 0, []
     spoken = _word_times(cues)
     for i, r in enumerate(rows):
         end = int(round(r["endMs"] / 1000 * FPS))
@@ -1776,14 +1783,26 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             sc["textCard"] = {"pullPhrase": phrase, "eyebrow": "", "backgroundAssetPath": None,
                               "words": [{"text": w[:64], "startFrame": min(n - 1, max(0, at(k)))} for k, w in enumerate(words)]}
             sc["device"] = None
-        if not dev and pick and not pick.get("ai") and n >= DUST_MIN_S * FPS and _content_draw(r["text"] + "dust") < DUST_SHARE:
-            lum = _luma(Path(pick["photo"]))
-            if lum <= 0.55:
-                sc["ambience"] = {"clip": "dust", "durationFrames": n,
-                                  "shadow": DUST_SHADOW if lum >= DUST_SHADOW_MIN_LUMA else 0}
-        sc["renderKey"] = _hash({k: v for k, v in sc.items() if k not in ("index", "startFrame")})
+        if not dev and pick and not pick.get("ai") and n >= DUST_MIN_S * FPS:
+            dusty.append((len(out), Path(pick["photo"]), n))
         out.append(sc)
         frame += n
+    # the dust plate: on about DUST_SHARE of ALL shots, chosen among plain archive photographs (no AI picture, no
+    # template) of 2 s or more, the 3 s+ ones first, darker before brighter, never two dusty shots back to back
+    want = round(DUST_SHARE * len(out))
+    ranked = sorted(((at, _luma(photo), n) for at, photo, n in dusty),
+                    key=lambda d: (d[2] < DUST_PREFER_S * FPS, d[1]))
+    took = set()
+    for at, lum, n in ranked:
+        if len(took) >= want:
+            break
+        if at - 1 in took or at + 1 in took:
+            continue
+        out[at]["ambience"] = {"clip": "dust", "durationFrames": n,
+                               "shadow": DUST_SHADOW if lum >= DUST_SHADOW_MIN_LUMA else 0}
+        took.add(at)
+    for sc in out:
+        sc["renderKey"] = _hash({k: v for k, v in sc.items() if k not in ("index", "startFrame")})
     return out
 
 
