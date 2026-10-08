@@ -859,7 +859,9 @@ Four rules of this channel on top of the brief above:
   glass towers built later, today's clothes, face masks, laptops, phones, screens, modern office furniture, modern
   signage — scores AT MOST 2, unless the narration is plainly about the present day. A museum, restoration or show
   photo of the period object itself is fine. Another country's or another tradition's version of the thing (an
-  English printed book for a Latin codex, an American card catalogue for a Vatican register) is a wrong subject.
+  English printed book for a Latin codex, an American card catalogue for a Vatican register) is a wrong subject. When
+  the narration or the <film> block gives the AGE of an object, the same kind of object from a visibly different
+  century (a Gothic or Renaissance book for a 4th-5th century codex, a 1900s rifle for a musket) scores AT MOST 3.
 - STAND-INS ARE SUBJECTS. When the visual intent asks for an anonymous figure of a listed role, or for one of the
   film's motifs, an authentic period picture of exactly that is this scene's subject: judge it as you would the
   named subject (6-9 when it is good), not as generic stock.
@@ -1450,7 +1452,13 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             pick = _ai_picture(engine, job, r, i, dossier, states[i].get("stand_in", ""),
                                states[i].get("stand_look", ""), *around(i))      # 4. an AI stand-in (cap, checked)
             step = "ai" if pick else None
-        if pick is None:                              # 5. last: a photo shown before, never close by, at most twice
+        if pick is None:                              # 5. an unused, unflagged photo of this line, even a weak one:
+            # a new picture beats a repeat (audit v5: 20 repeats from 9 shots back, few of them fitting their new line)
+            weak = [c for c in cands + borrowed[i] if c["score"] >= 4 and c.get("depiction") != "unrelated"
+                    and not c.get("flags") and _studio_ok(r, c) and seen(c["photo"]) == 0 and varied(c, i, gap=3)]
+            if weak:
+                pick, step = dict(sorted(weak, key=lambda c: -c["score"])[0], contextual=True), "contextual"
+        if pick is None:                              # 6. last: a photo shown before, never close by, at most twice
             again = [c for c in cands + borrowed[i] if usable(r, c, bar) and seen(c["photo"]) < 2
                      and i - shown_sig.get(sig(c["photo"]), [0, -99])[1] > 8 and varied(c, i, gap=8)]
             back = [p for k, p in reversed(picked) if not p.get("ai") and p["score"] >= MIN_SCORE
