@@ -1235,6 +1235,15 @@ export const GradeSchema = z.object({
 
 export type Grade = z.infer<typeof GradeSchema>
 
+/** The typed caption (remotion/TypedCaption.tsx): 1-2 serif lines typed in at bottom left. */
+export const TypedCaptionSchema = z.object({
+  lines: z.array(z.string().min(1).max(48)).min(1).max(2),
+  startFrame: z.number().int().min(0),
+  charsPerSecond: z.number().min(4).max(80).optional(),
+})
+
+export type TypedCaption = z.infer<typeof TypedCaptionSchema>
+
 /**
  * THE PARTICLE PLATE THIS SHOT DRAWS FOR ITS WHOLE LENGTH, OR NULL.
  *
@@ -1494,6 +1503,7 @@ export const PlannedSceneSchema = z.object({
    * ##########################################################################
    */
   ambience: SceneAmbienceSchema.nullish(),
+  typedCaption: TypedCaptionSchema.nullish(),
   /**
    * EXTRA PICTURES THIS SCENE MAY DRAW, beyond its own. Empty on almost every
    * scene.

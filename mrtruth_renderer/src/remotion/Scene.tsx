@@ -1,3 +1,4 @@
+import { TypedCaption } from './TypedCaption.js'
 import { AbsoluteFill, interpolate, staticFile, useCurrentFrame } from 'remotion'
 import { SourcedImg as Img } from './SourcedImg.js'
 import type { ReactNode } from 'react'
@@ -217,6 +218,7 @@ export function Scene({
         */}
         <AmbienceShadow scene={scene} />
         <AmbienceLayer scene={scene} />
+        <TypedCaption scene={scene} />
 
         <DipToBlack scene={scene} />
         <Flash scene={scene} />
@@ -339,6 +341,7 @@ export function Scene({
           <Captions phrases={scene.captions} />
         </>
       )}
+      <TypedCaption scene={scene} />
 
       {/*
         THE OVERLAY, AND EVERY CONDITION HERE IS A SECOND LOCK.

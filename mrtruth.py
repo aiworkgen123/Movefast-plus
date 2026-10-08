@@ -38,6 +38,7 @@ TARGET_SCENE_S = 4.0                 # the repo's DEFAULT_TARGET_SCENE_MS
 BATCH_S = 240.0                      # segmentation focus range per call
 GRADE = {"lut": "documentary-neutral", "vignette": 0.18, "grain": 0.06}   # the repo's DEFAULT_GRADE
 # the shadow look (renderer Grade.tsx): tight dark vignette, a dimmer, muted, harder picture. 0 = off, 1 = full.
+TYPED_CAPTION_START_F = 8                       # the reference starts typing ~0.27 s into its shot
 SHADOW_LOOK = float(os.environ.get("MRTRUTH_SHADOW", "1"))
 if SHADOW_LOOK > 0:
     GRADE["shadow"] = min(1.0, SHADOW_LOOK)
@@ -1789,6 +1790,10 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             sc["device"] = None
         if not dev and pick and not pick.get("ai") and n >= DUST_MIN_S * FPS:
             dusty.append((len(out), Path(pick["photo"]), n))
+        if r.get("typedCaption"):                    # the typed caption (renderer TypedCaption.tsx); rulings TBD
+            tc = r["typedCaption"]
+            sc["typedCaption"] = {"lines": [ln[:48] for ln in tc["lines"][:2]],
+                                  "startFrame": int(tc.get("startFrame", TYPED_CAPTION_START_F))}
         out.append(sc)
         frame += n
     # the dust plate: on about DUST_SHARE of ALL shots, chosen among plain archive photographs (no AI picture, no
