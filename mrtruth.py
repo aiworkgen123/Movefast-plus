@@ -86,7 +86,7 @@ NAMES_PICTURE = {"P04", "P05", "P17", "framed-card", "corner-label"}     # words
 MIN_WIDTH = 800                 # a web photo must be this wide to fill a 1080p frame through the grade and slow move
 MIN_SCORE = 5.0                 # the judge's 3-5 is "generic, says nothing"; 0-2 wrong era, modern stock, burned-in text
 # cache versions: a change to what a step is told must redo that step on an existing job, not reuse its old answer
-BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 2, 2, 2, 2, 5
+BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 3, 2, 3, 6
 # the picture judge: Flash-Lite at minimal thinking scored a COVID-masked researcher 9 for the 1980s and one image 1 and
 # then 8 (audit 2026-10-08); Mr Truth's judge is a stronger Gemini that thinks a little. Env overrides.
 JUDGE_MODEL = os.environ.get("MRTRUTH_JUDGE_MODEL", "gemini-3.8-flash")
@@ -259,7 +259,9 @@ Return ONLY a JSON object:
              "appearance": "one line fixing how a stand-in for them looks every time: age, build, face, hair,
                             glasses, dress of that role and era",
              "commons": "at most 3 words, how Wikimedia Commons files pictures of that TYPE",
-             "web": "at most 7 words, an image search for that TYPE in the setting and era"}],
+             "web": "at most 7 words, an image search for that TYPE at work in the setting and era",
+             "portrait": "at most 7 words, an image search for a real PHOTOGRAPH of that type of person — a portrait
+                          or interview shot (e.g. 'elderly Catholic priest portrait cassock')"}],
  "motifs": [{"idea": "an abstract idea the script returns to (time, secrecy, a ban, memory, power, loss...)",
              "commons": "at most 3 words", "web": "at most 7 words: a CONCRETE thing of this film's world, era and
              tone that shows the idea"}],
@@ -307,7 +309,7 @@ def visual_brief(engine, job: Path, script: str, dossier: dict, force: bool = Fa
         return {}
     clip = lambda s, n: " ".join(str(s or "").split()[:n])
     for p in brief.get("people") or []:
-        p["commons"], p["web"] = clip(p.get("commons"), 3), clip(p.get("web"), 7)
+        p["commons"], p["web"], p["portrait"] = clip(p.get("commons"), 3), clip(p.get("web"), 7), clip(p.get("portrait"), 7)
         p["likenessKnown"] = p.get("likenessKnown") is not False and str(p.get("likenessKnown")).lower() != "false"
     for m in brief.get("motifs") or []:
         m["commons"], m["web"] = clip(m.get("commons"), 3), clip(m.get("web"), 7)
@@ -322,7 +324,7 @@ def _stand_in(r: dict, dossier: dict):
     people = [p for p in (dossier.get("visualBrief") or {}).get("people") or [] if str(p.get("name") or "").strip()]
     known = {_surname(p) for p in people if p.get("likenessKnown")}
     text = str(r.get("text") or "").lower()
-    ents = " | ".join(str(e) for e in r.get("entities") or []).lower()
+    ents = " | ".join([str(e) for e in r.get("entities") or []] + [str(r.get("about") or "")]).lower()
     for p in people:
         if p.get("likenessKnown") or not (p.get("commons") or p.get("web")):
             continue
@@ -364,7 +366,13 @@ THIS CHANNEL'S SEARCH RULES (they win over the brief above where they differ):
   in its tone — one of the <film> block's motifs or one like them — never a literal modern match of the word (no modern
   wall clock for "time-limited", no office folders for "records", no stock concept photo).
 - Never a modern consumer product, decor, gift, office, screenshot, diagram, or modern people in modern clothes,
-  unless the narration is plainly about the present day."""
+  unless the narration is plainly about the present day.
+- WHO A LINE IS ABOUT. Give every scene an extra field "about": the name of the person the line is about — named, or
+  only as he / she / the man / the translator / the priest / the king — or "" when the line is about a thing, a
+  place or an idea. When the line is about a person of whom no likeness exists, the visualIntent and the first query
+  show a REAL PERSON OF THEIR ROLE: e.g. an older Catholic priest in a cassock at a desk, in a library, giving an
+  interview, at work in the Vatican — a person the viewer can picture him by. In a run of lines about that person,
+  show the person on at least every second shot; the shots between show what he reads, holds or where he is."""
 def _cues(engine, srt: Path) -> list:
     return [(int(round(a * 1000)), int(round(b * 1000)), t) for a, b, t in
             engine._parse_srt_full(srt.read_text(encoding="utf-8")) if b > a]
@@ -820,28 +828,34 @@ JUDGE_TAIL = """
 For this run return ONLY a JSON array, one object per candidate, in candidate order, with the fields the brief above
 describes: [{"candidateIndex": 1, "score": 0-10, "reason": "one sentence", "subjectAnchor": {"x": 0-1, "y": 0-1},
 "hasBakedText": true|false, "depiction": "named-subject" | "same-category" | "unrelated", "studioProduct": true|false,
-"wrongPerson": true|false, "modernStock": true|false, "toneFit": "fits" | "neutral" | "clashes",
+"wrongPerson": true|false, "modernStock": true|false, "toneFit": "fits" | "neutral" | "clashes", "person": true|false,
 "subject": "2-5 words naming WHAT and WHICH VIEW the picture shows, the same words for the same view of the same
 place or thing (e.g. 'vatican library sistine hall', 'codex vaticanus page', 'priest at desk')"}]
 studioProduct: true when the object is photographed on a white or seamless studio background.
-wrongPerson: true when the narration (or the <film> block's people list) points at a person and the picture's main
-  figure is visibly NOT that kind of person (no priest's dress when the narration says priest or Father; a costumed
-  model; a youth for an old scholar), OR is a different identifiable or named individual (a famous face, or a title
-  that names someone else). For a person NOT in the <film> block's no-likeness list, an anonymous stand-in in their
-  place is also wrongPerson. For a person IN that list, an anonymous figure of the right role, era and setting is NOT
-  wrongPerson.
+person: true when a person is the main subject of the picture (a portrait, a figure at work), not a crowd or a speck.
+wrongPerson: true when the narration (or the scene's "about") points at a person and the picture's main figure is
+  visibly NOT that kind of person (no priest's dress when the narration says priest or Father; a costumed model; a
+  youth for an old scholar; a woman for a man). For a person NOT in the <film> block's no-likeness list, anyone other
+  than that very person is wrongPerson. For a person IN that list, a real photograph of another person of the right
+  role stands in for them and is NOT wrongPerson — even if the title names that other person — UNLESS the face is
+  world-famous (a pope, a famous cardinal, a head of state, a celebrity): a famous face standing in for them IS
+  wrongPerson. On a line that is NOT about that person (the Church, the Vatican, an institution), a pope or famous
+  cleric is a fine subject.
 modernStock: true for modern stock or lifestyle photos, staged concept photos, modern product shots and shop
   listings, decor, gifts, modern home or office interiors, screenshots, modern infographics or slides, clip-art,
   AI-looking renders, tourist-brochure, glossy or HDR travel pictures, or modern people in modern clothes — unless
   the narration is plainly about the present day. A period technical drawing, cutaway, map, engraving or museum photo
   of a period object is NOT modernStock.
 toneFit: does the picture keep the <film> block's tone? "clashes" for cheerful, glossy, commercial, playful, homely
-  or staged pictures in a serious film (or the opposite). A plain colour or daylight photo of a real period subject
-  is "neutral" — the film grades every picture later.
+  or staged pictures in a serious film (or the opposite). A plain colour or daylight photo of a real period subject,
+  or a real portrait of a person (smiling or not), is "neutral" — the film grades every picture later.
 Four rules of this channel on top of the brief above:
 - THE FILM'S LOOK. A picture of a kind the <film> block says this film may NOT SHOW, or with wrongPerson, modernStock
   or toneFit "clashes", scores AT MOST 2 — however exactly it matches the words.
-- THE PERIOD. This film is set in [PERIOD]. A photograph visibly taken after that period — modern cars on the street,
+- THE PERIOD. This film is set in [PERIOD]. A portrait or at-work photo of a person in the dress of their role (a
+  priest's cassock and collar, a monk's habit, a uniform) may be from a later decade and in colour: it stands in for
+  that role, as long as no modern device or modern setting is prominent. Otherwise a photograph visibly taken after
+  that period — modern cars on the street,
   glass towers built later, today's clothes, face masks, laptops, phones, screens, modern office furniture, modern
   signage — scores AT MOST 2, unless the narration is plainly about the present day. A museum, restoration or show
   photo of the period object itself is fine. Another country's or another tradition's version of the thing (an
@@ -883,7 +897,8 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
     brief = (_prompts()["vision"] + _film_block(dossier)
              + f"\n\n<scene>\nbefore: {before}\nnarration: {row['text']}\nafter: {after}\n"
              + f"visual intent: {row.get('visualIntent', '')}\nmood: {row.get('mood', '')}\n"
-             + f"entities: {', '.join(map(str, row.get('entities') or [])) or 'none'}\n</scene>\n"
+             + f"entities: {', '.join(map(str, row.get('entities') or [])) or 'none'}\n"
+             + f"about: {row.get('about') or 'nobody in particular'}\n</scene>\n"
              + "\n".join(f"candidate {k + 1}: {c.get('title', '')[:120]}" for k, (c, _) in enumerate(cands))
              + JUDGE_TAIL.replace("[PERIOD]", str(dossier.get("period") or "the period the narration describes")))
     items = []
@@ -929,6 +944,7 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
                         anchor=(min(1.0, max(0.0, ax)), min(1.0, max(0.0, ay))),
                         depiction=depiction, flags=flags, reason=str(x.get("reason") or "")[:200],
                         subject=re.sub(r"\s+", " ", str(x.get("subject") or "").strip().lower())[:60],
+                        person=yes(x.get("person")),
                         **({"unjudged": True} if not x else {})))
     return sorted(out, key=lambda c: -c["score"])
 
@@ -1246,7 +1262,8 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         if stand:                                    # a person of whom no likeness exists: search the ROLE, not the name
             sur = _surname(stand)
             archive = stand.get("commons") or ""
-            web_q = [stand.get("web") or ""] + [x for x in (lit, con) if x and sur not in x.lower()]
+            web_q = [x for x in (stand.get("portrait"), stand.get("web")) if x] + \
+                    [x for x in (lit, con) if x and sur not in x.lower()]
             names = [archive] if archive else []
             q = web_q[0] or q
         scored, tried = [], [q]
@@ -1407,17 +1424,29 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         fresh = [c for c in cands if usable(r, c, bar) and new_ok(c)]
         if i == 0:                                    # the opening title wants a picture dark enough for it
             fresh = [c for c in dark_first(fresh) if c["score"] >= 6] + [c for c in fresh if c["score"] < 6]
-        pick = fresh[0] if fresh else None
-        step = ("anchor" if pick.get("anchor_switched") else "exact") if pick else None
-        if pick is None:                              # 2. a real photo of the right kind of thing
-            ctx = [c for c in _contextual(r, cands) if new_ok(c)]
-            if ctx:
-                pick, step = dict((dark_first(ctx) if i == 0 else ctx)[0], contextual=True), "contextual"
-        if pick is None:                              # 3. a neighbour's photo, judged again for this line
-            near = [c for c in borrowed[i] if usable(r, c, bar) and new_ok(c)]
-            if near:
-                pick, step = near[0], "neighbour"
-        if pick is None and dev.get("id") not in ("chapter-title", "highlight-page"):
+        ctx = [dict(c, contextual=True) for c in _contextual(r, cands) if new_ok(c) and c not in fresh]
+        if i == 0:
+            ctx = dark_first(ctx)
+        near = [c for c in borrowed[i] if usable(r, c, bar) and new_ok(c)]
+        options = ([(c, "anchor" if c.get("anchor_switched") else "exact") for c in fresh]
+                   + [(c, "contextual") for c in ctx] + [(c, "neighbour") for c in near])
+        pick, step = None, None
+        about_him = bool(states[i].get("stand_in"))
+        if about_him:
+            # a line about a person of whom no likeness exists: the viewer gets a PERSON of his role to picture him
+            # by (owner 2026-10-08) — a real photo first, else (unless the shot before already showed one) an AI
+            # stand-in of the same fixed look, and only then a picture of what he reads or where he is
+            people = [(c, st) for c, st in options if c.get("person")]
+            if people:
+                pick, step = people[0]
+            elif not (picked and picked[-1][0] == i - 1 and (picked[-1][1].get("person") or picked[-1][1].get("ai"))) \
+                    and dev.get("id") not in ("chapter-title", "highlight-page"):
+                pick = _ai_picture(engine, job, r, i, dossier, states[i].get("stand_in", ""),
+                                   states[i].get("stand_look", ""), *around(i))
+                step = "ai" if pick else None
+        if pick is None and options:                  # 1-3. own exact/anchor, contextual, a neighbour's re-judged photo
+            pick, step = options[0]
+        if pick is None and not about_him and dev.get("id") not in ("chapter-title", "highlight-page"):
             pick = _ai_picture(engine, job, r, i, dossier, states[i].get("stand_in", ""),
                                states[i].get("stand_look", ""), *around(i))      # 4. an AI stand-in (cap, checked)
             step = "ai" if pick else None
@@ -1426,6 +1455,9 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                      and i - shown_sig.get(sig(c["photo"]), [0, -99])[1] > 8 and varied(c, i, gap=8)]
             back = [p for k, p in reversed(picked) if not p.get("ai") and p["score"] >= MIN_SCORE
                     and seen(p["photo"]) < 2 and i - k > 8 and varied(p, i, gap=8)]
+            if not (again or back):                   # never a shot with no picture: a closer repeat before none
+                back = [p for k, p in reversed(picked) if not p.get("ai") and p["score"] >= MIN_SCORE
+                        and seen(p["photo"]) < 3 and i - k > 5]
             if again or back:
                 pick, step = dict((again or back)[0], reused=True), "reused"
         r["pick"], r["step"], r["stand_in"] = pick, step, states[i].get("stand_in", "")
@@ -1449,7 +1481,8 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
 
 AI_CHECK = """This is a GENERATED stand-in picture for one line of a documentary. Look at it hard and answer ONLY a
 JSON object: {"text": true|false, "modern": true|false, "frame": true|false, "fits": 0-10, "why": "one sentence"}
-text: ANY visible letters, words, numbers, script, handwriting, labels, plaques or signs — legible or garbled.
+text: PROMINENT writing — a sign, label, plaque, caption, title, or a page of letters in sharp focus that a viewer
+  would try to read (legible or garbled). Faint, distant or out-of-focus script on old books or walls does NOT count.
 modern: anything after the film's period (see below): modern clothes, lamps, furniture, devices.
 frame: a fake border, burnt edges, a photo-frame, a vignette ring or a collage.
 fits: how well it shows this line in the film's era, setting and tone (8 = an editor would keep it).
@@ -1484,6 +1517,7 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
     a picture that still fails is not used. Never carries a name on screen."""
     dossier = dossier or {}
     b = dossier.get("visualBrief") or {}
+    about_him = bool(role)                        # the line is about him: he is the picture's subject
     if not role:                                  # the film's one unphotographed protagonist, if a person appears
         nophoto = [p for p in b.get("people") or [] if not p.get("likenessKnown")]
         if len(nophoto) == 1:
@@ -1495,8 +1529,12 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
     base = (f"{b.get('aiLook') or 'Documentary archive photograph, natural light'}. 16:9, full-bleed. "
             f"{('Era and place: ' + era + '. ') if era else ''}{('Mood: ' + b['tone'] + '. ') if b.get('tone') else ''}"
             f"{row.get('visualIntent') or row['text']}.{who} ")
-    tries = [base + "Absolutely no writing: no letters, script, numbers, labels, plaques or signs anywhere; any book or "
-                    "page is closed, turned away or lost in shadow. No border, no frame, no burnt edges, nothing modern.",
+    if about_him:                                 # a line about him: a portrait or at-work picture of the man
+        base = base.replace(f"{row.get('visualIntent') or row['text']}.",
+                            f"A photograph of {role}{(' — ' + look) if look else ''}, the main subject of the frame "
+                            f"(portrait or at work), for the line: {row['text']}.")
+    tries = [base + "No signs, labels, plaques or captions; any book or page is closed, seen from its edge or lost in "
+                    "shadow, so no writing can be read. No border, no frame, no burnt edges, nothing modern.",
              base + "Show it WITHOUT any page, document, book opening, sign or screen in view at all — objects, light, "
                     "architecture and the figure only. No border or frame. Nothing modern."]
     home = job / "mrtruth" / "pictures" / ("s" + hashlib.sha1(row["text"].encode()).hexdigest()[:14])
