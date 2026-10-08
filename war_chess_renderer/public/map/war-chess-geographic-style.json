@@ -1,0 +1,102 @@
+{
+  "version": 8,
+  "name": "War Chess restrained geographic plate",
+  "sources": {
+    "openmaptiles": {
+      "type": "vector",
+      "url": "https://tiles.openfreemap.org/planet",
+      "attribution": "© OpenStreetMap contributors · OpenFreeMap"
+    },
+    "natural-earth-relief": {
+      "type": "raster",
+      "tiles": [
+        "https://tiles.openfreemap.org/natural_earth/ne2sr/{z}/{x}/{y}.png"
+      ],
+      "tileSize": 256,
+      "maxzoom": 6,
+      "attribution": "Natural Earth via OpenFreeMap"
+    }
+  },
+  "layers": [
+    {
+      "id": "parchment",
+      "type": "background",
+      "paint": {"background-color": "#d7c7a9"}
+    },
+    {
+      "id": "relief",
+      "type": "raster",
+      "source": "natural-earth-relief",
+      "paint": {
+        "raster-opacity": 0.22,
+        "raster-saturation": -1,
+        "raster-contrast": 0.08,
+        "raster-brightness-min": 0.12,
+        "raster-brightness-max": 0.82
+      }
+    },
+    {
+      "id": "landcover",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landcover",
+      "paint": {"fill-color": "#b7a27f", "fill-opacity": 0.3}
+    },
+    {
+      "id": "landuse",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landuse",
+      "paint": {"fill-color": "#c3b38f", "fill-opacity": 0.2}
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "water",
+      "paint": {"fill-color": "#8fa4a2", "fill-opacity": 0.9}
+    },
+    {
+      "id": "water-edge",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "water",
+      "paint": {
+        "line-color": "#514b43",
+        "line-opacity": 0.58,
+        "line-width": 2.4
+      }
+    },
+    {
+      "id": "waterways",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "waterway",
+      "filter": [
+        "match",
+        ["get", "class"],
+        ["river", "stream", "canal"],
+        true,
+        false
+      ],
+      "paint": {
+        "line-color": "#718989",
+        "line-opacity": 0.5,
+        "line-width": 1.5
+      }
+    },
+    {
+      "id": "boundaries",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "boundary",
+      "filter": ["!=", ["get", "maritime"], 1],
+      "paint": {
+        "line-color": "#766653",
+        "line-opacity": 0.08,
+        "line-width": 1.2,
+        "line-dasharray": [3, 3]
+      }
+    }
+  ]
+}

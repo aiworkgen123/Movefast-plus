@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "war-chess-wc04-adaptive-style.v2",
+  "pieceScale": {
+    "pawn": 0.37,
+    "knight": 0.59,
+    "bishop": 0.53,
+    "rook": 0.53,
+    "queen": 0.59,
+    "king": 0.59
+  },
+  "contourWidth": {
+    "white": 7.2,
+    "black": 2.2
+  },
+  "pawnShape": {
+    "bodyWidthFactor": 1.25,
+    "baseWidthFactor": 0.9
+  }
+}

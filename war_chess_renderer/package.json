@@ -1,0 +1,36 @@
+{
+  "name": "movefast-war-chess-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./entry": "./src/entry.ts",
+    "./chess-presets": "./src/chess-presets.ts"
+  },
+  "dependencies": {
+    "@react-three/fiber": "9.6.1",
+    "@remotion/bundler": "4.0.509",
+    "@remotion/captions": "4.0.509",
+    "@remotion/fonts": "4.0.509",
+    "@remotion/media": "4.0.509",
+    "@remotion/renderer": "4.0.509",
+    "@remotion/three": "4.0.509",
+    "chess.js": "1.4.0",
+    "maplibre-gl": "4.7.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.509",
+    "three": "0.179.1",
+    "zod": "4.3.6"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/three": "0.179.0",
+    "typescript": "5.9.3"
+  }
+}

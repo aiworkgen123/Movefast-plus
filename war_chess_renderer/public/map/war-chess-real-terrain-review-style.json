@@ -1,0 +1,137 @@
+{
+  "version": 8,
+  "name": "War Chess real terrain review plate",
+  "sources": {
+    "openmaptiles": {
+      "type": "vector",
+      "url": "https://tiles.openfreemap.org/planet",
+      "attribution": "© OpenStreetMap contributors · OpenFreeMap"
+    },
+    "terrarium": {
+      "type": "raster-dem",
+      "tiles": [
+        "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+      ],
+      "tileSize": 256,
+      "maxzoom": 15,
+      "encoding": "terrarium",
+      "attribution": "Elevation Tiles © AWS Open Data"
+    }
+  },
+  "layers": [
+    {
+      "id": "paper",
+      "type": "background",
+      "paint": {"background-color": "#c9c1af"}
+    },
+    {
+      "id": "hillshade",
+      "type": "hillshade",
+      "source": "terrarium",
+      "paint": {
+        "hillshade-exaggeration": 0.72,
+        "hillshade-illumination-direction": 318,
+        "hillshade-shadow-color": "#4e554c",
+        "hillshade-highlight-color": "#f6edd8",
+        "hillshade-accent-color": "#777b69"
+      }
+    },
+    {
+      "id": "landcover",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landcover",
+      "paint": {
+        "fill-color": [
+          "match",
+          ["get", "class"],
+          "wood", "#89937c",
+          "grass", "#aeb292",
+          "farmland", "#c0b594",
+          "wetland", "#8fa19a",
+          "#b7b09a"
+        ],
+        "fill-opacity": 0.34
+      }
+    },
+    {
+      "id": "landuse",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "landuse",
+      "paint": {
+        "fill-color": "#b5aa8e",
+        "fill-opacity": 0.16
+      }
+    },
+    {
+      "id": "water",
+      "type": "fill",
+      "source": "openmaptiles",
+      "source-layer": "water",
+      "paint": {
+        "fill-color": "#71898c",
+        "fill-opacity": 0.92
+      }
+    },
+    {
+      "id": "water-edge",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "water",
+      "paint": {
+        "line-color": "#425b60",
+        "line-opacity": 0.72,
+        "line-width": 1.8
+      }
+    },
+    {
+      "id": "waterways",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "waterway",
+      "paint": {
+        "line-color": "#536f74",
+        "line-opacity": 0.78,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.2, 12, 3.4]
+      }
+    },
+    {
+      "id": "road-casing",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "transportation",
+      "filter": ["match", ["get", "class"], ["primary", "secondary", "tertiary"], true, false],
+      "paint": {
+        "line-color": "#efe6d4",
+        "line-opacity": 0.62,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.8, 12, 5.5]
+      }
+    },
+    {
+      "id": "roads",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "transportation",
+      "filter": ["match", ["get", "class"], ["primary", "secondary", "tertiary"], true, false],
+      "paint": {
+        "line-color": "#756c5d",
+        "line-opacity": 0.54,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.65, 12, 2.2]
+      }
+    },
+    {
+      "id": "boundaries",
+      "type": "line",
+      "source": "openmaptiles",
+      "source-layer": "boundary",
+      "filter": ["!=", ["get", "maritime"], 1],
+      "paint": {
+        "line-color": "#766b59",
+        "line-opacity": 0.15,
+        "line-width": 1.1,
+        "line-dasharray": [3, 3]
+      }
+    }
+  ]
+}

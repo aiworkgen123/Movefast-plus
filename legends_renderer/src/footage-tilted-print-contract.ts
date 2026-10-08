@@ -1,0 +1,3 @@
+import {repairText} from './contract.ts';import {repairFrameMedia,type FrameMedia} from './frame-media-contract.ts';export type FootageTiltedPrintProps=Readonly<{media:FrameMedia;label:string}>;
+export const footageTiltedPrintTextLimits={label:{minWords:1,maxWords:8,maxChars:64}} as const;export const footageTiltedPrintDuration={minSeconds:2,maxSeconds:10};
+export const repairFootageTiltedPrint=(input:unknown):FootageTiltedPrintProps|null=>{if(!input||typeof input!=='object')return null;const v=input as Record<string,unknown>,media=repairFrameMedia(v.media),label=repairText(v.label,footageTiltedPrintTextLimits.label);return media&&label?{media,label}:null;};

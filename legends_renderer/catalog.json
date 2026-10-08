@@ -1,0 +1,1233 @@
+{
+ "bar-chart": {
+  "file": "bar-chart.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3.5,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   },
+   "label": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 18
+   },
+   "valueTitle": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 26
+   },
+   "categoryTitle": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 26
+   }
+  }
+ },
+ "blur-fill": {
+  "file": "blur-fill.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 0.3,
+   "maxSeconds": 12
+  },
+  "textLimits": {}
+ },
+ "boxed-title": {
+  "file": "boxed-title.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 26
+   }
+  }
+ },
+ "chapter-card": {
+  "file": "chapter-card.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 7
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 64
+   },
+   "subtitle": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "chart": {
+  "file": "chart.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   },
+   "unit": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 20
+   }
+  }
+ },
+ "checklist": {
+  "file": "checklist.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "comparison": {
+  "file": "comparison.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "contact-strip": {
+  "file": "contact-strip.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "corner-date": {
+  "file": "corner-date.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 1.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "date": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 22
+   },
+   "year": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 6
+   }
+  }
+ },
+ "country-flags-map": {
+  "file": "country-flags-map.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2.5,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "caption": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 26
+   }
+  }
+ },
+ "date-highlight": {
+  "file": "date-highlight.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "date": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 16
+   },
+   "year": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 6
+   }
+  }
+ },
+ "document-reveal": {
+  "file": "document-reveal.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 64
+   },
+   "detailLabel": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "double-portrait": {
+  "file": "double-portrait.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "name": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 22
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 26
+   }
+  }
+ },
+ "drop-headline": {
+  "file": "drop-headline.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 48
+   }
+  }
+ },
+ "emphasis": {
+  "file": "emphasis.tsx",
+  "layer": "overlay",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 6
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "evidence-callout": {
+  "file": "evidence-callout.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 44
+   },
+   "body": {
+    "minWords": 4,
+    "maxWords": 30,
+    "maxChars": 190
+   },
+   "source": {
+    "minWords": 2,
+    "maxWords": 14,
+    "maxChars": 90
+   }
+  }
+ },
+ "evidence-leaders": {
+  "file": "evidence-leaders.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "labels": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   }
+  }
+ },
+ "film-burn": {
+  "file": "film-burn.tsx",
+  "layer": "overlay",
+  "duration": {
+   "minSeconds": 0.4,
+   "maxSeconds": 1
+  },
+  "textLimits": {}
+ },
+ "footage-blur-fill": {
+  "file": "footage-blur-fill.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-chalkboard": {
+  "file": "footage-chalkboard.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-crt": {
+  "file": "footage-crt.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-monitor": {
+  "file": "footage-monitor.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-news-band": {
+  "file": "footage-news-band.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-paper": {
+  "file": "footage-paper.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-tilted-print": {
+  "file": "footage-tilted-print.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "footage-video-player": {
+  "file": "footage-video-player.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "grid-flash": {
+  "file": "grid-flash.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 0.03333333333333333,
+   "maxSeconds": 1
+  },
+  "textLimits": {}
+ },
+ "headline-article": {
+  "file": "headline-article.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "sourceCredit": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 80
+   }
+  }
+ },
+ "impact-word": {
+  "file": "impact-word.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "word": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 12
+   }
+  }
+ },
+ "inset-clip": {
+  "file": "inset-clip.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "caption": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   }
+  }
+ },
+ "inset-portrait": {
+  "file": "inset-portrait.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "name": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 22
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   }
+  }
+ },
+ "kicker-payoff": {
+  "file": "kicker-payoff.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 1.5,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "kicker": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 24
+   },
+   "subtitle": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 28
+   },
+   "word": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 10
+   }
+  }
+ },
+ "line-plot": {
+  "file": "line-plot.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 4,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   },
+   "label": {
+    "minWords": 1,
+    "maxWords": 2,
+    "maxChars": 10
+   },
+   "xTitle": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 30
+   },
+   "yTitle": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 24
+   }
+  }
+ },
+ "map-circle": {
+  "file": "map-circle.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "caption": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   }
+  }
+ },
+ "map-with-arrows": {
+  "file": "map-with-arrows.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "match-cut": {
+  "file": "match-cut.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "measure-radar": {
+  "file": "measure-radar.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "value": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 9
+   },
+   "label": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 22
+   }
+  }
+ },
+ "name-label": {
+  "file": "name-label.tsx",
+  "layer": "overlay",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "name": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 64
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 80
+   }
+  }
+ },
+ "news-ticker": {
+  "file": "news-ticker.tsx",
+  "layer": "overlay",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 24
+   },
+   "text": {
+    "minWords": 1,
+    "maxWords": 36,
+    "maxChars": 220
+   }
+  }
+ },
+ "number-statistic": {
+  "file": "number-statistic.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   },
+   "source": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 80
+   }
+  }
+ },
+ "number-tag": {
+  "file": "number-tag.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 1.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "unit": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 22
+   }
+  }
+ },
+ "object-fly-in": {
+  "file": "object-fly-in.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "pan-sentence": {
+  "file": "pan-sentence.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 14
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 3,
+    "maxWords": 14,
+    "maxChars": 90
+   },
+   "followUp": {
+    "minWords": 3,
+    "maxWords": 12,
+    "maxChars": 60
+   }
+  }
+ },
+ "paper-label": {
+  "file": "paper-label.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 24
+   }
+  }
+ },
+ "part-callouts": {
+  "file": "part-callouts.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "labels": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 20
+   }
+  }
+ },
+ "percent-gauge": {
+  "file": "percent-gauge.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 32
+   },
+   "caption": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 56
+   }
+  }
+ },
+ "photo-spotlight": {
+  "file": "photo-spotlight.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "sourceCredit": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 80
+   }
+  }
+ },
+ "phrase-boxes": {
+  "file": "phrase-boxes.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "phrases": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 22
+   }
+  }
+ },
+ "portrait-name": {
+  "file": "portrait-name.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "name": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 26
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 44
+   }
+  }
+ },
+ "portrait-quote": {
+  "file": "portrait-quote.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "quote": {
+    "minWords": 3,
+    "maxWords": 30,
+    "maxChars": 160
+   },
+   "author": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 28
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 44
+   }
+  }
+ },
+ "question-pivot": {
+  "file": "question-pivot.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "question": {
+    "minWords": 1,
+    "maxWords": 12,
+    "maxChars": 96
+   },
+   "pivot": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "quote": {
+  "file": "quote.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "quote": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 100
+   },
+   "attribution": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 64
+   },
+   "context": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "red-dossier": {
+  "file": "red-dossier.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "name": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 24
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 32
+   }
+  }
+ },
+ "red-wash": {
+  "file": "red-wash.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 1.2,
+   "maxSeconds": 4
+  },
+  "textLimits": {}
+ },
+ "route-map": {
+  "file": "route-map.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 14
+  },
+  "textLimits": {
+   "label": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 34
+   }
+  }
+ },
+ "share-pie": {
+  "file": "share-pie.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3.5,
+   "maxSeconds": 12
+  },
+  "textLimits": {
+   "caption": {
+    "minWords": 1,
+    "maxWords": 5,
+    "maxChars": 26
+   },
+   "label": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 24
+   }
+  }
+ },
+ "social-post": {
+  "file": "social-post.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "author": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 32
+   },
+   "copy": {
+    "minWords": 1,
+    "maxWords": 32,
+    "maxChars": 220
+   }
+  }
+ },
+ "span-timeline": {
+  "file": "span-timeline.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 15
+  },
+  "textLimits": {
+   "startTag": {
+    "minWords": 1,
+    "maxWords": 2,
+    "maxChars": 12
+   },
+   "endTag": {
+    "minWords": 1,
+    "maxWords": 2,
+    "maxChars": 14
+   },
+   "startLabel": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 22
+   },
+   "endLabel": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 22
+   },
+   "span": {
+    "minWords": 1,
+    "maxWords": 2,
+    "maxChars": 14
+   }
+  }
+ },
+ "stamp": {
+  "file": "stamp.tsx",
+  "layer": "overlay",
+  "duration": {
+   "minSeconds": 1,
+   "maxSeconds": 6
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 24
+   }
+  }
+ },
+ "stat-pill": {
+  "file": "stat-pill.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 1.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "value": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 8
+   },
+   "label": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 24
+   }
+  }
+ },
+ "table-scorecard": {
+  "file": "table-scorecard.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "timeline": {
+  "file": "timeline.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 9
+  },
+  "textLimits": {
+   "title": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "typed-label": {
+  "file": "typed-label.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "name": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 34
+   },
+   "role": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 40
+   }
+  }
+ },
+ "wave-timeline": {
+  "file": "wave-timeline.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3.5,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "leftTitle": {
+    "minWords": 1,
+    "maxWords": 2,
+    "maxChars": 14
+   },
+   "rightTitle": {
+    "minWords": 1,
+    "maxWords": 2,
+    "maxChars": 14
+   },
+   "startLabel": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 24
+   },
+   "endLabel": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 24
+   },
+   "milestone": {
+    "minWords": 1,
+    "maxWords": 3,
+    "maxChars": 24
+   }
+  }
+ },
+ "word-highlight": {
+  "file": "word-highlight.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 3,
+   "maxSeconds": 7
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 2,
+    "maxWords": 8,
+    "maxChars": 80
+   },
+   "highlight": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 80
+   }
+  }
+ },
+ "word-reveal": {
+  "file": "word-reveal.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 10
+  },
+  "textLimits": {
+   "text": {
+    "minWords": 3,
+    "maxWords": 16,
+    "maxChars": 110
+   }
+  }
+ },
+ "world-tour-map": {
+  "file": "world-tour-map.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 15
+  },
+  "textLimits": {
+   "caption": {
+    "minWords": 1,
+    "maxWords": 6,
+    "maxChars": 34
+   }
+  }
+ },
+ "year-date": {
+  "file": "year-date.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 6
+  },
+  "textLimits": {
+   "display": {
+    "minWords": 1,
+    "maxWords": 4,
+    "maxChars": 32
+   },
+   "context": {
+    "minWords": 1,
+    "maxWords": 8,
+    "maxChars": 64
+   }
+  }
+ },
+ "year-drop": {
+  "file": "year-drop.tsx",
+  "layer": "fullscreen",
+  "duration": {
+   "minSeconds": 2,
+   "maxSeconds": 8
+  },
+  "textLimits": {
+   "year": {
+    "minWords": 1,
+    "maxWords": 1,
+    "maxChars": 6
+   }
+  }
+ }
+}

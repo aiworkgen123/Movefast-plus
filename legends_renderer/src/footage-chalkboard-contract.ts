@@ -1,0 +1,3 @@
+import {repairText} from './contract.ts';import {repairFrameMedia,type FrameMedia} from './frame-media-contract.ts';export type FootageChalkboardProps=Readonly<{media:FrameMedia;label:string}>;
+export const footageChalkboardTextLimits={label:{minWords:1,maxWords:8,maxChars:64}} as const;export const footageChalkboardDuration={minSeconds:2,maxSeconds:10};
+export const repairFootageChalkboard=(input:unknown):FootageChalkboardProps|null=>{if(!input||typeof input!=='object')return null;const v=input as Record<string,unknown>,media=repairFrameMedia(v.media),label=repairText(v.label,footageChalkboardTextLimits.label);return media&&label?{media,label}:null;};

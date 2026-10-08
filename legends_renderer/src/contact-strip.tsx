@@ -1,0 +1,12 @@
+import React from 'react';import {AbsoluteFill,Img,staticFile} from 'remotion';
+import {validContext,type ComponentRenderProps,type VisualComponent} from './contract.ts';import {repairContactStrip,contactStripDuration,contactStripTextLimits,type ContactStripProps} from './contact-strip-contract.ts';import {contactStripState,contactStripLayout} from './contact-strip-state.ts';import {SkinGrade, SkinSurface} from './skin-layers.tsx';
+export const ContactStrip:React.FC<ComponentRenderProps<ContactStripProps>>=({props,skin,context})=>{
+ const safe=repairContactStrip(props);if(!safe||!validContext(context,contactStripDuration))return null;const t=skin.contactStrip,s=context.width/1920,state=contactStripState(context,skin,safe.photos.length),layout=contactStripLayout(context,skin),number=skin.fonts[t.numberFont];
+ return <AbsoluteFill style={{background:skin.palette.background,color:skin.palette.text,padding:t.inset*s,opacity:state.opacity}}>
+ <div style={{fontFamily:skin.fonts.title.family,fontWeight:skin.fonts.title.weight,fontSize:t.titleSize*s}}>{safe.title}</div>
+ <div style={{position:'absolute',left:t.inset*s,right:t.inset*s,top:context.height*0.3,height:context.height*0.5,display:'flex',gap:t.gap*s}}>{safe.photos.map((p,i)=><div key={i} style={{flex:1,minWidth:0,background:skin.palette.paper,padding:t.border*s,opacity:state.photos[i].amount,transform:`translateY(${(1-state.photos[i].amount)*t.travel*s}px) rotate(${state.photos[i].rotation}deg)`}}>
+ <div style={{height:layout.perforationHeight,background:`repeating-linear-gradient(90deg,${skin.palette.paperInk} 0 ${layout.perforationWidth}px,transparent ${layout.perforationWidth}px ${layout.perforationPitch}px)`}}/>
+ <div style={{height:`calc(100% - ${layout.mediaReserve}px)`,position:'relative'}}><SkinGrade skin={skin}><Img src={staticFile(p.path)} style={{width:'100%',height:'100%',objectFit:'contain'}}/></SkinGrade></div>
+ <div style={{fontFamily:number.family,fontWeight:number.weight,letterSpacing:number.letterSpacing*s,lineHeight:1,fontSize:layout.numberSize,color:skin.palette.paperInk,marginTop:layout.numberTop}}>{String(i+1).padStart(2,'0')}</div>
+ </div>)}</div><SkinSurface skin={skin} context={context} dust={true}/></AbsoluteFill>;
+};export const contactStrip:VisualComponent<ContactStripProps>={id:'contact-strip',layer:'fullscreen',duration:contactStripDuration,textLimits:contactStripTextLimits,repair:repairContactStrip,render:ContactStrip};

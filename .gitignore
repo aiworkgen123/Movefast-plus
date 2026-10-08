@@ -1,0 +1,25 @@
+# secrets and local state
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+# heavy or generated
+node_modules/
+**/bundle/
+output/
+preview/
+motion_preview/
+farm_queue/
+inputs/*
+!inputs/.gitkeep
+samples/
+assets/brand/
+*.tgz
+*.part
+# run logs / scratch
+run*.log
+cloud*.log
+seg*.tgz

@@ -1,0 +1,3 @@
+import {repairText} from './contract.ts';import {repairFrameMedia,type FrameMedia} from './frame-media-contract.ts';export type FootageMonitorProps=Readonly<{media:FrameMedia;label:string}>;
+export const footageMonitorTextLimits={label:{minWords:1,maxWords:8,maxChars:64}} as const;export const footageMonitorDuration={minSeconds:2,maxSeconds:10};
+export const repairFootageMonitor=(input:unknown):FootageMonitorProps|null=>{if(!input||typeof input!=='object')return null;const v=input as Record<string,unknown>,media=repairFrameMedia(v.media),label=repairText(v.label,footageMonitorTextLimits.label);return media&&label?{media,label}:null;};

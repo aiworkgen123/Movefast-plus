@@ -1,0 +1,2 @@
+import type {FrameContext} from './contract.ts';import type {Skin} from './skins.ts';import {entranceOpacity,progress} from './motion.ts';
+export const objectFlyInState=(c:FrameContext,skin:Skin)=>{const t=skin.objectFlyIn,amount=progress(c.frame,c.durationInFrames*t.start,c.durationInFrames*t.settle,skin.motion.entrance);return {opacity:entranceOpacity(c,skin),amount,x:amount===1?0:(1-amount)*t.travel,rotation:amount===1?0:(1-amount)*t.rotation,scale:t.startScale+(1-t.startScale)*amount};};

@@ -1,0 +1,15 @@
+{
+  "name": "mrtruth-renderer",
+  "private": true,
+  "type": "module",
+  "description": "Mr Truth's compositor: OmharRegidor's video-generator Remotion code (src/, synced by update_mrtruth.sh) plus MoveFast's render entry (movefast/).",
+  "dependencies": {
+    "@remotion/bundler": "4.0.503",
+    "@remotion/renderer": "4.0.503",
+    "@remotion/transitions": "4.0.503",
+    "remotion": "4.0.503",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "4.4.3"
+  }
+}

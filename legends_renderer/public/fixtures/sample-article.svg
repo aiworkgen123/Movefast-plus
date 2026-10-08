@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1500" viewBox="0 0 1200 1500">
+<rect width="1200" height="1500" fill="#faf7ee"/><g fill="#262626" font-family="Arial, sans-serif">
+<text x="96" y="126" font-size="68" font-weight="bold">SAMPLE ARTICLE</text>
+<text x="96" y="210" font-size="34" font-weight="bold">SELF-AUTHORED TEST PAGE — NOT NEWS</text>
+<text x="96" y="270" font-size="26">All content below is harmless layout practice.</text>
+<path d="M 96 320 H 1104" stroke="#777" stroke-width="2"/>
+<text x="96" y="390" font-size="26">TEST LINE SELECTED FOR THE MARKER</text>
+<text x="96" y="490" font-size="46" font-weight="bold">Practice teams test the paper layout</text>
+<text x="96" y="596" font-size="30">This page exists only to verify a moving image and highlight.</text>
+<text x="96" y="654" font-size="30">The line above remains part of the supplied SVG image.</text>
+<text x="96" y="712" font-size="30">No real publication, event or factual claim is represented.</text>
+<path d="M 96 800 H 1104" stroke="#777" stroke-width="2"/>
+<text x="96" y="912" font-size="40">Layout notes</text><text x="96" y="980" font-size="30">A local image establishes before the camera approaches.</text>
+<text x="96" y="1040" font-size="30">Source credit stays in a separate fixed area.</text>
+<text x="96" y="1340" font-size="34" font-weight="bold">SAMPLE ARTICLE — FOR TESTING ONLY</text></g></svg>
