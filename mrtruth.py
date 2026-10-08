@@ -60,11 +60,11 @@ LIBRARY = {
     "shadow-up":      (True, 1, 2.0, 5.0, None, "not-opening", [], {"headline": 32}),
     "P08":            (True, 1, 2.0, 8.0, None, "not-opening", [], {}),
     "P04":            (True, 1, 2.0, 8.0, None, "not-opening", [], {"headline": 19, "kicker": 35}),
-    "P02":            (True, 1, 3.0, 8.0, None, "not-opening", [], {"headline": 46, "kicker": 30}),
+    "P02":            (True, 1, 3.0, 8.0, 2, "not-opening", [], {"headline": 46, "kicker": 30}),
     "P09":            (True, 1, 3.0, 8.0, None, "not-opening", [], {"headline": 51, "kicker": 48}),
     "P05":            (True, 1, 4.0, 8.0, None, "not-opening", [], {"headline": 25, "kicker": 38, "lines": 48}),
-    "chapter-title":  (True, 0, 4.0, 8.0, 1, "any", ["chapter-plate"], {}),
-    "chapter-plate":  (True, 1, 2.5, 8.0, 5, "any", [], {}),
+    "chapter-title":  (False, 0, 4.0, 8.0, 1, "any", ["chapter-plate"], {}),    # off: owner 2026-10-08
+    "chapter-plate":  (True, 1, 2.5, 8.0, 3, "any", [], {}),                    # 2-3 a film, mandatory
     "top-title":      (True, 1, 3.1, 8.0, 6, "any", ["shadow-up", "framed-card"], {"headline": 21, "lines": 21}),
     "corner-label":   (True, 1, 3.4, 8.0, 6, "any", ["framed-card"], {"headline": 18, "kicker": 14}),
     "two-photo-zoom": (True, 2, 2.7, 5.0, None, "any", ["P22", "P03"], {"headline": 24, "lines": 24}),
@@ -502,7 +502,7 @@ def _dur(r) -> float:
     return (r["endMs"] - r["startMs"]) / 1000.0
 
 
-def _can(rows: list, i: int, tid: str) -> bool:
+def _can(rows: list, i: int, tid: str, ignore_len: bool = False) -> bool:
     """May template `tid` go on shot i: switched on, the shot free, under its per-film cap, allowed at this position,
     not a year shot (those belong to P12/P14), and long enough for its animation to finish."""
     on, pics, lo, hi, cap, pos, _, _ = LIBRARY[tid]
@@ -514,6 +514,8 @@ def _can(rows: list, i: int, tid: str) -> bool:
         return False
     if tid not in ("P12", "P14", "chapter-plate", "chapter-title") and i and _year_in(rows[i]["text"]):
         return False                 # a shot that speaks a year belongs to P12/P14 (the repo's G15)
+    if ignore_len:
+        return True
     return _dur(rows[i]) * FPS >= BUILD_FRAMES.get(tid, 0) + 4 and (_dur(rows[i]) <= hi + 0.05 or tid in ("P12", "P03"))
 
 
@@ -531,7 +533,7 @@ def _fall_back(rows: list, i: int, tid: str, why: str = "") -> None:
             return
 
 
-def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dict, title: str = "") -> None:
+def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dict, title: str = ""):
     """Seat each planned template on a shot that can carry it, check its words, fill the auto ones (years, chapters,
     the opening title, the gallery). Writes row["device"] (or leaves it None)."""
     at_ms = _char_ms(script, cues)
@@ -627,6 +629,7 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
         quoted = set(_content(" ".join([str(o.get("headline") or "")] + [str(x) for x in o.get("lines") or []])))
         said = lambda k: (len(quoted & set(_content(window(k, 1)))) / len(quoted)) if quoted else 0.0
         near = range(max(0, home - 3), min(len(rows), home + 4))
+        done = False
         for i in sorted(near, key=lambda k: (-round(said(k), 2), abs(k - home))):
             chain, done = [tid] + list(LIBRARY[tid][6]), False
             for t in chain:
@@ -638,6 +641,17 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
                         break
             if done:
                 break
+        if not done:          # no shot long enough: seat it on its own shot and hold the picture (owner 2026-10-08)
+            for i in sorted(near, key=lambda k: (-round(said(k), 2), abs(k - home))):
+                if i < len(rows) and _can(rows, i, tid, ignore_len=True) and not rows[i].get("device"):
+                    dev = build(tid, o, i)
+                    if dev:
+                        put(i, dev)
+                        _hold(engine, rows, i, _need_s(tid), tid)
+                        starts = [r["startMs"] for r in rows]
+                        break
+            else:
+                engine.log(f"      planned {tid} '{o.get('headline', '')}' found no shot (words not spoken nearby)")
 
     # every spoken four-figure year takes P12 where nothing else sits (T-2), never two in a row
     for i, r in enumerate(rows):
@@ -657,32 +671,7 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
             rows[0]["device"] = {"id": "P03", "kicker": kick, "headline": head, "highlightWords": [re.sub(r"[^\w'-]", "", hw) or hw]}
             used["P03"] = used.get("P03", 0) + 1
 
-    # chapters: the dossier's sections. The first turn in the first half takes chapter-title, the rest chapter-plate
-    sections = dossier.get("sections") or []
-    total_ms = rows[-1]["endMs"]
-    last_turn = -1e12
-    for s in sections[1:]:
-        head = str(s.get("title") or "").strip()
-        if not head or len(head) > 25:
-            engine.log(f"      chapter '{head}' skipped (title over 25 characters)")
-            continue
-        ms = at_ms(int(s.get("startChar") or 0))
-        if ms < CHAPTER_FIRST_S * 1000 or ms - last_turn < CHAPTER_GAP_S * 1000:
-            engine.log(f"      chapter '{head}' at {ms / 1000:.0f}s skipped (hook or within {CHAPTER_GAP_S:.0f}s of the last)")
-            continue                     # a chapter is a real turn: never in the hook, never one on top of another
-        last_turn = ms
-        i = min(range(len(rows)), key=lambda k: abs(rows[k]["startMs"] - ms))
-        for k in (i, i + 1):
-            if k < len(rows) and not rows[k].get("device"):
-                if ms < total_ms / 2 and can("chapter-title", k):
-                    put(k, {"id": "chapter-title", "caption": head})
-                elif can("chapter-plate", k):
-                    put(k, {"id": "chapter-plate", "heading": head})
-                else:
-                    engine.log(f"      chapter '{head}' could not sit on shot {k} ({dur(rows[k]):.1f}s)")
-                    continue
-                rows[k]["section_turn"] = True
-                break
+    sections = dossier.get("sections") or []        # chapters: fill_overlays() (owner 2026-10-08)
 
     # the gallery strip, once, on the shot that ends the hook (the first section, else ~30 s in)
     if not used.get("gallery-strip"):
@@ -704,6 +693,180 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
             used["gallery-strip"] = 1
             break
     engine.log("  templates: " + ", ".join(f"{k}×{v}" for k, v in sorted(used.items(), key=lambda kv: -kv[1])))
+    return build
+
+
+# ── 4b. overlay coverage (owner 2026-10-08): chapters mandatory, every group used, nothing dominates ───────────
+CHAPTERS_MIN, CHAPTERS_MAX = 2, 3
+OVERLAY_EVERY_S = 12.0                  # aim: something on screen about every 10-15 s (typed captions included)
+TYPED_CAPTION_SLOTS = 5                 # reserved for typed_captions(), which runs after this
+OVERLAY_GROUPS = {                      # group: (templates, minimum a film, maximum a film)
+    "name label": (["corner-label", "P04"], 1, 4),
+    "source": (["P08", "framed-card"], 1, 3),
+    "question": (["P09"], 0, 2),
+    "compare / list": (["two-photo-zoom", "bullet-checklist", "P05"], 1, 3),
+    "running title": (["top-title"], 1, 3),
+    "spoken line": (["shadow-up"], 1, 3),
+    "editorial card": (["P02"], 0, 2),
+    "year": (["P12", "P14"], 0, 3),
+    "multi-picture": (["P22", "P19", "gallery-strip"], 0, 2),
+}
+TEMPLATE_SPECS = """- corner-label: a place or institution label, top right. headline = the name (<= 18 chars), kicker = where/when (<= 14).
+- P04: a lower-left label naming who or what is on screen. headline = the name (<= 19), kicker = role or detail (<= 35).
+- P08: the source document shown full screen (no words). Use where the narrator cites or reads a text.
+- framed-card: the picture framed like an archive print. headline = a short caption (<= 32).
+- two-photo-zoom: two things compared. headline = the left one (<= 24), lines[0] = the right one (<= 24).
+- bullet-checklist: up to 3 ordered points. headline = the title (<= 19), lines = 1-3 points (<= 21 each).
+- P05: text left, picture right. headline (<= 25, words <= 11 letters), kicker = eyebrow (<= 38), lines[0] = support line (<= 48).
+- top-title: a running title, top left, two short lines. headline = line 1 (<= 21), lines[0] = line 2 (<= 21).
+- shadow-up: one spoken line set in big type. headline = the line (<= 32), no year.
+- P09: a question card. headline = the question, ending in '?' (<= 51); only where the narrator asks it.
+- P02: an editorial card. kicker = small label (<= 30), headline (<= 46, no year)."""
+
+FILL_PROMPT = """You are finishing the on-screen text plan of a photo documentary (channel: Mr Truth, dark and mysterious).
+The film already carries the templates marked [TAKEN] below. Add what is missing.
+
+1. CHAPTERS (mandatory): {chapters_need}. A chapter heading sits over the photo with a brown rule under it. Put each on
+   the shot where a real new movement of the story begins, never before {first:.0f} s, spread across the film (at least
+   {gap:.0f} s apart). Heading: 2-5 words, Title Case, at most 25 characters, no full stop. These sections were planned
+   (use them when they fit, shortened if needed): {sections}
+
+2. OVERLAYS: add about {extra} more, spread through the film, choosing from the groups still short:
+{short}
+   The templates:
+{specs}
+   EVERY word you write must be words the narrator actually says on that shot or the two around it (the system checks
+   this), except chapter headings. Never two of the same template within 30 s. Never on a [TAKEN] shot.
+
+THE FILM (shot number, start second, the words spoken on it):
+{shots}
+
+Return {{"chapters": [{{"shot": n, "heading": "..."}}], "overlays": [{{"shot": n, "templateId": "...", "headline": "...",
+"kicker": "...", "lines": ["..."]}}]}}"""
+
+
+def _hold(engine, rows: list, i: int, secs: float, why: str) -> None:
+    """Keep shot i on screen for at least `secs`: the shots after it fold into it (their words are still spoken, under
+    the same picture). A template on a folded shot gives way; a chapter, a caption or the opening never does."""
+    r = rows[i]
+    while _dur(r) < secs and i + 1 < len(rows):
+        nxt = rows[i + 1]
+        if nxt.get("section_turn") or nxt.get("typedCaption") or (nxt.get("device") or {}).get("id") in ("P03", "gallery-strip"):
+            break
+        if nxt.get("device"):
+            engine.log(f"      template {nxt['device']['id']} at {nxt['startMs'] / 1000:.0f}s gives way to {why}")
+        r["endMs"] = nxt["endMs"]
+        r["held"] = r.get("held", []) + [nxt["text"]] + nxt.get("held", [])
+        del rows[i + 1]
+
+
+def _need_s(tid: str) -> float:
+    return max(LIBRARY[tid][2], (BUILD_FRAMES.get(tid, 0) + 4) / FPS) + 0.3
+
+
+def _group_of(tid: str) -> str:
+    return next((g for g, (ts, _, _) in OVERLAY_GROUPS.items() if tid in ts), "")
+
+
+def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, build, force: bool = False) -> None:
+    """After assign(): 2-3 chapter plates (mandatory), then more overlays until every group has its minimum and the
+    film carries something about every OVERLAY_EVERY_S. A placement that needs a longer shot holds its picture."""
+    total_s = rows[-1]["endMs"] / 1000.0
+    has = lambda tid: sum(1 for r in rows if (r.get("device") or {}).get("id") == tid)
+    count = lambda g: sum(has(t) for t in OVERLAY_GROUPS[g][0])
+    want_total = max(0, round(total_s / OVERLAY_EVERY_S) - TYPED_CAPTION_SLOTS)
+    placed_now = sum(1 for r in rows if r.get("device") and r["device"]["id"] != "photo-pop")
+    extra = max(0, want_total - placed_now)
+    short = [f"   - {g}: {', '.join(ts)} (has {count(g)}, wants at least {lo}, at most {hi})"
+             for g, (ts, lo, hi) in OVERLAY_GROUPS.items() if count(g) < hi and any(LIBRARY[t][0] for t in ts)]
+    taken = lambda r: r.get("device") is not None
+    shots = "\n".join(f"{i}\t{r['startMs'] / 1000:.1f}\t" + ("[TAKEN] " if taken(r) else "") + r["text"]
+                       for i, r in enumerate(rows))
+    secs = [f"'{s.get('title')}' at ~{int(s.get('startChar') or 0)} chars" for s in (dossier.get("sections") or [])[1:]]
+    prompt = FILL_PROMPT.format(chapters_need=f"{CHAPTERS_MIN}-{CHAPTERS_MAX} chapter headings",
+                                first=CHAPTER_FIRST_S, gap=max(30.0, total_s / (CHAPTERS_MAX + 1)),
+                                sections="; ".join(secs) or "none", extra=extra, short="\n".join(short),
+                                specs=TEMPLATE_SPECS, shots=shots)
+    out = job / "mrtruth" / "overlays_fill.json"
+    key = _hash([prompt])
+    got = None if force else _load(out)
+    if not (isinstance(got, dict) and got.get("key") == key):
+        try:
+            got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL), key=key)
+        except RuntimeError as e:
+            engine.log(f"  overlay fill: {e}")
+            return
+        _dump(out, got)
+    snap = list(rows)                                             # the shot numbers Claude saw, by row identity
+
+    def at(n: int) -> int:
+        return next((j for j, x in enumerate(rows) if 0 <= n < len(snap) and x is snap[n]), -1)
+
+    # chapters first: mandatory, so they may take a shot from a lesser template and hold their picture
+    chapters, last = 0, -1e9
+    for c in sorted(got.get("chapters") or [], key=lambda c: int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1):
+        try:
+            k = at(int(c["shot"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
+        if k < 0 or not head or chapters >= CHAPTERS_MAX:
+            continue
+        if len(head) > 25:
+            head = " ".join(head.split()[:4])[:25].rstrip(" ,:-")
+        head = " ".join(w.lower() if j and w.lower() in ("of", "the", "a", "an", "and", "in", "on", "to", "for", "at", "by")
+                        else w for j, w in enumerate(head.split()))
+        r = rows[k]
+        if r["startMs"] < CHAPTER_FIRST_S * 1000 or r["startMs"] - last < 30000 or (r.get("device") or {}).get("id") in ("P03", "gallery-strip"):
+            engine.log(f"      chapter '{head}' at shot {k} skipped (opening, too close, or the title shot)")
+            continue
+        if r.get("device"):
+            engine.log(f"      template {r['device']['id']} at {r['startMs'] / 1000:.0f}s gives way to chapter '{head}'")
+        r["device"], r["section_turn"] = {"id": "chapter-plate", "heading": head}, True
+        _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
+        chapters, last = chapters + 1, r["startMs"]
+        engine.log(f"      chapter '{head}' at {r['startMs'] / 1000:.0f}s")
+    if chapters < CHAPTERS_MIN:                 # never short: evenly spaced turns on free shots, the dossier's titles
+        titles = [str(s.get("title") or "") for s in (dossier.get("sections") or [])[1:]] or ["The Turn", "What Remained"]
+        for f in [x / (CHAPTERS_MIN + 1) for x in range(1, CHAPTERS_MIN + 1)][chapters:]:
+            k = min((k for k in range(1, len(rows)) if not rows[k].get("section_turn") and (rows[k].get("device") or {}).get("id") not in ("P03", "gallery-strip")),
+                    key=lambda k: abs(rows[k]["startMs"] - f * total_s * 1000), default=None)
+            if k is None:
+                break
+            head = " ".join(titles[min(chapters, len(titles) - 1)].split()[:4])[:25].rstrip(" ,:-")
+            rows[k]["device"], rows[k]["section_turn"] = {"id": "chapter-plate", "heading": head}, True
+            _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
+            chapters += 1
+            engine.log(f"      chapter '{head}' at {rows[k]['startMs'] / 1000:.0f}s (filled)")
+
+    # then the overlays, through the same word checks as the planner's own (build), on free shots, groups capped
+    for o in sorted(got.get("overlays") or [], key=lambda o: int(o.get("shot", -1)) if str(o.get("shot", "")).lstrip("-").isdigit() else -1):
+        tid = str(o.get("templateId") or "")
+        try:
+            k = at(int(o["shot"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        g = _group_of(tid)
+        if k < 0 or tid not in LIBRARY or not LIBRARY[tid][0] or not g or count(g) >= OVERLAY_GROUPS[g][2]:
+            continue
+        if any((rows[j].get("device") or {}).get("id") == tid and abs(rows[j]["startMs"] - rows[k]["startMs"]) < 30000
+               for j in range(len(rows))):
+            continue
+        r = rows[k]
+        if r.get("device") or r.get("section_turn") or not _can(rows, k, tid, ignore_len=True):
+            continue
+        dev = build(tid, o, k)
+        if not dev:
+            engine.log(f"      {tid} '{o.get('headline', '')}' at shot {k} refused (words not spoken there / too long)")
+            continue
+        r["device"] = dev
+        _hold(engine, rows, k, _need_s(tid), tid)
+        engine.log(f"      added {tid} at {r['startMs'] / 1000:.0f}s: {o.get('headline', '')}")
+    mix = {g: count(g) for g in OVERLAY_GROUPS}
+    engine.log("  overlay mix: " + ", ".join(f"{g} {n}" for g, n in mix.items()) + f", chapters {has('chapter-plate')}")
+    low = [g for g, (ts, lo, _) in OVERLAY_GROUPS.items() if mix[g] < lo]
+    if low:
+        engine.log(f"  overlay groups still under their minimum: {', '.join(low)}")
 
 
 # ── 5. pictures ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -824,6 +987,49 @@ def _ground_bad(path: Path, band, ceiling: float, plain: bool) -> bool:
     bright = sorted(px)[int(len(px) * 0.9)]
     edge = sum(edges) / len(edges)
     return mean > ceiling or (plain and (bright > 0.85 or edge > 0.25))
+
+
+def _type_shade(path: Path, band, ceiling: float, plain: bool) -> float:
+    """How much to darken the strip under a template's type (0 = none) so white letters read on it, measured as the
+    viewer sees the picture: through the shadow look's dimming. Plain type (no backing) also wants no hot spots."""
+    from PIL import Image
+    try:
+        with Image.open(path) as im:
+            g = im.convert("L")
+            w, h = g.size
+            g = g.crop((int(band[0] * w), int(band[1] * h), int(band[2] * w), int(band[3] * h))).resize((96, 24))
+            px = [v / 255.0 for v in g.getdata()]
+    except Exception:                                                # noqa: BLE001
+        return 0.0
+    dim = 1 - 0.2 * min(1.0, SHADOW_LOOK)
+    mean, hot = sum(px) / len(px) * dim, sorted(px)[int(len(px) * 0.9)] * dim
+    need = 0.0
+    if mean > ceiling * 0.9:
+        need = 1 - ceiling * 0.8 / mean
+    if plain and hot > 0.75:
+        need = max(need, 1 - 0.7 / hot)
+    return round(min(0.75, max(0.25, need)), 2) if need > 0 else 0.0
+
+
+def _shaded_copy(photo: str, band, k: float) -> str:
+    """A copy of the photo darkened by up to `k` under the type band, feathered so no edge shows."""
+    from PIL import Image, ImageFilter
+    src = Path(photo)
+    out = src.with_name(f"{src.stem}_shade{hashlib.sha1(f'{band}{k}'.encode()).hexdigest()[:8]}.jpg")
+    if out.exists():
+        return str(out)
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        w, h = im.size
+        pad_x, pad_y = 0.06 * w, 0.06 * h
+        mask = Image.new("L", (w, h), 0)
+        box = (max(0, int(band[0] * w - pad_x)), max(0, int(band[1] * h - pad_y)),
+               min(w, int(band[2] * w + pad_x)), min(h, int(band[3] * h + pad_y)))
+        mask.paste(int(255 * k), box)
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=0.07 * w))
+        dark = Image.new("RGB", (w, h), (0, 0, 0))
+        Image.composite(dark, im, mask).save(out, quality=93)
+    return str(out)
 
 
 def _shape_ok(path: Path) -> bool:
@@ -1616,37 +1822,34 @@ def _fit_devices(rows: list) -> None:
             DEV_DROPS.append((i, tid, "no picture"))
             r["device"] = None
             continue
-        weak = pick is not None and (pick.get("ai") or pick.get("anchor_switched") or pick.get("contextual")
-                                     or pick.get("reused") or pick.get("stand_in") or pick["score"] < 6
-                                     or (tid in NAMES_PICTURE and pick.get("depiction") not in ("named-subject", None)))
-        if weak and tid in NAMES_PICTURE:
-            why = ("AI picture" if pick.get("ai") else "stand-in" if pick.get("stand_in") else "reused" if pick.get("reused")
-                   else "contextual" if pick.get("contextual") else "other anchor" if pick.get("anchor_switched")
-                   else f"score {pick['score']}" if pick["score"] < 6 else f"depiction {pick.get('depiction')}")
-            if tid != "framed-card" and i:
-                _fall_back(rows, i, tid, f"names its picture, weak: {why}")
-            else:
-                DEV_DROPS.append((i, tid, f"names its picture, weak: {why}"))
-                r.update(device=None)
-            continue
+        # a label that names the picture is refused only where it would name the WRONG thing: a different, identifiable
+        # person, or a picture unrelated to the line. A stand-in (real or AI) of the person the line is about, or a
+        # picture of the same kind of place or thing, carries the label (owner 2026-10-08)
+        if tid in NAMES_PICTURE and pick is not None:
+            other_person = pick.get("person") and not r.get("stand_in") and pick.get("depiction") != "named-subject"
+            if other_person or pick.get("depiction") == "unrelated":
+                why = "a different person" if other_person else "an unrelated picture"
+                if tid != "framed-card" and i:
+                    _fall_back(rows, i, tid, f"names its picture, which shows {why}")
+                else:
+                    DEV_DROPS.append((i, tid, f"names its picture, which shows {why}"))
+                    r.update(device=None)
+                continue
         if pick is not None and pick.get("ai") and tid == "P03" and i:
             DEV_DROPS.append((i, tid, "AI picture"))
             r["device"] = None
             continue
-        if pick is not None and tid in ("P04", "corner-label"):
-            if not _record_names(pick, dev.get("mainLine") or dev.get("label") or ""):
-                _fall_back(rows, i, tid, "picture's record does not carry the name")
-                continue
         if pick is not None and tid == "P05" and dev.get("imageLabel") and not _record_names(pick, dev["imageLabel"]):
             dev["imageLabel"] = ""
         ceil = TITLE_CEILING.get(tid)
         band, band_ceil = TYPE_BAND.get(tid, (None, None))
-        busy = band is not None and pick is not None and i and _ground_bad(Path(pick["photo"]), band, band_ceil, tid == "shadow-up")
-        if (ceil and pick is not None and i and _luma(Path(pick["photo"])) > ceil) or busy:
-            _fall_back(rows, i, tid, "ground too busy for the type" if busy else "picture too bright for the type")
-            if tid in ("P12", "P14") and i:
-                r["overlay"] = {"text": dev["year"], "kind": "year", "style": "fullFrame", "atMs": 0, "startFrame": 0}
-            continue
+        if pick is not None and i and (band or ceil):
+            # measured as the viewer sees it (the shadow look dims the picture), and never refused for it any more:
+            # the strip under the type is shaded until white letters read on it (owner 2026-10-08)
+            shade = _type_shade(Path(pick["photo"]), band or (0.0, 0.0, 1.0, 1.0), band_ceil or ceil, tid == "shadow-up")
+            if shade:
+                r["type_shade"] = (band or (0.05, 0.05, 0.95, 0.95), shade)
+                DEV_DROPS.append((i, tid, f"text area too bright: shaded {shade:.0%} instead of refused"))
         if tid == "P17" and pick is not None:
             ax, ay = pick.get("anchor") or (0.5, 0.5)       # the leader points at the subject; the plate sits opposite
             dev.update(anchorX=round(ax, 3), anchorY=round(ay, 3), labelX=round(ax - 0.24 if ax > 0.5 else ax + 0.24, 3),
@@ -1670,7 +1873,7 @@ def _fit_devices(rows: list) -> None:
             spare = []
             pool = list(r.get("spare") or [])
             if not (r.get("stand_in") or _names_thing(r)):
-                for k in (i - 1, i + 1, i - 2, i + 2):
+                for k in (i - 1, i + 1, i - 2, i + 2, i - 3, i + 3, i - 4, i + 4, i - 5, i + 5, i - 6, i + 6):
                     if 0 <= k < len(rows):
                         pool += list(rows[k].get("spare") or [])
             for x in pool:
@@ -1882,6 +2085,9 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
                 (x["pick"] for x in reversed(rows[:i]) if x.get("pick")), None)
             if pick is None:
                 dev = None
+        if pick and dev and r.get("type_shade"):         # the strip under the type, darkened (see _fit_devices)
+            band, k = r["type_shade"]
+            pick = dict(pick, photo=_shaded_copy(pick["photo"], band, k))
         m = _MOVES[int(_content_draw(r["text"]) * len(_MOVES))]
         ax, ay = (pick or {}).get("anchor") or (0.5, 0.5)
         r["_move"], r["_anchor"] = m, (ax, ay)
@@ -2042,14 +2248,18 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
         r["device"] = None
     title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
     opps = opportunities(engine, job, script, force)
-    assign(engine, rows, opps, script, _cues(engine, srt), dossier, title)
+    build = assign(engine, rows, opps, script, _cues(engine, srt), dossier, title)
+    fill_overlays(engine, job, rows, script, dossier, build, force)
     typed_captions(engine, job, rows, script, force)
     pictures(engine, job, rows, dossier, force)
     DEV_DROPS.clear()
     _fit_devices(rows)
     for i, tid, why in DEV_DROPS:
         now = (rows[i].get("device") or {}).get("id")
-        engine.log(f"      template {tid} on shot {i} refused ({why})" + (f" -> {now}" if now else " -> plain photo"))
+        if now == tid:
+            engine.log(f"      template {tid} on shot {i} kept ({why})")
+        else:
+            engine.log(f"      template {tid} on shot {i} refused ({why})" + (f" -> {now}" if now else " -> plain photo"))
     transitions(rows)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
