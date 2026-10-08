@@ -1672,7 +1672,7 @@ PICK_MODEL = os.environ.get("GEMINI_PICK_MODEL", "gemini-3.5-flash-lite")
 GEMINI_PICKS = {"calls": 0, "in": 0, "out": 0, "fallback": 0}
 
 
-def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800) -> str:
+def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: str = "", thinking: str = "") -> str:
     """Look at photos and pick (which candidate shows the subject, which cutout is clean, which still shows a person
     or vehicle) — through Gemini Flash-Lite. Tested on the same 8 candidates: Gemini chose the same two photos
     as Claude with the same crops, in 2 s against 9 s, for about $0.001, sparing ~10k Claude tokens a pick
@@ -1686,10 +1686,12 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800) -> str:
                 parts += [{"text": f"Image {i + 1}:"},
                           {"inlineData": {"mimeType": "image/jpeg" if str(p).lower().endswith((".jpg", ".jpeg")) else "image/png",
                                           "data": base64.b64encode(Path(p).read_bytes()).decode()}}]
-            think = {"thinkingLevel": "minimal"} if not PICK_MODEL.startswith("gemini-2.") else {"thinkingBudget": 0}
+            use = model or PICK_MODEL          # a caller may ask for a stronger judge (Mr Truth's picture judge)
+            think = ({"thinkingLevel": thinking or "minimal"} if not use.startswith("gemini-2.")
+                     else {"thinkingBudget": 0 if not thinking else 1024})
             body = {"contents": [{"parts": parts + [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": max(256, max_tokens), "thinkingConfig": think}}
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{PICK_MODEL}:generateContent",
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
                               headers={"x-goog-api-key": key}, json=body, timeout=180)
             if r.ok:
                 d = r.json()
