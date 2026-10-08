@@ -1240,6 +1240,8 @@ export const TypedCaptionSchema = z.object({
   lines: z.array(z.string().min(1).max(48)).min(1).max(2),
   startFrame: z.number().int().min(0),
   charsPerSecond: z.number().min(4).max(80).optional(),
+  /** darken the bottom-left corner behind the type (the planner sets it on a bright picture) */
+  scrim: z.boolean().optional(),
 })
 
 export type TypedCaption = z.infer<typeof TypedCaptionSchema>

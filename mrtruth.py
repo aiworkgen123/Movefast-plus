@@ -517,9 +517,13 @@ def _can(rows: list, i: int, tid: str) -> bool:
     return _dur(rows[i]) * FPS >= BUILD_FRAMES.get(tid, 0) + 4 and (_dur(rows[i]) <= hi + 0.05 or tid in ("P12", "P03"))
 
 
-def _fall_back(rows: list, i: int, tid: str) -> None:
+DEV_DROPS = []        # (shot, template, why) for every template the pictures refused: logged after planning
+
+
+def _fall_back(rows: list, i: int, tid: str, why: str = "") -> None:
     """A template the picture refused: the first wordless template down its chain that passes the same checks,
     else the shot stays a clean photograph."""
+    DEV_DROPS.append((i, tid, why or "refused"))
     rows[i]["device"] = None
     for t in LIBRARY[tid][6]:
         if t == "photo-pop" and _can(rows, i, t):
@@ -660,9 +664,11 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
     for s in sections[1:]:
         head = str(s.get("title") or "").strip()
         if not head or len(head) > 25:
+            engine.log(f"      chapter '{head}' skipped (title over 25 characters)")
             continue
         ms = at_ms(int(s.get("startChar") or 0))
         if ms < CHAPTER_FIRST_S * 1000 or ms - last_turn < CHAPTER_GAP_S * 1000:
+            engine.log(f"      chapter '{head}' at {ms / 1000:.0f}s skipped (hook or within {CHAPTER_GAP_S:.0f}s of the last)")
             continue                     # a chapter is a real turn: never in the hook, never one on top of another
         last_turn = ms
         i = min(range(len(rows)), key=lambda k: abs(rows[k]["startMs"] - ms))
@@ -673,6 +679,7 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
                 elif can("chapter-plate", k):
                     put(k, {"id": "chapter-plate", "heading": head})
                 else:
+                    engine.log(f"      chapter '{head}' could not sit on shot {k} ({dur(rows[k]):.1f}s)")
                     continue
                 rows[k]["section_turn"] = True
                 break
@@ -1606,20 +1613,29 @@ def _fit_devices(rows: list) -> None:
             continue
         tid = dev["id"]
         if pick is None and LIBRARY[tid][1] > 0:
+            DEV_DROPS.append((i, tid, "no picture"))
             r["device"] = None
             continue
         weak = pick is not None and (pick.get("ai") or pick.get("anchor_switched") or pick.get("contextual")
                                      or pick.get("reused") or pick.get("stand_in") or pick["score"] < 6
                                      or (tid in NAMES_PICTURE and pick.get("depiction") not in ("named-subject", None)))
         if weak and tid in NAMES_PICTURE:
-            _fall_back(rows, i, tid) if tid != "framed-card" and i else r.update(device=None)
+            why = ("AI picture" if pick.get("ai") else "stand-in" if pick.get("stand_in") else "reused" if pick.get("reused")
+                   else "contextual" if pick.get("contextual") else "other anchor" if pick.get("anchor_switched")
+                   else f"score {pick['score']}" if pick["score"] < 6 else f"depiction {pick.get('depiction')}")
+            if tid != "framed-card" and i:
+                _fall_back(rows, i, tid, f"names its picture, weak: {why}")
+            else:
+                DEV_DROPS.append((i, tid, f"names its picture, weak: {why}"))
+                r.update(device=None)
             continue
         if pick is not None and pick.get("ai") and tid == "P03" and i:
+            DEV_DROPS.append((i, tid, "AI picture"))
             r["device"] = None
             continue
         if pick is not None and tid in ("P04", "corner-label"):
             if not _record_names(pick, dev.get("mainLine") or dev.get("label") or ""):
-                _fall_back(rows, i, tid)
+                _fall_back(rows, i, tid, "picture's record does not carry the name")
                 continue
         if pick is not None and tid == "P05" and dev.get("imageLabel") and not _record_names(pick, dev["imageLabel"]):
             dev["imageLabel"] = ""
@@ -1627,7 +1643,7 @@ def _fit_devices(rows: list) -> None:
         band, band_ceil = TYPE_BAND.get(tid, (None, None))
         busy = band is not None and pick is not None and i and _ground_bad(Path(pick["photo"]), band, band_ceil, tid == "shadow-up")
         if (ceil and pick is not None and i and _luma(Path(pick["photo"])) > ceil) or busy:
-            _fall_back(rows, i, tid)
+            _fall_back(rows, i, tid, "ground too busy for the type" if busy else "picture too bright for the type")
             if tid in ("P12", "P14") and i:
                 r["overlay"] = {"text": dev["year"], "kind": "year", "style": "fullFrame", "atMs": 0, "startFrame": 0}
             continue
@@ -1646,6 +1662,7 @@ def _fit_devices(rows: list) -> None:
                 if len(pool) == 4:
                     break
             if len(pool) < 4:
+                DEV_DROPS.append((i, tid, f"only {len(pool)} of 4 gallery pictures"))
                 r["device"] = None
                 continue
             r["companions"] = list(reversed(pool))       # the camera opens on card 4 and travels to card 1 (T-17)
@@ -1660,9 +1677,118 @@ def _fit_devices(rows: list) -> None:
                 if len(spare) < need and _distinct(x["photo"], [pick["photo"]] + [s["photo"] for s in spare]):
                     spare.append(x)
             if len(spare) < need:
-                _fall_back(rows, i, tid)
+                _fall_back(rows, i, tid, f"{len(spare)} of {need} companion pictures")
                 continue
             r["companions"] = spare[:need]
+
+
+# ── 5b. the typed caption (renderer TypedCaption.tsx), owner ruling 2026-10-08 ─────────────────────────────────
+TC_MAX, TC_FIRST_S, TC_GAP_S, TC_MIN_START_S = 5, 60.0, 25.0, 3.0
+TC_LINE_MAX, TC_TOTAL_MAX = 28, 55
+TC_RATES = (25.0, 21.0)                 # letters a second, line 1 / line 2 (matched to the reference)
+TC_SCRIM_LUMA = 0.42                    # above this mean brightness the corner behind the caption is darkened
+TC_READ_S = 1.3                         # the finished caption stays at least this long before the shot ends
+
+TC_PROMPT = """You are placing TYPED CAPTIONS on a photo documentary: a short serif label that types itself in at the
+bottom left while the narrator speaks, like a museum caption. It names the key FACT being said at that moment.
+
+THE RULES (the channel owner's; follow them exactly)
+- Choose between 3 and {most} moments for the whole film. The FIRST must start before {first:.0f} s. Any two must be at
+  least {gap:.0f} s apart. Never in the first {lead:.0f} s.
+- What deserves one, in this order: (1) a person introduced - name and role; (2) a place or institution with a date;
+  (3) a key event or decision; (4) a key document or object; (5) a striking fact or number. Never filler, a question,
+  or a dramatic line without a fact in it.
+- SUMMARISE, do not transcribe: the narrator says "He was a translator working under Vatican Apostolic Library
+  authorization" -> the caption is "A Translator Under" / "Apostolic Library Authority".
+- 1 or 2 lines, 2-8 words a line, at most {line} characters a line, at most {total} characters in all. Title Case,
+  no full stop. "Thing - Place, Date" with a spaced hyphen when it fits ("Removed from the Bible -" /
+  "Council of Laodicea, 364 CE"). Dates as "364 CE", "1980s", "c. 1100".
+- Only facts this script states. Spell names correctly even where the line below is misspelled.
+- No two captions say the same thing.
+- Choose the SHOT on whose line the summarised phrase BEGINS (the caption starts typing with that shot). Shots marked
+  [TAKEN] already carry another on-screen template: never choose one; take the nearest free shot of the same
+  sentence instead, or another moment.
+
+THE FILM (shot number, start second, the words spoken on it):
+{shots}
+
+Return {{"captions": [{{"shot": <number>, "lines": ["line 1", "optional line 2"], "why": "short reason"}}]}}"""
+
+
+def _tc_need_s(lines: list) -> float:
+    """Seconds a caption needs on screen: the 0.27 s lead, typing both lines, then TC_READ_S of reading."""
+    return TYPED_CAPTION_START_F / FPS + sum(len(ln) / TC_RATES[min(k, 1)] for k, ln in enumerate(lines)) + TC_READ_S
+
+
+def typed_captions(engine, job: Path, rows: list, script: str, force: bool = False) -> None:
+    """Up to TC_MAX typed captions, the first inside TC_FIRST_S, on plain photo shots. A caption's shot is held for
+    as long as the caption needs: the shots after it on screen are folded into it (their words stay spoken, under
+    the same picture). Writes row["typedCaption"]."""
+    out = job / "mrtruth" / "typed_captions.json"
+    key = _hash([TC_PROMPT, [(r["text"], bool(r.get("device") or r.get("section_turn"))) for r in rows]])
+    got = None if force else _load(out)
+    if not (isinstance(got, dict) and got.get("key") == key):
+        shots = "\n".join(f"{i}\t{r['startMs'] / 1000:.1f}\t" + ("[TAKEN] " if r.get("device") or r.get("section_turn") else "")
+                           + r["text"] for i, r in enumerate(rows))
+        prompt = TC_PROMPT.format(most=TC_MAX, first=TC_FIRST_S, gap=TC_GAP_S, lead=TC_MIN_START_S, line=TC_LINE_MAX,
+                                  total=TC_TOTAL_MAX, shots=shots)
+        try:
+            got = {"key": key, "captions": _ask(engine, prompt, 6000, model=engine.SCRIPT_MODEL).get("captions") or []}
+        except RuntimeError as e:
+            engine.log(f"  typed captions: {e}")
+            return
+        _dump(out, got)
+    texts = [r["text"] for r in rows]
+    placed, last = [], -1e9
+    for c in sorted(got["captions"], key=lambda c: int(c.get("shot", -1))):
+        try:
+            i = int(c["shot"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        lines = [re.sub(r"\s+", " ", str(x)).strip().rstrip(".") for x in (c.get("lines") or []) if str(x).strip()][:2]
+        if not (0 <= i < len(rows)) or rows[i]["text"] != texts[i] or not lines:
+            continue
+        if rows[i].get("device") or rows[i].get("section_turn"):      # the next free shot, still inside 4 s
+            i = next((k for k in (i + 1, i - 1, i + 2) if 0 <= k < len(rows) and not rows[k].get("device")
+                      and not rows[k].get("section_turn") and abs(rows[k]["startMs"] - rows[i]["startMs"]) <= 4000), i)
+        r = rows[i]
+        why = ""
+        if any(len(ln) > TC_LINE_MAX + 2 for ln in lines) or sum(map(len, lines)) > TC_TOTAL_MAX + 3:
+            why = "too long"
+        elif r.get("device") or r.get("section_turn"):
+            why = "shot carries a template"
+        elif r["startMs"] < TC_MIN_START_S * 1000:
+            why = "inside the opening"
+        elif r["startMs"] - last < TC_GAP_S * 1000:
+            why = "too close to the last caption"
+        elif len(placed) >= TC_MAX:
+            why = "over the limit"
+        if why:
+            engine.log(f"      typed caption '{' / '.join(lines)}' on shot {i} skipped ({why})")
+            continue
+        placed.append((i, lines))
+        last = r["startMs"]
+    if placed and rows[placed[0][0]]["startMs"] > TC_FIRST_S * 1000:
+        engine.log(f"      typed caption: the first lands at {rows[placed[0][0]]['startMs'] / 1000:.0f}s, after {TC_FIRST_S:.0f}s")
+    # hold each caption's picture as long as it needs: fold the following shots into it (last first, so indexes hold)
+    for i, lines in sorted(placed, key=lambda p: -p[0]):
+        r = rows[i]
+        need_ms = _tc_need_s(lines) * 1000
+        while r["endMs"] - r["startMs"] < need_ms and i + 1 < len(rows):
+            nxt = rows[i + 1]
+            if nxt.get("section_turn") or nxt.get("typedCaption"):
+                engine.log(f"      typed caption at {r['startMs'] / 1000:.0f}s cannot be held longer (a chapter or caption follows)")
+                break
+            if nxt.get("device"):            # the caption is mandatory, a template is not: it gives way
+                engine.log(f"      template {nxt['device']['id']} at {nxt['startMs'] / 1000:.0f}s gives way to a typed caption")
+            r["endMs"] = nxt["endMs"]
+            r["held"] = r.get("held", []) + [nxt["text"]] + nxt.get("held", [])
+            del rows[i + 1]
+        r["typedCaption"] = {"lines": lines, "startFrame": TYPED_CAPTION_START_F}
+        if r["endMs"] - r["startMs"] < need_ms:
+            engine.log(f"      typed caption at {r['startMs'] / 1000:.0f}s is {(need_ms - r['endMs'] + r['startMs']) / 1000:.1f}s short")
+        engine.log(f"      typed caption at {r['startMs'] / 1000:.0f}s for {(r['endMs'] - r['startMs']) / 1000:.1f}s: "
+                   f"{' / '.join(lines)}")
 
 
 # ── 6. the scenes, as the repo's compositor reads them ────────────────────────────────────────────────────────
@@ -1790,10 +1916,11 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             sc["device"] = None
         if not dev and pick and not pick.get("ai") and n >= DUST_MIN_S * FPS:
             dusty.append((len(out), Path(pick["photo"]), n))
-        if r.get("typedCaption"):                    # the typed caption (renderer TypedCaption.tsx); rulings TBD
+        if r.get("typedCaption") and not sc.get("textCard"):     # see typed_captions(); a bright picture gets a scrim
             tc = r["typedCaption"]
             sc["typedCaption"] = {"lines": [ln[:48] for ln in tc["lines"][:2]],
-                                  "startFrame": int(tc.get("startFrame", TYPED_CAPTION_START_F))}
+                                  "startFrame": int(tc.get("startFrame", TYPED_CAPTION_START_F)),
+                                  "scrim": bool(pick and _luma(Path(pick["photo"])) > TC_SCRIM_LUMA)}
         out.append(sc)
         frame += n
     # the dust plate: on about DUST_SHARE of ALL shots, chosen among plain archive photographs (no AI picture, no
@@ -1916,8 +2043,13 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
     opps = opportunities(engine, job, script, force)
     assign(engine, rows, opps, script, _cues(engine, srt), dossier, title)
+    typed_captions(engine, job, rows, script, force)
     pictures(engine, job, rows, dossier, force)
+    DEV_DROPS.clear()
     _fit_devices(rows)
+    for i, tid, why in DEV_DROPS:
+        now = (rows[i].get("device") or {}).get("id")
+        engine.log(f"      template {tid} on shot {i} refused ({why})" + (f" -> {now}" if now else " -> plain photo"))
     transitions(rows)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))

@@ -97,6 +97,16 @@ export function TypedCaption({ scene }: { scene: PlannedScene }): ReactNode {
   const opacity = tail < 8 ? Math.max(0, tail / 8) : 1
   return (
     <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity }}>
+      {caption.scrim === true && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            opacity: Math.min(1, (frame - caption.startFrame) / 8),
+            background: 'radial-gradient(ellipse 60% 42% at 22% 86%, rgba(0,0,0,0.62) 0%, rgba(0,0,0,0.38) 45%, rgba(0,0,0,0) 100%)',
+          }}
+        />
+      )}
       {caption.lines.map((line, i) => {
         const shown = line.slice(0, counts[i] ?? 0)
         if (shown.length === 0 && i !== cursorLine) return null
