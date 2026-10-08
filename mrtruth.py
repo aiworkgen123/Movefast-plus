@@ -21,6 +21,7 @@ fit falls back or the shot stays a plain photograph, and nothing stops the run.
 """
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1358,11 +1359,39 @@ def _props(sc: dict) -> dict:
             "textCardBackgroundSrc": None, "companionSrcs": [url(c["path"]) for c in sc["companions"]]}
 
 
+class PackageExported(BaseException):
+    """Raised after export_package() so the run stops where the heavy drawing would begin (not swallowed by handlers)."""
+    def __init__(self, path):
+        super().__init__(str(path))
+        self.path = path
+
+
+def export_package(engine, work: Path, todo: list) -> Path:
+    """Everything the drawing needs, in one file, for any other machine: the chosen photos (storage/), the tasks
+    (manifest.json), the renderer's source (no node_modules) and remote_render.py. Planning stays where it ran."""
+    import tarfile
+    out = work / "render_package.tgz"
+    manifest = {"version": 1, "style": "mr_truth", "tasks": [
+        {"id": t["id"], "props": t["props"], "name": Path(t["output"]).name} for t in todo]}
+    mf = work / "manifest.json"
+    _dump(mf, manifest)
+    skip = {"node_modules", "bundle", ".cache"}
+    with tarfile.open(out, "w:gz") as tar:
+        tar.add(mf, arcname="manifest.json")
+        tar.add(work / "storage", arcname="storage")
+        tar.add(HERE / "remote_render.py", arcname="remote_render.py")
+        tar.add(RENDERER, arcname="renderer", filter=lambda ti: None if (set(Path(ti.name).parts) & skip) else ti)
+    engine.log(f"Mr Truth: render package for {len(todo)} shot(s): {out} ({out.stat().st_size / 1e6:.0f} MB)")
+    return out
+
+
 def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
     """Render [{id, props, output}] through mrtruth_renderer/movefast/render.mjs, split over `workers` processes."""
     todo = [t for t in tasks if not Path(t["output"]).exists()]
     if not todo:
         return
+    if os.environ.get("MT_EXPORT_PACKAGE"):
+        raise PackageExported(export_package(engine, work, todo))
     node = shutil.which("node") or "/opt/homebrew/bin/node"
     parts = [todo[k::workers] for k in range(workers)] if len(todo) > 8 else [todo]
     engine.log(f"Mr Truth: rendering {len(todo)} shot(s) with the repo's compositor ({len(parts)} process(es))...")

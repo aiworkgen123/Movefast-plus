@@ -34,18 +34,18 @@ if (have !== want) {          // two render processes share one bundle: re-point
   fs.rmSync(mount, {force: true, recursive: false});
   try { fs.symlinkSync(want, mount); } catch (e) { if (e.code !== 'EEXIST') throw e; }
 }
-const browser = await openBrowser('chrome', {logLevel: 'error'});
+const browser = await openBrowser('chrome', {logLevel: 'error', ...(process.env.REMOTION_BROWSER ? {browserExecutable: process.env.REMOTION_BROWSER} : {}), ...(process.env.MT_GL ? {chromiumOptions: {gl: process.env.MT_GL}} : {})});
 try {
   for (const task of request.tasks) {
     if (fs.existsSync(task.output)) continue;
     const composition = await selectComposition({serveUrl: dir, id: task.id, inputProps: task.props, puppeteerInstance: browser, logLevel: 'error'});
     const temporary = `${task.output}.part.mp4`;
     await renderMedia({serveUrl: dir, composition, inputProps: task.props, outputLocation: temporary, puppeteerInstance: browser,
-      logLevel: 'error', codec: 'h264', imageFormat: 'jpeg', jpegQuality: 90, crf: 18, x264Preset: 'veryfast', muted: true,
+      logLevel: 'error', codec: 'h264', imageFormat: 'jpeg', jpegQuality: process.env.MT_PREVIEW ? 70 : 90, crf: process.env.MT_PREVIEW ? 26 : 18, x264Preset: process.env.MT_PREVIEW ? 'ultrafast' : 'veryfast', ...(process.env.MT_PREVIEW ? {scale: 2 / 3} : {}), muted: true,
       pixelFormat: 'yuv420p', colorSpace: 'bt709',
       // MoveFast stream-copies its segment join; every MP4 must share its time base.
       ffmpegOverride: ({args}) => args.map((arg, i) => args[i - 1] === '-video_track_timescale' ? '15360' : arg),
-      concurrency: request.concurrency || 3, timeoutInMilliseconds: 120000});
+      concurrency: Number(process.env.MT_CONC) || request.concurrency || 3, timeoutInMilliseconds: 120000});
     fs.renameSync(temporary, task.output);
     console.log(`rendered ${path.basename(task.output)}`);
   }
