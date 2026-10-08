@@ -1229,6 +1229,8 @@ export const GradeSchema = z.object({
   lut: z.enum(LUT_NAMES),
   vignette: z.number().min(0).max(1),
   grain: z.number().min(0).max(1),
+  /** The shadow look, 0-1: a tight dark vignette, a dimmer and slightly muted picture. Absent = off. */
+  shadow: z.number().min(0).max(1).optional(),
 })
 
 export type Grade = z.infer<typeof GradeSchema>

@@ -116,6 +116,14 @@ export function houseCurveLayerStyle(): { backdropFilter: string; backgroundColo
   return { backdropFilter: GRADE.toneFilter, backgroundColor: GRADE.toeColor }
 }
 
+export function shadowLookFilter(k: number): string {
+  return `brightness(${(1 - 0.2 * k).toFixed(3)}) saturate(${(1 - 0.25 * k).toFixed(3)}) contrast(${(1 + 0.1 * k).toFixed(3)})`
+}
+
+export function shadowLookBackground(k: number): string {
+  return `radial-gradient(ellipse at center, rgba(0,0,0,0) 20%, rgba(0,0,0,${(0.5 * k).toFixed(3)}) 68%, rgba(0,0,0,${(0.88 * k).toFixed(3)}) 100%)`
+}
+
 export function Grade({ grade }: { grade: GradeSettings }): ReactNode {
   const frame = useCurrentFrame()
 
@@ -161,6 +169,25 @@ export function Grade({ grade }: { grade: GradeSettings }): ReactNode {
             backgroundPosition: `${offsetX}px ${offsetY}px`,
             mixBlendMode: 'overlay',
             opacity: grade.grain,
+            pointerEvents: 'none',
+          }}
+        />
+      )}
+
+      {(grade.shadow ?? 0) > 0 && (
+        /*
+          THE SHADOW LOOK: the frame closes in. A vignette that starts much
+          nearer the centre and reaches near-black at the corners, over a picture
+          that is a little dimmer, a little less saturated and a little harder.
+          One layer: the backdrop filter treats what is below, the gradient
+          paints over it.
+        */
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            backdropFilter: shadowLookFilter(grade.shadow ?? 0),
+            background: shadowLookBackground(grade.shadow ?? 0),
             pointerEvents: 'none',
           }}
         />

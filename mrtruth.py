@@ -37,6 +37,10 @@ FPS = 30
 TARGET_SCENE_S = 4.0                 # the repo's DEFAULT_TARGET_SCENE_MS
 BATCH_S = 240.0                      # segmentation focus range per call
 GRADE = {"lut": "documentary-neutral", "vignette": 0.18, "grain": 0.06}   # the repo's DEFAULT_GRADE
+# the shadow look (renderer Grade.tsx): tight dark vignette, a dimmer, muted, harder picture. 0 = off, 1 = full.
+SHADOW_LOOK = float(os.environ.get("MRTRUTH_SHADOW", "1"))
+if SHADOW_LOOK > 0:
+    GRADE["shadow"] = min(1.0, SHADOW_LOOK)
 
 # ── the template library: the repo's registry (packages/core/src/devices.ts) and the planner's own limits ──────
 # id: (on, pictures, min s, max s, per-film cap, position, fallbacks, copy limits)
