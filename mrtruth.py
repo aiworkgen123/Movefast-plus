@@ -107,7 +107,7 @@ BURN_SHARE, BURN_PER_MIN, BURN_GAP_S, BURN_MAX_RUN = 0.2, 4.0, 6.0, 2
 DIP_FRAMES, FLASH_FRAMES, PUSH_FRAMES, SLIDE_FRAMES, BURN_IN, BURN_OUT = 18, 8, 11, 18, 14, 12
 LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.07, 2.0, 3.0
 TURN_SHARE, TURN_MIN_S, TURN_PREFER_S = 0.06, 2.5, 3.5    # the cinematic turn (renderer CinemaTurn.tsx)     # the light leak plate (renderer fx/leak)
-DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.10, 2.0, 3.0, 0.25, 0.45
+DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.12, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
 
