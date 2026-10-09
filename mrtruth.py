@@ -469,6 +469,9 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     if fell_back:
         engine.log(f"  ⚠ {fell_back} shot(s) could not be planned and are searched by their own words "
                    f"(not cached: the next run plans them again)")
+        if fell_back > max(2, 0.03 * len(rows)):
+            _stop(engine, f"Mr Truth stopped: {fell_back} of {len(rows)} shots could not be planned (Claude did not "
+                          f"answer for part of the narration) - run again; the planned parts are not lost")
     else:
         _dump(out, {"key": key, "rows": rows})
     engine.log(f"  {len(rows)} shots, {end_ms / 1000 / max(1, len(rows)):.1f}s each on average")
@@ -492,6 +495,35 @@ def _year_in(text: str):
 
 class OutOfCredit(RuntimeError):
     pass
+
+
+class PlanningStopped(RuntimeError):
+    """A step failed too often to trust the plan (owner 2026-10-09: never a quietly worse film - stop and say why).
+    Everything already found is cached, so a rerun only redoes what failed. MRTRUTH_ALLOW_DEGRADED=1 carries on."""
+
+
+def _stop(engine, msg: str) -> None:
+    if os.environ.get("MRTRUTH_ALLOW_DEGRADED") == "1":
+        engine.log(f"  ⚠ {msg} (carrying on: MRTRUTH_ALLOW_DEGRADED=1)")
+    else:
+        raise PlanningStopped(msg)
+
+
+SHOT_WORKERS = int(os.environ.get("MRTRUTH_SHOT_WORKERS", "10"))    # shots searched and judged at the same time
+JUDGE = {"asks": 0, "failed": 0}       # picture-judge calls this run; failed = no answer after the retry
+_JUDGE_LOCK = threading.Lock()
+
+
+def _judge_guard(engine) -> None:
+    """Stop when the picture judge keeps failing or keeps handing pictures to Claude (the $3.92 run: Gemini dry,
+    96 calls quietly went to Claude). Small numbers are tolerated; a share above 5% is not."""
+    g = getattr(engine, "GEMINI_PICKS", None) or {}
+    asks, failed, claude = JUDGE["asks"], JUDGE["failed"], int(g.get("fallback", 0))
+    if failed > max(5, 0.05 * asks):
+        _stop(engine, f"Mr Truth stopped: the picture judge gave no answer {failed} times in {asks} calls")
+    if claude > max(5, 0.05 * max(1, int(g.get("calls", 0)))):
+        _stop(engine, f"Mr Truth stopped: Gemini failed {claude} times and the pictures went to Claude instead "
+                      f"(expensive) - check the Gemini key and credit")
 
 
 def preflight(engine) -> None:
@@ -952,7 +984,9 @@ _COMMONS_GATE = threading.Semaphore(3)
 _COMMONS_LAST = [0.0]
 _COMMONS_GAP = [0.4]                 # seconds between Wikimedia requests: doubles on a 429, eases back on success
 _COMMONS_LOCK = threading.Lock()
-UA = {"User-Agent": "MoveFast-MrTruth/1.0 (documentary video tool; low volume)"}
+# Wikimedia's User-Agent policy asks for a way to reach the tool's owner; an agent without one is throttled harder
+UA = {"User-Agent": "MoveFast-MrTruth/1.1 (https://github.com/aiworkgen123/Movefast-plus; documentary video tool)"}
+COMMONS = {"requests": 0, "busy": 0, "failed": 0, "wait_s": 0.0}   # this run's Wikimedia traffic (logged with pictures)
 
 
 def _commons_wait():
@@ -960,12 +994,23 @@ def _commons_wait():
         d = time.time() - _COMMONS_LAST[0]
         if d < _COMMONS_GAP[0]:
             time.sleep(_COMMONS_GAP[0] - d)
-        _COMMONS_LAST[0] = time.time()
+            COMMONS["wait_s"] += _COMMONS_GAP[0] - d
+        _COMMONS_LAST[0] = max(time.time(), _COMMONS_LAST[0])
+        COMMONS["requests"] += 1
 
 
-def _commons_said(status: int) -> None:
+def _commons_said(status: int, retry_after=None) -> None:
+    """Wikimedia's limit is per internet address (shared with every other client behind it): a 429 names the seconds
+    until it resets (Retry-After), and nothing is sent to it before then - asking sooner only earns another 429."""
     with _COMMONS_LOCK:
+        COMMONS["busy"] += status == 429
         _COMMONS_GAP[0] = min(8.0, _COMMONS_GAP[0] * 2) if status == 429 else max(0.4, _COMMONS_GAP[0] * 0.9)
+        try:
+            pause = float(retry_after) if status == 429 and retry_after else 0.0
+        except (TypeError, ValueError):
+            pause = 0.0
+        if pause:
+            _COMMONS_LAST[0] = max(_COMMONS_LAST[0], time.time() + min(pause, 60.0) - _COMMONS_GAP[0])
 
 
 def commons_photos(query: str, folder: Path, n: int = 4) -> list:
@@ -976,17 +1021,27 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
     got = _load(meta)
     if got is not None and got.get("q") == query:
         return [(c, Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
-    picks = []
+    picks, refused = [], False
     with _COMMONS_GATE:
-        try:
-            _commons_wait()
-            r = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30, params={
-                "action": "query", "format": "json", "generator": "search", "gsrsearch": f"filetype:bitmap {query}",
-                "gsrnamespace": 6, "gsrlimit": 15, "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata",
-                "iiurlwidth": 1920})
-            pages = sorted(((r.json().get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 99))
-        except Exception:                                            # noqa: BLE001 - the web search stands
-            pages = []
+        # a busy answer (429) to the search is asked again like a download; it used to read as "no pictures" and was
+        # cached, so the shot lost its Commons photos for good (found 2026-10-09, timing the planner)
+        pages = []
+        for attempt in range(4):
+            try:
+                _commons_wait()
+                r = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30, params={
+                    "action": "query", "format": "json", "generator": "search", "gsrsearch": f"filetype:bitmap {query}",
+                    "gsrnamespace": 6, "gsrlimit": 15, "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata",
+                    "iiurlwidth": 1920})
+                _commons_said(r.status_code, r.headers.get("retry-after"))
+                if r.status_code == 429 or r.status_code >= 500:
+                    refused = True
+                    continue
+                pages = sorted(((r.json().get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 99))
+                refused = False
+                break
+            except Exception:                                        # noqa: BLE001 - asked again, then the web search stands
+                refused = True
         for p in pages:
             ii = (p.get("imageinfo") or [{}])[0]
             w, h = int(ii.get("width") or 0), int(ii.get("height") or 0)
@@ -999,10 +1054,11 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
                 for attempt in range(3):
                     _commons_wait()
                     resp = requests.get(ii.get("thumburl") or ii["url"], headers=UA, timeout=60)
-                    _commons_said(resp.status_code)
+                    _commons_said(resp.status_code, resp.headers.get("retry-after"))
                     if resp.status_code != 429:
                         break
                 if not resp.ok:
+                    refused = refused or resp.status_code == 429
                     continue
                 dest.write_bytes(resp.content)
             except Exception:                                        # noqa: BLE001
@@ -1014,6 +1070,10 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
                           "artist": re.sub(r"<[^>]+>", "", str((em.get("Artist") or {}).get("value") or ""))[:200]})
             if len(picks) >= n:
                 break
+    if refused:                                      # Wikimedia said busy: not cached, the next run asks again
+        with _COMMONS_LOCK:
+            COMMONS["failed"] += 1
+        return [(c, Path(c["photo"])) for c in picks]
     _dump(meta, {"q": query, "picks": picks})
     return [(c, Path(c["photo"])) for c in picks]
 
@@ -1175,6 +1235,10 @@ for _env, _name, _fn in (("EUROPEANA_API_KEY", "europeana", _europeana_find), ("
         ARCHIVES[_name] = _fn
 
 
+ARCHIVE_DOWN_AFTER = 6                  # an archive failing this many searches in a row is skipped for the run
+ARCHIVE_DOWN, ARCHIVE_ERRORS = {}, {}   # failures in a row / in all, per archive (logged with the pictures)
+
+
 def archive_photos(query: str, folder: Path) -> list:
     """[(candidate, path)] from the open archives, searched side by side: landscape, wide enough to fill the frame,
     at most ARCHIVE_PER_SOURCE from each. Cached per folder and query like commons_photos."""
@@ -1187,38 +1251,53 @@ def archive_photos(query: str, folder: Path) -> list:
         return [(c, Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
 
     def one(name):
+        if ARCHIVE_DOWN.get(name, 0) >= ARCHIVE_DOWN_AFTER:          # failed that many times in a row: down
+            return name, [], False
         try:
-            return name, ARCHIVES[name](query)
+            hits = ARCHIVES[name](query)
+            ARCHIVE_DOWN[name] = 0
+            return name, hits, True
         except Exception:                                            # noqa: BLE001 - an archive down is no picture
-            return name, []
+            with _JUDGE_LOCK:
+                ARCHIVE_DOWN[name] = ARCHIVE_DOWN.get(name, 0) + 1
+                ARCHIVE_ERRORS[name] = ARCHIVE_ERRORS.get(name, 0) + 1
+            return name, [], False
+
+    def fetch(item):
+        name, (title, url, page, lic, credit, w, h) = item
+        dest = folder / f"a{hashlib.sha1(url.encode()).hexdigest()[:12]}.jpg"
+        try:
+            if not dest.exists():
+                resp = requests.get(url, headers=_AUA, timeout=60)
+                if not resp.ok or len(resp.content) < 20000:
+                    return None
+                dest.write_bytes(resp.content)
+            with Image.open(dest) as im:
+                iw, ih = im.size
+                if iw < ARCHIVE_MIN_W or not 1.0 <= iw / ih <= 2.5:
+                    return None
+                if iw > 2400:
+                    im.convert("RGB").resize((2400, int(2400 * ih / iw))).save(dest, quality=92)
+        except Exception:                                            # noqa: BLE001
+            return None
+        return {"photo": str(dest), "title": title, "url": page, "source": name, "license": lic, "artist": credit}
 
     with ThreadPoolExecutor(max_workers=len(ARCHIVES)) as ex:
         found = list(ex.map(one, ARCHIVES))
+    # the same pictures as before (the first ARCHIVE_PER_SOURCE that download and fit, in each archive's order),
+    # downloaded side by side: an archive's first few fitting hits are fetched at once, then the next few if short
     picks = []
-    for name, hits in found:
-        took = 0
-        for title, url, page, lic, credit, w, h in hits:
-            if took >= ARCHIVE_PER_SOURCE:
+    for name, hits, _ok in found:
+        fit = [h for h in hits if not (h[5] and h[6] and (h[5] < ARCHIVE_MIN_W or not 1.0 <= h[5] / h[6] <= 2.5))]
+        took = []
+        for k in range(0, len(fit), ARCHIVE_PER_SOURCE + 1):
+            with ThreadPoolExecutor(max_workers=ARCHIVE_PER_SOURCE + 1) as ex:
+                took += [c for c in ex.map(fetch, [(name, h) for h in fit[k:k + ARCHIVE_PER_SOURCE + 1]]) if c]
+            if len(took) >= ARCHIVE_PER_SOURCE:
                 break
-            if w and h and (w < ARCHIVE_MIN_W or not 1.0 <= w / h <= 2.5):
-                continue
-            dest = folder / f"a{hashlib.sha1(url.encode()).hexdigest()[:12]}.jpg"
-            try:
-                if not dest.exists():
-                    resp = requests.get(url, headers=_AUA, timeout=60)
-                    if not resp.ok or len(resp.content) < 20000:
-                        continue
-                    dest.write_bytes(resp.content)
-                with Image.open(dest) as im:
-                    iw, ih = im.size
-                    if iw < ARCHIVE_MIN_W or not 1.0 <= iw / ih <= 2.5:
-                        continue
-                    if iw > 2400:
-                        im.convert("RGB").resize((2400, int(2400 * ih / iw))).save(dest, quality=92)
-            except Exception:                                        # noqa: BLE001
-                continue
-            picks.append({"photo": str(dest), "title": title, "url": page, "source": name, "license": lic, "artist": credit})
-            took += 1
+        picks += took[:ARCHIVE_PER_SOURCE]
+    if any(not ok for _n, _h, ok in found):          # an archive that failed is asked again on the next run
+        return [(c, Path(c["photo"])) for c in picks]
     _dump(meta, {"q": query, "picks": picks})
     return [(c, Path(c["photo"])) for c in picks]
 
@@ -1417,6 +1496,10 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
                 break
         except Exception:                                            # noqa: BLE001 - asked once more
             items = []
+    with _JUDGE_LOCK:
+        JUDGE["asks"] += 1
+        JUDGE["failed"] += 0 if items else 1
+    _judge_guard(engine)
     by = {}
     for x in items:
         try:
@@ -1805,7 +1888,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
 
     engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, then Brave; up to 3 rounds; Gemini judges)...")
     archive_names(engine, job, rows, dossier, force)
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         states = list(ex.map(first_rounds, range(len(rows))))
 
     # round 3: a different anchor for every shot still without a photo (one Claude call for all of them)
@@ -1858,7 +1941,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             _dump(home / "pick.json", st)
             return st
 
-        with ThreadPoolExecutor(max_workers=10) as ex:
+        with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
             for i, st in zip(failing, ex.map(third_round, failing)):
                 states[i] = st
     found = [st["cands"] for st in states]
@@ -1889,7 +1972,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             _dump(home / "pick.json", st)
         return again
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         borrowed = list(ex.map(borrow, range(len(rows))))
 
     # what has been shown: the same photograph (same bytes, or within a few bits of each other) and the same view of
@@ -2004,6 +2087,13 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                f"on screen: exact {steps.get('exact', 0)}, another anchor {steps.get('anchor', 0)}, contextual "
                f"{steps.get('contextual', 0)}, neighbour {steps.get('neighbour', 0)}, AI {steps.get('ai', 0)}, earlier photo "
                f"{steps.get('reused', 0)}, none {steps.get(None, 0)}; Brave requests {_BRAVE['requests'] - b0}")
+    g = getattr(engine, "GEMINI_PICKS", None) or {}
+    engine.log(f"    judge: {JUDGE['asks']} calls, {JUDGE['failed']} unanswered, {g.get('busy', 0)} busy waits, "
+               f"{g.get('fallback', 0)} to Claude; {SHOT_WORKERS} shots at once; Wikimedia {COMMONS['requests']} requests, "
+               f"{COMMONS['busy']} busy, {COMMONS['failed']} searches short, {COMMONS['wait_s'] / 60:.0f} min spent waiting"
+               + ("; archive errors " + ", ".join(f"{k} {v}" for k, v in ARCHIVE_ERRORS.items()) if ARCHIVE_ERRORS else "")
+               + ("; skipped as down: " + ", ".join(k for k, v in ARCHIVE_DOWN.items() if v >= ARCHIVE_DOWN_AFTER)
+                  if any(v >= ARCHIVE_DOWN_AFTER for v in ARCHIVE_DOWN.values()) else ""))
 
 
 AI_CHECK = """This is a GENERATED stand-in picture for one line of a documentary. Look at it hard and answer ONLY a
@@ -2901,19 +2991,31 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
         return final
     work = job / "mrtruth"
     work.mkdir(parents=True, exist_ok=True)
+    clock = [("start", time.time())]
+    def took(step):                              # how long each planning step took, in the log and in timing.json
+        clock.append((step, time.time()))
+        engine.log(f"  ⏱ {step}: {clock[-1][1] - clock[-2][1]:.0f}s")
+        _dump(work / "timing.json", {a: round(t - p, 1) for (a, t), (_, p) in zip(clock[1:], clock)})
     preflight(engine)
     script = (job / "script.txt").read_text(encoding="utf-8")
     dossier = research(engine, script, job, force)
+    took("research")
     dossier = dict(dossier, visualBrief=visual_brief(engine, job, script, dossier, force))   # every later prompt reads it
+    took("visual brief")
     rows = beats(engine, job, srt, script, dossier, force)
+    took("shots")
     for r in rows:
         r["device"] = None
     title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
     opps = opportunities(engine, job, script, force)
     build = assign(engine, rows, opps, script, _cues(engine, srt), dossier, title)
+    took("overlays")
     fill_overlays(engine, job, rows, script, dossier, build, force)
+    took("more overlays")
     typed_captions(engine, job, rows, script, force)
+    took("typed captions")
     pictures(engine, job, rows, dossier, force)
+    took("pictures")
     DEV_DROPS.clear()
     PEOPLE_NAMES.clear()
     for p in (dossier.get("visualBrief") or {}).get("people") or []:
@@ -2935,6 +3037,7 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
             break
         _fit_devices(rows, only=added)
         sync_overlays(engine, job, rows, _cues(engine, srt))
+    took("sync and gaps")
     marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
     left = _gaps(rows)
     engine.log(f"  words on screen: {len(marks) - 2} overlays, longest stretch without "
@@ -2942,6 +3045,7 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     transitions(rows)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
+    took("scenes")
     _dump(work / "plan.json", sc_list)
     _dump(work / "shots.json", [{"text": r["text"], "photo": (r.get("pick") or {}).get("photo"), "step": r.get("step"),
                                  "ai": bool((r.get("pick") or {}).get("ai")),

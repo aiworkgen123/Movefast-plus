@@ -1691,8 +1691,14 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                      else {"thinkingBudget": 0 if not thinking else 1024})
             body = {"contents": [{"parts": parts + [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": max(256, max_tokens), "thinkingConfig": think}}
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
-                              headers={"x-goog-api-key": key}, json=body, timeout=180)
+            for wait in (2, 5, 10, 20, 0):      # busy (429/5xx): wait and ask again before Claude looks instead
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
+                                  headers={"x-goog-api-key": key}, json=body, timeout=180)
+                if r.status_code not in (429, 500, 502, 503, 504) or not wait:
+                    break
+                with _SPEND_LOCK:
+                    GEMINI_PICKS["busy"] = GEMINI_PICKS.get("busy", 0) + 1
+                time.sleep(wait)
             if r.ok:
                 d = r.json()
                 text = "".join(x.get("text", "") for x in ((d.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
