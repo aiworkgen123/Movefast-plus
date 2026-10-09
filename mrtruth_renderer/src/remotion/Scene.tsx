@@ -1,4 +1,5 @@
 import { TypedCaption } from './TypedCaption.js'
+import { CinemaTurn } from './CinemaTurn.js'
 import { AbsoluteFill, interpolate, staticFile, useCurrentFrame } from 'remotion'
 import { SourcedImg as Img } from './SourcedImg.js'
 import type { ReactNode } from 'react'
@@ -236,12 +237,14 @@ export function Scene({
   return (
     <AbsoluteFill style={{ backgroundColor: '#000' }}>
       <PresetTransition scene={scene} prevAssetSrc={prevAssetSrc}>
-        <Visual
-          scene={scene}
-          assetSrc={assetSrc}
-          textCardBackgroundSrc={textCardBackgroundSrc}
-          overlayVariant={overlayVariant}
-        />
+        <CinemaTurn scene={scene}>
+          <Visual
+            scene={scene}
+            assetSrc={assetSrc}
+            textCardBackgroundSrc={textCardBackgroundSrc}
+            overlayVariant={overlayVariant}
+          />
+        </CinemaTurn>
       </PresetTransition>
 
       <TransitionIn scene={scene} prevAssetSrc={prevAssetSrc} />

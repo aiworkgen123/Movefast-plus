@@ -105,7 +105,8 @@ JOINING = {"the", "a", "an", "of", "and", "in", "at", "on", "for", "to", "from",
 FLASH_SHARE, PUSH_SHARE, SLIDE_SHARE = 0.05, 0.08, 0.03
 BURN_SHARE, BURN_PER_MIN, BURN_GAP_S, BURN_MAX_RUN = 0.2, 4.0, 6.0, 2
 DIP_FRAMES, FLASH_FRAMES, PUSH_FRAMES, SLIDE_FRAMES, BURN_IN, BURN_OUT = 18, 8, 11, 18, 14, 12
-LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.07, 2.0, 3.0     # the light leak plate (renderer fx/leak)
+LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.07, 2.0, 3.0
+TURN_SHARE, TURN_MIN_S, TURN_PREFER_S = 0.06, 2.5, 3.5    # the cinematic turn (renderer CinemaTurn.tsx)     # the light leak plate (renderer fx/leak)
 DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.10, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
@@ -2387,6 +2388,22 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             if nxt.get("ambience"):
                 nxt["ambience"]["durationFrames"] = nxt["durationFrames"]
         out[k]["ambience"] = {"clip": "leak", "durationFrames": out[k]["durationFrames"], "shadow": 0}
+        took.add(k)
+    # the cinematic turn (owner 2026-10-09): about TURN_SHARE of ALL shots, on empty pictures only (nothing else on
+    # them, the light leak included); its own measured move replaces the Ken Burns one
+    want = round(TURN_SHARE * len(out))
+    empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
+             and not sc.get("ambience") and not sc.get("textCard") and sc["durationFrames"] >= TURN_MIN_S * FPS]
+    empty.sort(key=lambda k: (out[k]["durationFrames"] < TURN_PREFER_S * FPS, _content_draw(str(k) + "turn")))
+    took, gap = set(), max(2, len(out) // max(1, 2 * want))
+    for k in empty:
+        if len(took) >= want:
+            break
+        if any(abs(k - t) < gap for t in took):
+            continue
+        out[k]["cinemaMove"] = {"kind": "turn"}
+        if out[k].get("motion"):
+            out[k]["motion"] = dict(out[k]["motion"], fromScale=1.0, toScale=1.0, fromX=0.0, toX=0.0, fromY=0.0, toY=0.0)
         took.add(k)
     for sc in out:
         sc["renderKey"] = _hash({k: v for k, v in sc.items() if k not in ("index", "startFrame")})

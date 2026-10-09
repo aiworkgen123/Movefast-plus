@@ -1506,6 +1506,8 @@ export const PlannedSceneSchema = z.object({
    */
   ambience: SceneAmbienceSchema.nullish(),
   typedCaption: TypedCaptionSchema.nullish(),
+  /** A move drawn on the picture instead of the Ken Burns one (remotion/CinemaTurn.tsx). */
+  cinemaMove: z.object({ kind: z.literal('turn') }).nullish(),
   /**
    * EXTRA PICTURES THIS SCENE MAY DRAW, beyond its own. Empty on almost every
    * scene.
