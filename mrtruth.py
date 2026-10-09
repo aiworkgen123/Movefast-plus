@@ -1040,13 +1040,37 @@ def _smithsonian_find(q: str) -> list:
 
 
 def _rijks_find(q: str) -> list:
+    """The Rijksmuseum's open Linked Art API (data.rijksmuseum.nl, no key): search, then object -> what it shows ->
+    its digital object -> a IIIF image. Public-domain pictures only."""
     import requests
-    d = requests.get("https://www.rijksmuseum.nl/api/en/collection", headers=_AUA, timeout=25, params={
-        "key": os.environ["RIJKSMUSEUM_API_KEY"], "q": q, "imgonly": "true", "ps": 12}).json()
-    return [(str(a.get("longTitle") or a.get("title") or "")[:200], a["webImage"]["url"], (a.get("links") or {}).get("web") or "",
-             "Public domain (Rijksmuseum)", str(a.get("principalOrFirstMaker") or "Rijksmuseum")[:200],
-             int(a["webImage"].get("width") or 0), int(a["webImage"].get("height") or 0))
-            for a in d.get("artObjects") or [] if (a.get("webImage") or {}).get("url")]
+    H = dict(_AUA, Accept="application/ld+json")
+    get = lambda u: requests.get(u, headers=H, timeout=25).json()
+    found = []
+    for field in ("description", "title"):
+        d = requests.get("https://data.rijksmuseum.nl/search/collection", headers=H, timeout=25,
+                         params={field: q, "imageAvailable": "true"}).json()
+        found += [x["id"] for x in d.get("orderedItems") or [] if x.get("id") not in found]
+        if len(found) >= 4:
+            break
+    out = []
+    for oid in found[:5]:
+        try:
+            obj = get(oid)
+            title = next((n.get("content") for n in obj.get("identified_by") or [] if n.get("type") == "Name"), "") or ""
+            vis = get((obj.get("shows") or [{}])[0]["id"])
+            rights = " ".join(str(n.get("content", "")) for r in vis.get("subject_to") or [] for n in r.get("identified_by") or [])
+            if "public domain" not in rights.lower():
+                continue
+            dig = get((vis.get("digitally_shown_by") or [{}])[0]["id"])
+            img = (dig.get("access_point") or [{}])[0].get("id", "")
+        except Exception:                                            # noqa: BLE001
+            continue
+        if img:
+            out.append((str(title)[:200], img.replace("/full/max/", "/full/2000,/"), oid, "Public domain (Rijksmuseum)",
+                        "Rijksmuseum", 0, 0))
+        if len(out) >= ARCHIVE_PER_SOURCE + 1:
+            break
+    return out
 
 
 def _nara_find(q: str) -> list:
@@ -1065,9 +1089,10 @@ def _nara_find(q: str) -> list:
     return out
 
 
-ARCHIVES = {"loc.gov": _loc_find, "openverse": _openverse_find, "archive.org": _ia_find, "metmuseum.org": _met_find}
+ARCHIVES = {"loc.gov": _loc_find, "openverse": _openverse_find, "archive.org": _ia_find, "metmuseum.org": _met_find,
+            "rijksmuseum": _rijks_find}
 for _env, _name, _fn in (("EUROPEANA_API_KEY", "europeana", _europeana_find), ("SMITHSONIAN_API_KEY", "si.edu", _smithsonian_find),
-                         ("RIJKSMUSEUM_API_KEY", "rijksmuseum", _rijks_find), ("NARA_API_KEY", "archives.gov", _nara_find)):
+                         ("NARA_API_KEY", "archives.gov", _nara_find)):
     if os.environ.get(_env):
         ARCHIVES[_name] = _fn
 
