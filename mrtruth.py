@@ -2103,6 +2103,9 @@ def _fit_devices(rows: list) -> None:
 TC_MAX, TC_FIRST_S, TC_GAP_S, TC_MIN_START_S = 5, 60.0, 25.0, 3.0
 TC_LINE_MAX, TC_TOTAL_MAX = 28, 55
 TC_RATES = (25.0, 21.0)                 # letters a second, line 1 / line 2 (matched to the reference)
+# the picture animations (owner 2026-10-09): the shadow look stays off them; text overlays keep it
+ANIMATIONS = {"gallery-strip", "P22", "P19", "two-photo-zoom", "photo-pop", "framed-card", "P08", "P05",
+              "bullet-checklist", "highlight-page"}
 TC_SCRIM_LUMA = 0.42                    # above this mean brightness the corner behind the caption is darkened
 TC_READ_S = 1.3                         # the finished caption stays at least this long before the shot ends
 
@@ -2359,6 +2362,9 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
         took.add(at)
     # the light leak (owner 2026-10-09): about LEAK_SHARE of ALL shots, only on EMPTY pictures - no template, no
     # typed caption, no dust, no text card - of 2 s or more, the 3 s+ ones first, spread across the film
+    for sc in out:
+        if (sc.get("device") or {}).get("id") in ANIMATIONS:
+            sc["grade"] = {k: v for k, v in sc["grade"].items() if k != "shadow"}
     want = round(LEAK_SHARE * len(out))
     empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
              and not sc.get("ambience") and not sc.get("textCard") and sc["durationFrames"] >= LEAK_MIN_S * FPS]
@@ -2369,6 +2375,17 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             break
         if any(abs(k - t) < gap for t in took):
             continue
+        short = int(LEAK_PREFER_S * FPS) - out[k]["durationFrames"]
+        if short > 0:                     # a 2-3 s shot is held to 3 s: the time comes from the next plain shot
+            nxt = out[k + 1] if k + 1 < len(out) else None
+            if (nxt is None or nxt.get("device") or nxt.get("typedCaption") or nxt.get("textCard")
+                    or nxt["durationFrames"] - short < 2 * FPS):
+                continue
+            out[k]["durationFrames"] += short
+            nxt["startFrame"] += short
+            nxt["durationFrames"] -= short
+            if nxt.get("ambience"):
+                nxt["ambience"]["durationFrames"] = nxt["durationFrames"]
         out[k]["ambience"] = {"clip": "leak", "durationFrames": out[k]["durationFrames"], "shadow": 0}
         took.add(k)
     for sc in out:
