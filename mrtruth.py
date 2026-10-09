@@ -466,6 +466,58 @@ def _year_in(text: str):
     return m.group(1) if m else None
 
 
+class OutOfCredit(RuntimeError):
+    pass
+
+
+def preflight(engine) -> None:
+    """Every paid service the picture planner leans on, checked before a minute is spent (owner 2026-10-09: Gemini
+    and Brave both ran dry mid-film and the run carried on quietly, leaving a quarter of an 11-minute film without a
+    fitting picture). A dry picture judge or web search stops the run with the reason; MRTRUTH_ALLOW_DEGRADED=1
+    carries on anyway. A low AI-picture balance is a warning only."""
+    import requests
+    bad, warn = [], []
+    g = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if g:
+        try:
+            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{JUDGE_MODEL}:generateContent",
+                              headers={"x-goog-api-key": g}, timeout=30,
+                              json={"contents": [{"parts": [{"text": "ok"}]}], "generationConfig": {"maxOutputTokens": 8}})
+            if r.status_code in (402, 403, 429):
+                bad.append(f"Gemini (the picture judge): {r.json().get('error', {}).get('message', r.text)[:140]}")
+        except Exception as e:                                       # noqa: BLE001
+            warn.append(f"Gemini could not be checked ({str(e)[:80]})")
+    else:
+        bad.append("Gemini: no GEMINI_API_KEY")
+    b = (os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
+    if b:
+        try:
+            r = requests.get("https://api.search.brave.com/res/v1/images/search", timeout=30, params={"q": "archive", "count": 1},
+                             headers={"Accept": "application/json", "X-Subscription-Token": b})
+            if r.status_code in (402, 403, 429):
+                bad.append(f"Brave (web picture search): {str(r.json().get('error', {}).get('detail', r.text))[:140]}")
+        except Exception as e:                                       # noqa: BLE001
+            warn.append(f"Brave could not be checked ({str(e)[:80]})")
+    w = (os.environ.get("WAVESPEED_API_KEY") or "").strip()
+    if w:
+        try:
+            bal = float(requests.get("https://api.wavespeed.ai/api/v3/balance", timeout=20,
+                                     headers={"Authorization": f"Bearer {w}"}).json()["data"]["balance"])
+            engine.log(f"  WaveSpeed (AI pictures) balance: ${bal:.2f}")
+            if bal < 1.0:
+                warn.append(f"WaveSpeed balance is ${bal:.2f}: AI stand-in pictures will stop soon")
+        except Exception as e:                                       # noqa: BLE001
+            warn.append(f"WaveSpeed balance could not be read ({str(e)[:60]})")
+    for x in warn:
+        engine.log(f"  ⚠ {x}")
+    if bad:
+        msg = "Mr Truth stopped before planning - out of credit:\n  " + "\n  ".join(bad)
+        if os.environ.get("MRTRUTH_ALLOW_DEGRADED") == "1":
+            engine.log("  ⚠ " + msg.replace("\n", " ") + " (carrying on: MRTRUTH_ALLOW_DEGRADED=1)")
+        else:
+            raise OutOfCredit(msg)
+
+
 def opportunities(engine, job: Path, script: str, force: bool = False) -> list:
     out = job / "mrtruth" / "templates.json"
     got = None if force else _load(out)
@@ -1901,6 +1953,16 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                         and seen(p["photo"]) < 3 and i - k > 5]
             if again or back:
                 pick, step = dict((again or back)[0], reused=True), "reused"
+        if pick is None:                              # 7. never a text-only screen (owner 2026-10-09): the least-shown
+            # picture of the film so far that is not within 3 shots, else any judged photo of this line or a neighbour
+            back = sorted(((k, p) for k, p in picked if i - k > 3 and p["score"] >= 3),
+                          key=lambda kp: (seen(kp[1]["photo"]), -kp[0]))
+            near_any = sorted((c for c in cands + borrowed[i] if c["score"] >= 3 and c.get("depiction") != "unrelated"
+                               and not c.get("flags")), key=lambda c: -c["score"])
+            if back:
+                pick, step = dict(back[0][1], reused=True), "reused"
+            elif near_any:
+                pick, step = dict(near_any[0], contextual=True), "contextual"
         r["pick"], r["step"], r["stand_in"] = pick, step, states[i].get("stand_in", "")
         r["spare"] = [c for c in cands if pick and c["photo"] != pick["photo"] and usable(r, c, MIN_SCORE)
                       and not c["studio"] and seen(c["photo"]) == 0][:3]
@@ -2031,14 +2093,14 @@ def _names_person(dev: dict) -> bool:
     return any(re.search(rf"\b{re.escape(n)}\b", text) for n in PEOPLE_NAMES if len(n) >= 4)
 
 
-def _fit_devices(rows: list) -> None:
+def _fit_devices(rows: list, only: set = None) -> None:
     """What the pictures allow: no words that name a picture on an AI frame, a weak one or one found for another
     anchor (T-8/T-10), a name only where the archive record carries it, no type on ground too bright or busy for it
     (T-7/T-26), the companions a multi-picture template needs. A refused template falls down its chain (through
     the same checks as any placement) or the shot stays a clean photograph."""
     for i, r in enumerate(rows):
         dev, pick = r.get("device"), r.get("pick")
-        if not dev:
+        if not dev or (only is not None and id(r) not in only):
             continue
         tid = dev["id"]
         if pick is None and LIBRARY[tid][1] > 0:
@@ -2378,6 +2440,153 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
     engine.log(f"  overlays on their words: {len(kept)} pinned ({moved} moved), {dropped} plain shots folded away")
 
 
+# ── 5d. no long stretch without words on screen (owner 2026-10-09: the last 4 minutes of a long film had none) ───
+OVERLAY_MAX_GAP_S = 30.0    # never longer than this without a text overlay, a typed caption or a chapter
+GAP_SPACING_S = 20.0        # a gap is refilled at about one overlay this often
+GAP_TEMPLATES = ["top-title", "shadow-up", "P04", "corner-label", "P02", "P09", "P05", "bullet-checklist",
+                 "two-photo-zoom", "framed-card"]
+
+GAP_PROMPT = """You are filling the quiet stretches of a photo documentary (channel: Mr Truth, dark and mysterious) with
+on-screen text. Each GAP below is a stretch with no words on screen. For each gap choose the number of moments it
+asks for, spread across it, and give each one a template and its words.
+
+THE RULES
+- Every word you write must be the narrator's own words, said on that shot or the shot next to it (it is checked).
+- Pick the moments that carry a fact: a name, a place, a date, a number, a decision, a document, a striking claim.
+- Use different templates; never the same template twice in one gap.
+- Never a shot marked [TAKEN].
+
+THE TEMPLATES
+{specs}
+
+THE GAPS
+{gaps}
+
+Return {{"overlays": [{{"gap": n, "shot": n, "templateId": "...", "headline": "...", "kicker": "...", "lines": ["..."]}}]}}"""
+
+
+def _text_times(rows: list) -> list:
+    """Where the film shows words: every shot with a typed caption or a template that says something."""
+    return [r["startMs"] for r in rows if r.get("typedCaption") or (r.get("device") and _overlay_words(r))
+            or (r.get("device") or {}).get("id") == "chapter-plate"]
+
+
+def _gaps(rows: list) -> list:
+    marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
+    return [(a, b) for a, b in zip(marks, marks[1:]) if b - a > OVERLAY_MAX_GAP_S * 1000]
+
+
+def fill_gaps(engine, job: Path, rows: list, build, force: bool = False) -> set:
+    """After sync_overlays: refill every stretch longer than OVERLAY_MAX_GAP_S with overlays the narration itself
+    says there. Returns the rows that received one (for _fit_devices and a second sync)."""
+    gaps = _gaps(rows)
+    if not gaps:
+        return set()
+    blocks = []
+    for g, (a, b) in enumerate(gaps):
+        n = max(1, int((b - a) / 1000 // GAP_SPACING_S))
+        shots = [f"{k}\t{r['startMs'] / 1000:.1f}\t" + ("[TAKEN] " if r.get("device") or r.get("typedCaption") else "") + r["text"]
+                 for k, r in enumerate(rows) if a <= r["startMs"] < b]
+        blocks.append(f"GAP {g}: {a / 1000:.0f}-{b / 1000:.0f} s, choose {n}\n" + "\n".join(shots))
+    prompt = GAP_PROMPT.format(specs=TEMPLATE_SPECS, gaps="\n\n".join(blocks))
+    out = job / "mrtruth" / "overlays_gaps.json"
+    key = _hash([prompt])
+    got = None if force else _load(out)
+    if not (isinstance(got, dict) and got.get("key") == key):
+        try:
+            got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL), key=key)
+        except RuntimeError as e:
+            engine.log(f"  gap fill: {e}")
+            return set()
+        _dump(out, got)
+    added = set()
+    minutes = rows[-1]["endMs"] / 60000
+    for o in got.get("overlays") or []:
+        try:
+            k = int(o["shot"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        tid = str(o.get("templateId") or "")
+        if not (0 < k < len(rows)) or tid not in GAP_TEMPLATES or not LIBRARY[tid][0]:
+            continue
+        r = rows[k]
+        if r.get("device") or r.get("typedCaption") or r.get("section_turn"):
+            continue
+        g = _group_of(tid)
+        if g and sum(1 for x in rows if _group_of((x.get("device") or {}).get("id", "")) == g) >= \
+                OVERLAY_GROUPS[g][2] * max(1.0, minutes / 3):
+            continue
+        if any(abs(x["startMs"] - r["startMs"]) < 8000 for x in rows if x.get("typedCaption") or (x.get("device") and _overlay_words(x))):
+            continue
+        if not _can(rows, k, tid, ignore_len=True):
+            continue
+        dev = build(tid, o, k)
+        if not dev:
+            continue
+        r["device"] = dev
+        added.add(id(r))
+    engine.log(f"  quiet stretches over {OVERLAY_MAX_GAP_S:.0f}s: {len(gaps)}, refilled with {len(added)} overlays")
+    return added
+
+
+_PHRASE_NO_END = {"beyond", "under", "over", "into", "about", "after", "before", "through", "without", "within",
+                  "between", "against", "toward", "towards", "during", "upon", "could", "would", "should", "must",
+                  "never", "only", "also", "very", "more", "most", "such", "these", "those", "their"}
+
+
+def _spoken_phrase(text: str, limit: int) -> str:
+    """The strongest run of words the narrator says in this line, at most `limit` characters: the window with the
+    most meaning words that starts and ends on one. Its words are, by construction, the narration's own."""
+    meaning = lambda w: (lambda c: bool(c) and c[0] not in _SYNC_STOP and len(c[0]) >= 3)(_content(w))
+    best, key = "", None
+    for clause in re.split(r"[.;:!?—–,]", text):
+        ws = clause.strip(" ,\"'").split()
+        for i in range(len(ws)):
+            for j in range(i + 2, len(ws) + 1):
+                phrase = " ".join(ws[i:j]).strip(" ,")
+                if len(phrase) > limit:
+                    break
+                first, last = _content(ws[i]), _content(ws[j - 1])
+                if not first or not last or first[0] in _PHRASE_NO_END or last[0] in _PHRASE_NO_END \
+                        or not meaning(ws[i]) and not ws[i][:1].isupper() or not meaning(ws[j - 1]):
+                    continue
+                # a whole short clause first; else the window with most meaning words that ends where the clause does
+                k = (i == 0 and j == len(ws), sum(1 for w in ws[i:j] if meaning(w)), j == len(ws), len(phrase))
+                if key is None or k > key:
+                    best, key = phrase.rstrip(",;:"), k
+    return best[:1].upper() + best[1:] if best else ""
+
+
+def fill_gaps_plain(engine, rows: list, build) -> set:
+    """The guarantee under fill_gaps: any stretch still longer than OVERLAY_MAX_GAP_S gets a spoken line (or a
+    running title) made from the narration of a free shot in its middle - words that are said there by definition."""
+    added = set()
+    for a, b in _gaps(rows):
+        need = max(1, int((b - a) / 1000 // GAP_SPACING_S))
+        free = [k for k, r in enumerate(rows) if a + 4000 <= r["startMs"] < b - 4000 and k > 0
+                and not (r.get("device") or r.get("typedCaption") or r.get("section_turn"))]
+        for j in range(need):
+            mid = a + (b - a) * (j + 1) / (need + 1)
+            for k in sorted(free, key=lambda k: abs(rows[k]["startMs"] - mid)):
+                r = rows[k]
+                if r.get("device") or any(id(x) in added and abs(x["startMs"] - r["startMs"]) < 8000 for x in rows):
+                    continue
+                for tid, lim in (("shadow-up", 32), ("top-title", 21)):
+                    phrase = _spoken_phrase(r["text"], lim)
+                    if not phrase or not _can(rows, k, tid, ignore_len=True):
+                        continue
+                    dev = build(tid, {"headline": phrase, "lines": []}, k)
+                    if dev:
+                        r["device"] = dev
+                        added.add(id(r))
+                        break
+                if r.get("device"):
+                    break
+    if added:
+        engine.log(f"  quiet stretches still open: {len(added)} spoken lines from the narration itself")
+    return added
+
+
 # ── 6. the scenes, as the repo's compositor reads them ────────────────────────────────────────────────────────
 def _content_draw(text: str) -> float:
     return int(hashlib.sha256(text.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
@@ -2668,6 +2877,7 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
         return final
     work = job / "mrtruth"
     work.mkdir(parents=True, exist_ok=True)
+    preflight(engine)
     script = (job / "script.txt").read_text(encoding="utf-8")
     dossier = research(engine, script, job, force)
     dossier = dict(dossier, visualBrief=visual_brief(engine, job, script, dossier, force))   # every later prompt reads it
@@ -2692,6 +2902,19 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
         else:
             engine.log(f"      template {tid} on shot {i} refused ({why})" + (f" -> {now}" if now else " -> plain photo"))
     sync_overlays(engine, job, rows, _cues(engine, srt))
+    for _round in range(3):                      # until no stretch over OVERLAY_MAX_GAP_S is left (owner 2026-10-09)
+        if not _gaps(rows):
+            break
+        added = fill_gaps(engine, job, rows, build, force) if _round < 2 else set()
+        added |= fill_gaps_plain(engine, rows, build) if _gaps(rows) else set()
+        if not added:
+            break
+        _fit_devices(rows, only=added)
+        sync_overlays(engine, job, rows, _cues(engine, srt))
+    marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
+    left = _gaps(rows)
+    engine.log(f"  words on screen: {len(marks) - 2} overlays, longest stretch without "
+               f"{max(b - a for a, b in zip(marks, marks[1:])) / 1000:.0f}s" + (f" ({len(left)} over {OVERLAY_MAX_GAP_S:.0f}s)" if left else ""))
     transitions(rows)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
