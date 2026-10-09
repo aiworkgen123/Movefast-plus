@@ -105,9 +105,9 @@ JOINING = {"the", "a", "an", "of", "and", "in", "at", "on", "for", "to", "from",
 FLASH_SHARE, PUSH_SHARE, SLIDE_SHARE = 0.05, 0.08, 0.03
 BURN_SHARE, BURN_PER_MIN, BURN_GAP_S, BURN_MAX_RUN = 0.2, 4.0, 6.0, 2
 DIP_FRAMES, FLASH_FRAMES, PUSH_FRAMES, SLIDE_FRAMES, BURN_IN, BURN_OUT = 18, 8, 11, 18, 14, 12
-LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.07, 2.0, 3.0
-TURN_SHARE, TURN_MIN_S, TURN_PREFER_S = 0.06, 2.5, 3.5    # the cinematic turn (renderer CinemaTurn.tsx)     # the light leak plate (renderer fx/leak)
-DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.12, 2.0, 3.0, 0.25, 0.45
+LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.08, 2.0, 3.0     # the light leak plate (renderer fx/leak)
+TURN_SHARE, TURN_MIN_S, TURN_PREFER_S = 0.11, 2.5, 3.5    # the cinematic turn (renderer CinemaTurn.tsx)
+DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.13, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
 
@@ -753,7 +753,7 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
 # ── 4b. overlay coverage (owner 2026-10-08): chapters mandatory, every group used, nothing dominates ───────────
 CHAPTERS_MIN, CHAPTERS_MAX = 2, 3
 OVERLAY_EVERY_S = 12.0                  # aim: something on screen about every 10-15 s (typed captions included)
-TYPED_CAPTION_SLOTS = 5                 # reserved for typed_captions(), which runs after this
+TYPED_CAPTION_SLOTS = 10                # reserved for typed_captions(), which runs after this
 OVERLAY_GROUPS = {                      # group: (templates, minimum a film, maximum a film)
     "name label": (["corner-label", "P04"], 1, 4),
     "source": (["P08", "framed-card"], 1, 3),
@@ -2179,7 +2179,7 @@ def _fit_devices(rows: list, only: set = None) -> None:
 
 
 # ── 5b. the typed caption (renderer TypedCaption.tsx), owner ruling 2026-10-08 ─────────────────────────────────
-TC_MAX, TC_FIRST_S, TC_GAP_S, TC_MIN_START_S = 5, 60.0, 25.0, 3.0
+TC_MAX, TC_FIRST_S, TC_GAP_S, TC_MIN_START_S = 10, 60.0, 25.0, 3.0
 TC_LINE_MAX, TC_TOTAL_MAX = 28, 55
 TC_RATES = (25.0, 21.0)                 # letters a second, line 1 / line 2 (matched to the reference)
 # the picture animations (owner 2026-10-09): the shadow look stays off them; text overlays keep it
@@ -2192,7 +2192,7 @@ TC_PROMPT = """You are placing TYPED CAPTIONS on a photo documentary: a short se
 bottom left while the narrator speaks, like a museum caption. It names the key FACT being said at that moment.
 
 THE RULES (the channel owner's; follow them exactly)
-- Choose between 3 and {most} moments for the whole film. The FIRST must start before {first:.0f} s. Any two must be at
+- Use it wherever a moment truly fits, as many as fit, at most {most} for the whole film. The FIRST must start before {first:.0f} s. Any two must be at
   least {gap:.0f} s apart. Never in the first {lead:.0f} s.
 - What deserves one, in this order: (1) a person introduced - name and role; (2) a place or institution with a date;
   (3) a key event or decision; (4) a key document or object; (5) a striking fact or number. Never filler, a question,
