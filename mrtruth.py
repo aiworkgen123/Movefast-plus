@@ -91,7 +91,7 @@ NAMES_PICTURE = {"P04", "P05", "P17", "framed-card", "corner-label"}     # words
 MIN_WIDTH = 800                 # a web photo must be this wide to fill a 1080p frame through the grade and slow move
 MIN_SCORE = 5.0                 # the judge's 3-5 is "generic, says nothing"; 0-2 wrong era, modern stock, burned-in text
 # cache versions: a change to what a step is told must redo that step on an existing job, not reuse its old answer
-BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 3, 2, 3, 6
+BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 3, 2, 3, 7
 # the picture judge: Flash-Lite at minimal thinking scored a COVID-masked researcher 9 for the 1980s and one image 1 and
 # then 8 (audit 2026-10-08); Mr Truth's judge is a stronger Gemini that thinks a little. Env overrides.
 JUDGE_MODEL = os.environ.get("MRTRUTH_JUDGE_MODEL", "gemini-3.8-flash")
@@ -940,6 +940,130 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
     return [(c, Path(c["photo"])) for c in picks]
 
 
+# ── the open archives beside Commons (owner 2026-10-09): searched directly, no keys. Each returns
+# [(title, image_url, page_url, license, credit, width, height)] for the query; width/height 0 when unknown.
+ARCHIVE_PER_SOURCE = 2                  # at most this many pictures from each archive per search
+ARCHIVE_MIN_W = 1000
+_AUA = {"User-Agent": "Mozilla/5.0 (MoveFast-MrTruth/1.0; documentary video tool; low volume)"}
+
+
+def _loc_find(q: str) -> list:
+    import requests
+    d = requests.get("https://www.loc.gov/photos/", headers=_AUA, timeout=25,
+                     params={"q": q, "fo": "json", "c": 10, "fa": "online-format:image"}).json()
+    out = []
+    for r in d.get("results") or []:
+        url = ((r.get("image_url") or [""])[-1] or "").split("#")[0]
+        m = re.search(r"#h=(\d+)&w=(\d+)", (r.get("image_url") or [""])[-1] or "")
+        if url and not r.get("access_restricted"):
+            out.append((str(r.get("title") or "")[:200], url, r.get("url") or url, "Library of Congress (check rights)",
+                        "Library of Congress", int(m.group(2)) if m else 0, int(m.group(1)) if m else 0))
+    return out
+
+
+def _openverse_find(q: str) -> list:
+    import requests
+    d = requests.get("https://api.openverse.org/v1/images/", headers=_AUA, timeout=25,
+                     params={"q": q, "page_size": 12, "license_type": "commercial,modification"}).json()
+    return [(str(r.get("title") or "")[:200], r["url"], r.get("foreign_landing_url") or r["url"],
+             f"{r.get('license', '')} {r.get('license_version', '')}".strip(), str(r.get("creator") or "")[:200],
+             int(r.get("width") or 0), int(r.get("height") or 0)) for r in d.get("results") or [] if r.get("url")]
+
+
+def _ia_find(q: str) -> list:
+    import requests
+    d = requests.get("https://archive.org/advancedsearch.php", headers=_AUA, timeout=25,
+                     params={"q": f"({q}) AND mediatype:image", "fl[]": ["identifier", "title"], "rows": 6,
+                             "output": "json"}).json()
+    out = []
+    for doc in (d.get("response") or {}).get("docs") or []:
+        ident = doc.get("identifier")
+        try:
+            meta = requests.get(f"https://archive.org/metadata/{ident}", headers=_AUA, timeout=25).json()
+        except Exception:                                            # noqa: BLE001
+            continue
+        jpgs = [f for f in meta.get("files") or [] if str(f.get("name", "")).lower().endswith((".jpg", ".jpeg"))
+                and "thumb" not in str(f.get("name", "")).lower()]
+        if not jpgs:
+            continue
+        f = max(jpgs, key=lambda f: int(f.get("size") or 0))
+        out.append((str(doc.get("title") or ident)[:200], f"https://archive.org/download/{ident}/{f['name']}",
+                    f"https://archive.org/details/{ident}", str((meta.get("metadata") or {}).get("licenseurl") or "Internet Archive"),
+                    str((meta.get("metadata") or {}).get("creator") or "")[:200], int(f.get("width") or 0), int(f.get("height") or 0)))
+        if len(out) >= ARCHIVE_PER_SOURCE + 1:
+            break
+    return out
+
+
+def _met_find(q: str) -> list:
+    import requests
+    ids = (requests.get("https://collectionapi.metmuseum.org/public/collection/v1.1/search", headers=_AUA, timeout=25,
+                        params={"q": q, "hasImages": "true"}).json().get("objectIDs") or [])[:6]
+    out = []
+    for oid in ids:
+        try:
+            o = requests.get(f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{oid}", headers=_AUA, timeout=25).json()
+        except Exception:                                            # noqa: BLE001
+            continue
+        if o.get("isPublicDomain") and o.get("primaryImage"):
+            out.append((f"{o.get('title', '')}, {o.get('objectDate', '')}".strip(", ")[:200], o["primaryImage"],
+                        o.get("objectURL") or "", "Public domain (The Met)", str(o.get("artistDisplayName") or "The Met")[:200], 0, 0))
+        if len(out) >= ARCHIVE_PER_SOURCE + 1:
+            break
+    return out
+
+
+ARCHIVES = {"loc.gov": _loc_find, "openverse": _openverse_find, "archive.org": _ia_find, "metmuseum.org": _met_find}
+
+
+def archive_photos(query: str, folder: Path) -> list:
+    """[(candidate, path)] from the open archives, searched side by side: landscape, wide enough to fill the frame,
+    at most ARCHIVE_PER_SOURCE from each. Cached per folder and query like commons_photos."""
+    import requests
+    from PIL import Image
+    folder.mkdir(parents=True, exist_ok=True)
+    meta = folder / "archives.json"
+    got = _load(meta)
+    if got is not None and got.get("q") == query:
+        return [(c, Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
+
+    def one(name):
+        try:
+            return name, ARCHIVES[name](query)
+        except Exception:                                            # noqa: BLE001 - an archive down is no picture
+            return name, []
+
+    with ThreadPoolExecutor(max_workers=len(ARCHIVES)) as ex:
+        found = list(ex.map(one, ARCHIVES))
+    picks = []
+    for name, hits in found:
+        took = 0
+        for title, url, page, lic, credit, w, h in hits:
+            if took >= ARCHIVE_PER_SOURCE:
+                break
+            if w and h and (w < ARCHIVE_MIN_W or not 1.0 <= w / h <= 2.5):
+                continue
+            dest = folder / f"a{hashlib.sha1(url.encode()).hexdigest()[:12]}.jpg"
+            try:
+                if not dest.exists():
+                    resp = requests.get(url, headers=_AUA, timeout=60)
+                    if not resp.ok or len(resp.content) < 20000:
+                        continue
+                    dest.write_bytes(resp.content)
+                with Image.open(dest) as im:
+                    iw, ih = im.size
+                    if iw < ARCHIVE_MIN_W or not 1.0 <= iw / ih <= 2.5:
+                        continue
+                    if iw > 2400:
+                        im.convert("RGB").resize((2400, int(2400 * ih / iw))).save(dest, quality=92)
+            except Exception:                                        # noqa: BLE001
+                continue
+            picks.append({"photo": str(dest), "title": title, "url": page, "source": name, "license": lic, "artist": credit})
+            took += 1
+    _dump(meta, {"q": query, "picks": picks})
+    return [(c, Path(c["photo"])) for c in picks]
+
+
 def _luma(path: Path) -> float:
     from PIL import Image
     with Image.open(path) as im:
@@ -1491,6 +1615,11 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             scored = judged(i, commons_photos(archive, home / "commons"), [])
             tried.append(archive)
         done = 1 if any(usable(r, c, max(7.0, _need(r))) for c in scored) else 0
+        if not done:                                 # the open archives (LoC, Openverse, Internet Archive, the Met): free
+            aq = archive or " ".join(q.split()[:5])
+            scored = judged(i, archive_photos(aq, home / "archives"), scored)
+            tried.append(f"archives: {aq}")
+            done = 1 if any(usable(r, c, max(7.0, _need(r))) for c in scored) else 0
         if not done:
             scored = judged(i, web_photos(web_q, home / "web"), scored)
             done = 1 if passes(r, scored) else 0
