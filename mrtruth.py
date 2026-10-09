@@ -1013,7 +1013,63 @@ def _met_find(q: str) -> list:
     return out
 
 
+def _europeana_find(q: str) -> list:
+    import requests
+    d = requests.get("https://api.europeana.eu/record/v2/search.json", headers=_AUA, timeout=25, params={
+        "wskey": os.environ["EUROPEANA_API_KEY"], "query": q, "media": "true", "qf": "TYPE:IMAGE",
+        "reusability": "open", "rows": 12}).json()
+    return [(str((it.get("title") or [""])[0])[:200], (it.get("edmIsShownBy") or [""])[0], it.get("guid") or "",
+             str((it.get("rights") or [""])[0]), str((it.get("dataProvider") or [""])[0])[:200], 0, 0)
+            for it in d.get("items") or [] if (it.get("edmIsShownBy") or [""])[0]]
+
+
+# the keyed archives below switch themselves on when their key is in the environment. Written to each archive's
+# published API; first exercised live when the key arrives (a failure returns no pictures, never an error)
+def _smithsonian_find(q: str) -> list:
+    import requests
+    d = requests.get("https://api.si.edu/openaccess/api/v1.0/search", headers=_AUA, timeout=25, params={
+        "q": f"{q} AND online_media_type:Images", "api_key": os.environ["SMITHSONIAN_API_KEY"], "rows": 12}).json()
+    out = []
+    for row in ((d.get("response") or {}).get("rows") or []):
+        dn = ((row.get("content") or {}).get("descriptiveNonRepeating") or {})
+        for m in ((dn.get("online_media") or {}).get("media") or [])[:1]:
+            if str((m.get("usage") or {}).get("access", "")).upper() == "CC0" and m.get("content"):
+                out.append((str(row.get("title") or "")[:200], m["content"], dn.get("record_link") or "", "CC0 (Smithsonian)",
+                            str(dn.get("data_source") or "Smithsonian")[:200], 0, 0))
+    return out
+
+
+def _rijks_find(q: str) -> list:
+    import requests
+    d = requests.get("https://www.rijksmuseum.nl/api/en/collection", headers=_AUA, timeout=25, params={
+        "key": os.environ["RIJKSMUSEUM_API_KEY"], "q": q, "imgonly": "true", "ps": 12}).json()
+    return [(str(a.get("longTitle") or a.get("title") or "")[:200], a["webImage"]["url"], (a.get("links") or {}).get("web") or "",
+             "Public domain (Rijksmuseum)", str(a.get("principalOrFirstMaker") or "Rijksmuseum")[:200],
+             int(a["webImage"].get("width") or 0), int(a["webImage"].get("height") or 0))
+            for a in d.get("artObjects") or [] if (a.get("webImage") or {}).get("url")]
+
+
+def _nara_find(q: str) -> list:
+    import requests
+    d = requests.get("https://catalog.archives.gov/api/v2", timeout=25, params={"q": q, "rows": 12},
+                     headers=dict(_AUA, **{"x-api-key": os.environ["NARA_API_KEY"]})).json()
+    out = []
+    for h in ((d.get("body") or {}).get("hits") or {}).get("hits") or []:
+        rec = (h.get("_source") or {}).get("record") or {}
+        for o in rec.get("digitalObjects") or []:
+            if str(o.get("objectUrl", "")).lower().endswith((".jpg", ".jpeg")):
+                out.append((str(rec.get("title") or "")[:200], o["objectUrl"],
+                            f"https://catalog.archives.gov/id/{rec.get('naId', '')}", "US National Archives (public domain)",
+                            "National Archives", 0, 0))
+                break
+    return out
+
+
 ARCHIVES = {"loc.gov": _loc_find, "openverse": _openverse_find, "archive.org": _ia_find, "metmuseum.org": _met_find}
+for _env, _name, _fn in (("EUROPEANA_API_KEY", "europeana", _europeana_find), ("SMITHSONIAN_API_KEY", "si.edu", _smithsonian_find),
+                         ("RIJKSMUSEUM_API_KEY", "rijksmuseum", _rijks_find), ("NARA_API_KEY", "archives.gov", _nara_find)):
+    if os.environ.get(_env):
+        ARCHIVES[_name] = _fn
 
 
 def archive_photos(query: str, folder: Path) -> list:
