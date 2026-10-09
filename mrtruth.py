@@ -575,8 +575,8 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
                 return None              # P03 is two lines that share no word; without its kicker it falls back
             hw = next((w for w in head.split() if w.lower() not in JOINING), head.split()[0])
             return {"id": "P03", "kicker": kick, "headline": head, "highlightWords": [re.sub(r"[^\w'-]", "", hw) or hw]}
-        if tid == "framed-card":
-            return {"id": tid, "caption": head} if fits(head, "headline") else None
+        if tid == "framed-card":                  # its words must be said there too (owner 2026-10-09)
+            return {"id": tid, "caption": head} if ok(head, "headline") else None
         if tid == "shadow-up":
             return {"id": tid, "line": head} if ok(head, "headline") and not _year_in(head) else None
         if tid == "P04":
@@ -2023,6 +2023,14 @@ def _record_names(pick: dict, label: str) -> bool:
     return not words or any(w in record or (w.endswith("'s") and w[:-2] in record) for w in words)
 
 
+PEOPLE_NAMES = set()        # the film's people (surnames and full names, lower case), set before _fit_devices
+
+
+def _names_person(dev: dict) -> bool:
+    text = " ".join(str(v) for k, v in dev.items() if k != "id" and isinstance(v, str)).lower()
+    return any(re.search(rf"\b{re.escape(n)}\b", text) for n in PEOPLE_NAMES if len(n) >= 4)
+
+
 def _fit_devices(rows: list) -> None:
     """What the pictures allow: no words that name a picture on an AI frame, a weak one or one found for another
     anchor (T-8/T-10), a name only where the archive record carries it, no type on ground too bright or busy for it
@@ -2040,6 +2048,14 @@ def _fit_devices(rows: list) -> None:
         # a label that names the picture is refused only where it would name the WRONG thing: a different, identifiable
         # person, or a picture unrelated to the line. A stand-in (real or AI) of the person the line is about, or a
         # picture of the same kind of place or thing, carries the label (owner 2026-10-08)
+        if tid in NAMES_PICTURE and pick is not None and _names_person(dev) and not (pick.get("person") or pick.get("ai")):
+            # a person's name over a picture with no person in it (owner 2026-10-09: "Emilio Restivo" on a library)
+            if tid != "framed-card" and i:
+                _fall_back(rows, i, tid, "names a person over a picture with no person in it")
+            else:
+                DEV_DROPS.append((i, tid, "names a person over a picture with no person in it"))
+                r.update(device=None)
+            continue
         if tid in NAMES_PICTURE and pick is not None:
             other_person = pick.get("person") and not r.get("stand_in") and pick.get("depiction") != "named-subject"
             if other_person or pick.get("depiction") == "unrelated":
@@ -2210,6 +2226,156 @@ def typed_captions(engine, job: Path, rows: list, script: str, force: bool = Fal
             engine.log(f"      typed caption at {r['startMs'] / 1000:.0f}s is {(need_ms - r['endMs'] + r['startMs']) / 1000:.1f}s short")
         engine.log(f"      typed caption at {r['startMs'] / 1000:.0f}s for {(r['endMs'] - r['startMs']) / 1000:.1f}s: "
                    f"{' / '.join(lines)}")
+
+
+# ── 5c. every overlay lands on the word it shows (owner 2026-10-09: cards were seconds early) ─────────────────────
+SYNC_LEAD_MS = 150          # the overlay starts this much before its first word is heard
+SYNC_TOLERANCE_MS = 400     # closer than this is left alone
+SYNC_MIN_SHOT_MS = 1000     # no shot is squeezed below this when its neighbours are retimed
+_SYNC_STOP = JOINING | {"his", "her", "its", "was", "were", "is", "are", "be", "been", "had", "has", "have", "that", "this",
+                        "it", "he", "she", "they", "them", "not", "but", "or", "as", "so", "what", "which", "who", "one"}
+
+
+def _overlay_words(r: dict) -> list:
+    dev, tc = r.get("device") or {}, r.get("typedCaption") or {}
+    text = " ".join([str(v) for k, v in dev.items() if k != "id" and isinstance(v, str)]
+                    + [str(x) for v in dev.values() if isinstance(v, list) for x in v if isinstance(x, str)]
+                    + list(tc.get("lines") or []))
+    return [w.strip("'") for w in _content(text) if len(w.strip("'")) >= 3 and w.strip("'") not in _SYNC_STOP]
+
+
+def _heard(job: Path, cues: list) -> list:
+    """[(ms, word)] for every word of the voice: the recogniser's own timings when the job has them, else the
+    subtitle words spread across their cue."""
+    f = job / "words_heard.json"
+    try:
+        return [(int(a * 1000), re.sub(r"[^a-z0-9']", "", str(w).lower())) for w, a, b in json.loads(f.read_text())]
+    except Exception:                                                # noqa: BLE001
+        return [(int(ms), re.sub(r"[^a-z0-9']", "", w.lower())) for ms, w in _word_times(cues)]
+
+
+def _spoken_at(words: list, heard: list, lo: int, hi: int):
+    """The ms where the overlay's words are heard as a group inside [lo, hi], or None. A label of one or two words
+    needs one of them; a longer one needs two of its words within six seconds. Words match by stem."""
+    if not words:
+        return None
+    want = set(words)
+
+    def same(h, w):                     # a caption paraphrases: photography ~ photographed, doctrine ~ doctrinal
+        if h == w:
+            return True
+        n = len(os.path.commonprefix([h, w]))
+        return min(len(h), len(w)) >= 4 and n >= max(4, min(len(h), len(w)) - 3)
+
+    which = lambda h: next((w for w in want if same(h, w)), None)
+    hits = [(ms, which(h)) for ms, h in heard if lo <= ms <= hi and h and which(h)]
+    need = 1 if len(want) <= 2 else 2          # a two-word label is placed by its one distinctive word
+    best = None
+    for k, (ms, _) in enumerate(hits):
+        got = {w for m2, w in hits[k:] if m2 - ms <= 6000}
+        if len(got) >= need and (best is None or len(got) > best[1]):
+            best = (ms, len(got))
+    return best[0] if best else None
+
+
+SYNC_MAX_LATE_MS = 1500     # an overlay crowded by the one before may start this much after its word, no more
+_SYNC_RANK = {"P03": 9, "chapter-plate": 8, "typed caption": 7, "corner-label": 5, "P04": 5, "P17": 5, "P12": 4}
+
+
+def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
+    """Every text overlay and typed caption starts when its words are heard (SYNC_LEAD_MS before), however the planner
+    seated it. The film is re-cut around them: each overlay shot is pinned to its word and lasts at least what its
+    animation needs; the plain shots between two overlays keep their order and share the time between them. Two
+    overlays whose words come too close for both: the later one starts up to SYNC_MAX_LATE_MS late, else the lesser
+    one goes. Plain shots that no longer fit are dropped (never below SYNC_MIN_SHOT_MS a shot)."""
+    heard = _heard(job, cues)
+    total = rows[-1]["endMs"]
+    dev_id = lambda r: (r.get("device") or {}).get("id") or ("typed caption" if r.get("typedCaption") else "")
+    # only overlays that SAY something are pinned; a wordless animation (photo pop, gallery, mosaic) rides with the
+    # plain shots and only keeps the length its animation needs
+    tid = lambda r: dev_id(r) if (r.get("typedCaption") or _overlay_words(r) or r is rows[0] and dev_id(r)) else ""
+    need = lambda r: int(1000 * (_tc_need_s(r["typedCaption"]["lines"]) if r.get("typedCaption") else _need_s(dev_id(r))))
+    floor = lambda x: need(x) if dev_id(x) else SYNC_MIN_SHOT_MS
+    anchors = []                                  # [row, target ms]
+    for k, r in enumerate(rows):
+        if not tid(r):
+            continue
+        if k == 0:
+            anchors.append([r, 0])
+            continue
+        at = _spoken_at(_overlay_words(r), heard, r["startMs"] - 12000, r["endMs"] + 12000)
+        if at is None and tid(r) != "chapter-plate":
+            # words the narrator does not say anywhere near: never on screen out of step with the voice
+            engine.log(f"      {tid(r)} at {r['startMs'] / 1000:.1f}s dropped: its words are not said near it")
+            r.pop("typedCaption", None)
+            r["device"] = None
+            continue
+        anchors.append([r, max(0, at - SYNC_LEAD_MS) if at is not None else r["startMs"]])
+    kept = []
+    for r, t in anchors:                          # resolve crowding in film order
+        if kept:
+            p, pt = kept[-1]
+            free = pt + need(p)
+            if t < free:
+                if free - t <= SYNC_MAX_LATE_MS:
+                    t = free
+                else:
+                    loser = r if _SYNC_RANK.get(tid(r), 1) <= _SYNC_RANK.get(tid(p), 1) else p
+                    engine.log(f"      {tid(loser)} at {loser['startMs'] / 1000:.1f}s dropped: its words come too close to another overlay's")
+                    loser.pop("typedCaption", None)
+                    loser["device"] = None
+                    if loser is p:
+                        kept.pop()
+                        if kept and t < kept[-1][1] + need(kept[-1][0]):
+                            t = kept[-1][1] + need(kept[-1][0])
+                    else:
+                        continue
+        kept.append([r, t])
+    if not kept:
+        return
+    moved = sum(1 for r, t in kept if abs(r["startMs"] - t) > SYNC_TOLERANCE_MS)
+    # lay the film out again: [plain shots] anchor [plain shots] anchor ... [plain shots]
+    pos = {id(r): k for k, r in enumerate(rows)}
+    out, cursor, prev_k = [], 0, -1
+    marks = [(r, t) for r, t in kept] + [(None, total)]
+    for n, (r, t) in enumerate(marks):
+        k = pos[id(r)] if r is not None else len(rows)
+        plain = [x for x in rows[prev_k + 1:k] if not tid(x)]
+        # the previous anchor (already in out) may run on; the plain shots between share what it leaves
+        span = t - cursor
+        if out and out[-1] is marks[n - 1][0]:
+            a = out[-1]
+            want = max(need(a), min(a["endMs"] - a["startMs"], span))
+            while plain and span - want < sum(floor(x) for x in plain):
+                plain.remove(min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"])))
+            a_end = cursor + (want if plain else span)
+            a["endMs"] = int(a_end)
+            cursor = a_end
+            span = t - cursor
+        else:
+            while plain and span < sum(floor(x) for x in plain):
+                plain.remove(min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"])))
+        if plain:
+            tot = sum(x["endMs"] - x["startMs"] for x in plain) or 1
+            spare = span - sum(floor(x) for x in plain)
+            at = cursor
+            for j, x in enumerate(plain):
+                w = floor(x) + (x["endMs"] - x["startMs"]) * spare / tot
+                x["startMs"], x["endMs"] = int(at), int(t if j == len(plain) - 1 else at + w)
+                at += w
+                out.append(x)
+            cursor = t
+        elif out and span > 0:                    # nothing between: the shot before runs on to the word
+            out[-1]["endMs"] = int(t)
+            cursor = t
+        if r is not None:
+            r["startMs"] = int(cursor)
+            out.append(r)
+        prev_k = k
+    out[-1]["endMs"] = total
+    dropped = len(rows) - len(out)
+    rows[:] = out
+    engine.log(f"  overlays on their words: {len(kept)} pinned ({moved} moved), {dropped} plain shots folded away")
 
 
 # ── 6. the scenes, as the repo's compositor reads them ────────────────────────────────────────────────────────
@@ -2515,6 +2681,9 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     typed_captions(engine, job, rows, script, force)
     pictures(engine, job, rows, dossier, force)
     DEV_DROPS.clear()
+    PEOPLE_NAMES.clear()
+    for p in (dossier.get("visualBrief") or {}).get("people") or []:
+        PEOPLE_NAMES.update(x.lower() for x in (p.get("name") or "", p.get("surname") or "") if x)
     _fit_devices(rows)
     for i, tid, why in DEV_DROPS:
         now = (rows[i].get("device") or {}).get("id")
@@ -2522,6 +2691,7 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
             engine.log(f"      template {tid} on shot {i} kept ({why})")
         else:
             engine.log(f"      template {tid} on shot {i} refused ({why})" + (f" -> {now}" if now else " -> plain photo"))
+    sync_overlays(engine, job, rows, _cues(engine, srt))
     transitions(rows)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
