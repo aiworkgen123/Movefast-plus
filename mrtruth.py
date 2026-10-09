@@ -35,7 +35,7 @@ HERE = Path(__file__).resolve().parent
 RENDERER = HERE / "mrtruth_renderer"
 FPS = 30
 TARGET_SCENE_S = 4.0                 # the repo's DEFAULT_TARGET_SCENE_MS
-BATCH_S = 240.0                      # segmentation focus range per call
+BATCH_S = 120.0                      # segmentation focus range per call (240 lost two thirds of an 11-min film)
 GRADE = {"lut": "documentary-neutral", "vignette": 0.18, "grain": 0.06}   # the repo's DEFAULT_GRADE
 # the shadow look (renderer Grade.tsx): tight dark vignette, a dimmer, muted, harder picture. 0 = off, 1 = full.
 TYPED_CAPTION_START_F = 8                       # the reference starts typing ~0.27 s into its shot
@@ -416,26 +416,46 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
             engine.log(f"  beats {f0 // 1000}s-{f1 // 1000}s: {e} — cut on the sentences instead")
             return []
 
-    engine.log(f"Mr Truth: cutting the narration into shots ({len(batches)} part(s), the repo's segmentation brief)...")
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        parts = list(ex.map(one, batches))
-    starts = sorted({a for a, _, _ in cues} | {cues[-1][1]})
-    snap = lambda ms: min(starts, key=lambda s: abs(s - int(ms)))
-    rows = []
-    for (f0, f1), scenes in zip(batches, parts):
+    def kept_of(rng, scenes):
+        f0, f1 = rng
         kept = []
-        for s in scenes or []:
+        for sc in scenes or []:
             try:
-                a = snap(s.get("startMs"))
+                a = snap(sc.get("startMs"))
             except (TypeError, ValueError):
                 continue
             if f0 <= a < f1 and (not kept or a > kept[-1]["startMs"]):
-                kept.append(dict(s, startMs=a))
-        if not kept or kept[0]["startMs"] > f0 + 1500:
-            # a part Claude could not cut: one shot per subtitle line (the repo's deterministic split)
-            kept = [{"startMs": a, "text": txt, "visualIntent": txt, "queries": [txt, txt, ""], "entities": [],
-                     "mood": "", "sceneType": "imagery"} for a, b, txt in cues if f0 <= a < f1] or kept
-        rows += kept
+                kept.append(dict(sc, startMs=a))
+        return kept
+
+    def planned(rng):
+        """A part's shots; a part that comes back empty or starting late is asked again, then in two halves."""
+        for attempt in range(2):
+            got = kept_of(rng, one(rng))
+            if got and got[0]["startMs"] <= rng[0] + 1500:
+                return got
+            what = "empty" if not got else f"starting at {got[0]['startMs'] // 1000}s"
+            engine.log(f"  ⚠ beats {rng[0] // 1000}s-{rng[1] // 1000}s came back {what} - asking again")
+        mid = (rng[0] + rng[1]) // 2
+        halves = [kept_of((rng[0], mid), one((rng[0], mid))), kept_of((mid, rng[1]), one((mid, rng[1])))]
+        return [x for h in halves for x in h]
+
+    starts = sorted({a for a, _, _ in cues} | {cues[-1][1]})
+    snap = lambda ms: min(starts, key=lambda s: abs(s - int(ms)))
+    engine.log(f"Mr Truth: cutting the narration into shots ({len(batches)} part(s), the repo's segmentation brief)...")
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        parts = list(ex.map(planned, batches))
+    fell_back = 0
+    rows = []
+    for (f0, f1), kept in zip(batches, parts):
+        # what Claude did not cover - a whole part, or the start of one - is one shot per subtitle line (the repo's
+        # deterministic split). Such a film is never cached: the next run asks again (owner 2026-10-09: 170 of 243
+        # shots of an 11-minute film were searched by their raw narration and the second half was all repeats)
+        first = kept[0]["startMs"] if kept else f1
+        lead = [{"startMs": a, "text": txt, "visualIntent": txt, "queries": [txt, txt, ""], "entities": [],
+                 "mood": "", "sceneType": "imagery", "unplanned": True} for a, b, txt in cues if f0 <= a < min(first, f1)]
+        fell_back += len(lead)
+        rows += lead + kept
     rows.sort(key=lambda r: r["startMs"])
     rows[0]["startMs"] = 0
     for i, r in enumerate(rows):
@@ -446,7 +466,11 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     rows = [r for r in rows if r["endMs"] - r["startMs"] >= 400] or rows
     for i, r in enumerate(rows):                    # a dropped sliver's time goes to the shot before it
         r["endMs"] = rows[i + 1]["startMs"] if i + 1 < len(rows) else end_ms
-    _dump(out, {"key": key, "rows": rows})
+    if fell_back:
+        engine.log(f"  ⚠ {fell_back} shot(s) could not be planned and are searched by their own words "
+                   f"(not cached: the next run plans them again)")
+    else:
+        _dump(out, {"key": key, "rows": rows})
     engine.log(f"  {len(rows)} shots, {end_ms / 1000 / max(1, len(rows)):.1f}s each on average")
     return rows
 
