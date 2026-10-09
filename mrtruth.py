@@ -91,7 +91,7 @@ NAMES_PICTURE = {"P04", "P05", "P17", "framed-card", "corner-label"}     # words
 MIN_WIDTH = 800                 # a web photo must be this wide to fill a 1080p frame through the grade and slow move
 MIN_SCORE = 5.0                 # the judge's 3-5 is "generic, says nothing"; 0-2 wrong era, modern stock, burned-in text
 # cache versions: a change to what a step is told must redo that step on an existing job, not reuse its old answer
-BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 3, 2, 3, 7
+BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 3, 2, 3, 8
 # the picture judge: Flash-Lite at minimal thinking scored a COVID-masked researcher 9 for the 1980s and one image 1 and
 # then 8 (audit 2026-10-08); Mr Truth's judge is a stronger Gemini that thinks a little. Env overrides.
 JUDGE_MODEL = os.environ.get("MRTRUTH_JUDGE_MODEL", "gemini-3.8-flash")
@@ -1255,6 +1255,9 @@ describes: [{"candidateIndex": 1, "score": 0-10, "reason": "one sentence", "subj
 "subject": "2-5 words naming WHAT and WHICH VIEW the picture shows, the same words for the same view of the same
 place or thing (e.g. 'vatican library sistine hall', 'codex vaticanus page', 'priest at desk')"}]
 studioProduct: true when the object is photographed on a white or seamless studio background.
+READABLE WORDS IN A DOCUMENT: when a page, ledger or record in the picture shows a legible name, date or heading of a
+  DIFFERENT real person, place or event than this film's (e.g. a famous dictator's register in a film about a Vatican
+  translator), depiction is "unrelated" and the score is at most 1, however well the page "looks the part".
 person: true when a person is the main subject of the picture (a portrait, a figure at work), not a crowd or a speck.
 wrongPerson: true when the narration (or the scene's "about") points at a person and the picture's main figure is
   visibly NOT that kind of person (no priest's dress when the narration says priest or Father; a costumed model; a
@@ -1882,7 +1885,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             step = "ai" if pick else None
         if pick is None:                              # 5. an unused, unflagged photo of this line, even a weak one:
             # a new picture beats a repeat (audit v5: 20 repeats from 9 shots back, few of them fitting their new line)
-            weak = [c for c in cands + borrowed[i] if c["score"] >= 4 and c.get("depiction") != "unrelated"
+            weak = [c for c in cands + borrowed[i] if c["score"] >= 5 and c.get("depiction") != "unrelated"
                     and not c.get("flags") and _studio_ok(r, c) and seen(c["photo"]) == 0 and varied(c, i, gap=3)]
             if weak:
                 pick, step = dict(sorted(weak, key=lambda c: -c["score"])[0], contextual=True), "contextual"
