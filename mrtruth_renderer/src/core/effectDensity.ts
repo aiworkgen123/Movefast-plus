@@ -527,6 +527,17 @@ export const AMBIENCE_DENSITY: readonly AmbienceDensity[] = [
     /* Measured on V57's eight long frozen shots, 2026-09-18. See the field. */
     stillShotMaxLuma: 0.55,
   },
+  {
+    /* The light leak (owner 2026-10-09): about 7% of all shots, only on otherwise empty pictures. The planner chooses. */
+    id: 'leak',
+    share: 0.07,
+    minShotSeconds: 2,
+    shadowAlpha: 0,
+    shadowMinLuma: 1,
+    preferDark: false,
+    stillShotsFirst: false,
+    stillShotMaxLuma: 1,
+  },
 ]
 
 /** The density row for a plate. Throws when there is none, so a half-pasted plate is never quietly planned. */

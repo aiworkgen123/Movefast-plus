@@ -105,6 +105,7 @@ JOINING = {"the", "a", "an", "of", "and", "in", "at", "on", "for", "to", "from",
 FLASH_SHARE, PUSH_SHARE, SLIDE_SHARE = 0.05, 0.08, 0.03
 BURN_SHARE, BURN_PER_MIN, BURN_GAP_S, BURN_MAX_RUN = 0.2, 4.0, 6.0, 2
 DIP_FRAMES, FLASH_FRAMES, PUSH_FRAMES, SLIDE_FRAMES, BURN_IN, BURN_OUT = 18, 8, 11, 18, 14, 12
+LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.07, 2.0, 3.0     # the light leak plate (renderer fx/leak)
 DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.10, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
@@ -2356,6 +2357,20 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
         out[at]["ambience"] = {"clip": "dust", "durationFrames": n,
                                "shadow": DUST_SHADOW if lum >= DUST_SHADOW_MIN_LUMA else 0}
         took.add(at)
+    # the light leak (owner 2026-10-09): about LEAK_SHARE of ALL shots, only on EMPTY pictures - no template, no
+    # typed caption, no dust, no text card - of 2 s or more, the 3 s+ ones first, spread across the film
+    want = round(LEAK_SHARE * len(out))
+    empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
+             and not sc.get("ambience") and not sc.get("textCard") and sc["durationFrames"] >= LEAK_MIN_S * FPS]
+    empty.sort(key=lambda k: (out[k]["durationFrames"] < LEAK_PREFER_S * FPS, _content_draw(str(k) + "leak")))
+    took, gap = set(), max(2, len(out) // max(1, 2 * want))
+    for k in empty:
+        if len(took) >= want:
+            break
+        if any(abs(k - t) < gap for t in took):
+            continue
+        out[k]["ambience"] = {"clip": "leak", "durationFrames": out[k]["durationFrames"], "shadow": 0}
+        took.add(k)
     for sc in out:
         sc["renderKey"] = _hash({k: v for k, v in sc.items() if k not in ("index", "startFrame")})
     return out

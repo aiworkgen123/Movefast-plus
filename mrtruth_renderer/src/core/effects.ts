@@ -211,6 +211,15 @@ export const AMBIENCE_CLIPS: readonly AmbienceClip[] = [
     frameCount: 360,
     blend: 'screen',
   },
+  {
+    // the orange-red light leak, extracted 1:1 from the owner's reference clip (2026-10-09): a screen-blended plate
+    // recovered by inverting the screen blend over the aligned clean picture; its 3.000 s loop at 30 fps
+    id: 'leak',
+    source: 'owner reference (ship at sea), extracted by ref2/extract3.py',
+    dir: 'fx/leak',
+    frameCount: 90,
+    blend: 'screen',
+  },
 ]
 
 /**
