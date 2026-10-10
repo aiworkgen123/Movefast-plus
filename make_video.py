@@ -1696,26 +1696,41 @@ def gemini_spend_line() -> str:
 
 
 def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: str = "", thinking: str = "",
-                purpose: str = "") -> str:
+                purpose: str = "", media: str = "", lead: str = "", labels: list = None, info: dict = None) -> str:
     """Look at photos and pick (which candidate shows the subject, which cutout is clean, which still shows a person
     or vehicle) — through Gemini Flash-Lite. Tested on the same 8 candidates: Gemini chose the same two photos
     as Claude with the same crops, in 2 s against 9 s, for about $0.001, sparing ~10k Claude tokens a pick
     (photo picks were over half of a test run's Claude use). Any Gemini failure: Claude looks instead.
-    `purpose` names the look in the run's Gemini count (gemini_spend_line)."""
+    `purpose` names the look in the run's Gemini count (gemini_spend_line).
+    Mr Truth's picture checks (owner 2026-10-10) also pass:
+      media   "LOW" | "MEDIUM" | "HIGH": what each picture costs in tokens (generationConfig.mediaResolution)
+      lead, labels   the request in reading order: `lead` first, then each picture after its own label (its caption),
+              then `prompt` - every picture is sent (the plain layout keeps its first 16)
+      info    filled with who answered: via "gemini" | "claude", the model and the tokens (in, out, thinking) - a
+              Claude answer is used for the run, never kept as Gemini's."""
+    info = info if info is not None else {}
+    info.update(via="", model="", tokens=(0, 0, 0))
     key = os.environ.get("GEMINI_API_KEY", "")
     if key:
         try:
             import base64
+            img = lambda p: {"inlineData": {"mimeType": "image/jpeg" if str(p).lower().endswith((".jpg", ".jpeg"))
+                                            else "image/png", "data": base64.b64encode(Path(p).read_bytes()).decode()}}
             parts = []
-            for i, p in enumerate(list(image_paths)[:16]):
-                parts += [{"text": f"Image {i + 1}:"},
-                          {"inlineData": {"mimeType": "image/jpeg" if str(p).lower().endswith((".jpg", ".jpeg")) else "image/png",
-                                          "data": base64.b64encode(Path(p).read_bytes()).decode()}}]
+            if labels is not None:              # text first, each picture after its own label, the question last
+                parts += [{"text": lead}] if lead else []
+                for i, p in enumerate(image_paths):
+                    parts += [{"text": str(labels[i]) if i < len(labels) else f"Picture {i + 1}:"}, img(p)]
+            else:
+                for i, p in enumerate(list(image_paths)[:16]):
+                    parts += [{"text": f"Image {i + 1}:"}, img(p)]
             use = model or PICK_MODEL          # a caller may ask for a stronger judge (Mr Truth's picture judge)
             think = ({"thinkingLevel": thinking or "minimal"} if not use.startswith("gemini-2.")
                      else {"thinkingBudget": 0 if not thinking else 1024})
             body = {"contents": [{"parts": parts + [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": max(256, max_tokens), "thinkingConfig": think}}
+            if media:
+                body["generationConfig"]["mediaResolution"] = f"MEDIA_RESOLUTION_{media.upper()}"
             for wait in (2, 5, 10, 20, 0):      # busy (429/5xx): wait and ask again before Claude looks instead
                 r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
                                   headers={"x-goog-api-key": key}, json=body, timeout=180)
@@ -1739,11 +1754,19 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                         b["out"] += tout
                         b["think"] += tthink
                 if text:
+                    info.update(via="gemini", model=use, tokens=(tin, tout, tthink),
+                                finish=str(((d.get("candidates") or [{}])[0]).get("finishReason") or ""))
                     return text
+            else:
+                info["status"] = r.status_code
         except Exception:                                        # noqa: BLE001 - Claude looks instead
             pass
         with _SPEND_LOCK:
             GEMINI_PICKS["fallback"] += 1
+    if labels is not None:                       # Claude sees the pictures in order, their labels in the text
+        prompt = "\n".join([lead] + [f"Image {i + 1}: {str(labels[i]) if i < len(labels) else ''}"
+                                      for i in range(len(image_paths))] + [prompt])
+    info.update(via="claude", model="claude")
     return claude_vision(prompt, image_paths, max_tokens=max_tokens)
 
 

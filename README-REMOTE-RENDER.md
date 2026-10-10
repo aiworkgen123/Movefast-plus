@@ -46,3 +46,19 @@ AUTOMATED ON RUNPOD (cloud_run.py)
    Uploads the package to R2, rents the first card in the list with >= --vcpu cores, draws, downloads
    segments.tgz, and always terminates the pod. Measured 2026-10-08: 55 shots (3:13 film) in 6.4 min on an
    RTX 3080 Ti pod (32 vCPU, $0.18/h). The GPU is not used; the pod is rented for its CPU cores.
+
+PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
+   Every candidate picture is checked with short yes/no questions on the same Gemini as before (gemini-3.8-flash,
+   thinking low): added text, a frame, a banned kind, real or not, modern things for the shot's era, and what it shows
+   for the line - exact (the very thing the shot names, or the stand-in's role), kind, generic, no. One shot a call, at
+   most 6 pictures (search order), seen at MEDIUM; a drawn stand-in alone at HIGH as a 1280-px copy, with the owner's
+   non-Latin script rule and a question about warped faces and hands. Log: "picture checks (...)" and the tiers on
+   screen; mrtruth/verdicts.json; pick_audit.json per shot (best tier, exact/kind counts, what was refused).
+   Every answer is kept in output/_shared/picture_verdicts.sqlite (verdicts.py): a line asked before comes from it, a
+   picture found with added text or a frame (seen at MEDIUM or better) is not sent again for any line or film, and two
+   shots never ask the same question at once. On a pod, fullrun.py seeds the store from R2 (mrtruth/verdicts/) and the
+   pod uploads its own answers every ~10 minutes, after planning, after the finish, at the end and on a stop.
+   Knobs: MRTRUTH_JUDGE=score (the old 0-10 judge, for an A/B), MRTRUTH_JUDGE_MEDIA (MEDIUM), MRTRUTH_AI_CHECK_MEDIA
+   (HIGH), MRTRUTH_JUDGE_PICS (6), MRTRUTH_JUDGE_ENOUGH (2: more pictures are looked at only while fewer pass),
+   MRTRUTH_VERDICTS=off, MRTRUTH_VERDICTS_DB (the store's file), MRTRUTH_RUN_ID.
+   Store by hand: python verdicts.py stats|export|import|compact ...

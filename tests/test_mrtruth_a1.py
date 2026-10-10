@@ -659,14 +659,17 @@ class RoundOne(unittest.TestCase):
 
 class Rank(unittest.TestCase):
     def test_commons_edge(self):
+        # A2 (yes/no checks): older scored candidates are read as tiers (7+ exact, 5-6 kind, 3-4 generic); within a
+        # tier Commons goes first, and a picture with something wrong goes after every clean one
         c = {"provider": "commons", "score": 6.0, "flags": []}
         w = {"provider": "bing", "score": 6.8, "flags": []}
         w2 = {"provider": "bing", "score": 7.5, "flags": []}
         weak = {"provider": "commons", "score": 4.0, "flags": []}
         flagged = {"provider": "commons", "score": 6.0, "flags": ["modernStock"]}
         order = sorted([w2, w, flagged, weak, c], key=M._rank)
-        self.assertEqual([x["score"] for x in order], [7.5, 6.0, 6.8, 6.0, 4.0])
+        self.assertEqual([x["score"] for x in order], [7.5, 6.0, 6.8, 4.0, 6.0])
         self.assertIs(order[1], c)
+        self.assertIs(order[-1], flagged)
         self.assertEqual(M._provider({"photo": "/j/pictures/s1/commons_r2_0/c00.jpg"}), "commons")
         self.assertEqual(M._provider({"photo": "/j/pictures/s1/web_r3/w1.jpg"}), "web")
         self.assertEqual(M._provider({"photo": "x", "ai": True}), "ai")
