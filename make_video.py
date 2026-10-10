@@ -1669,14 +1669,39 @@ def _claude_code_vision(prompt: str, image_paths: list, max_tokens: int = 0) -> 
 
 
 PICK_MODEL = os.environ.get("GEMINI_PICK_MODEL", "gemini-3.5-flash-lite")
-GEMINI_PICKS = {"calls": 0, "in": 0, "out": 0, "fallback": 0}
+# every Gemini look this run: answers, tokens in / out / thinking (billed as output), and per purpose and model
+# (owner 2026-10-10: 548 calls and 4.3M tokens a film, unpriced, thinking never counted)
+GEMINI_PICKS = {"calls": 0, "in": 0, "out": 0, "think": 0, "fallback": 0, "by": {}}
+GEMINI_PRICES = {"gemini-3.8-flash": (0.75, 3.75), "gemini-3.5-flash-lite": (0.30, 2.50)}   # $ per million in, out
 
 
-def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: str = "", thinking: str = "") -> str:
+def gemini_spend_line() -> str:
+    """One line for the log: the Gemini looks of this run, what they came to, and what they were for."""
+    g = GEMINI_PICKS
+    if not (g["calls"] or g["fallback"]):
+        return ""
+    k = lambda v: f"{v / 1000:.0f}k"
+    usd, unpriced, parts = 0.0, set(), []
+    for v in sorted(g["by"].values(), key=lambda v: -v["in"]):
+        price = GEMINI_PRICES.get(v["model"])
+        cost = (v["in"] * price[0] + (v["out"] + v["think"]) * price[1]) / 1e6 if price else 0.0
+        usd += cost
+        if not price:
+            unpriced.add(v["model"])
+        parts.append(f"{v['what']} ({v['model']}) {v['calls']} calls, {k(v['in'])} in / {k(v['out'])} out / "
+                     f"{k(v['think'])} thinking" + (f" = ${cost:.2f}" if price else ""))
+    return (f"Gemini photo picks: {g['calls']} ({k(g['in'])} in, {k(g['out'])} out, {k(g['think'])} thinking"
+            f" = ${usd:.2f}), {g['fallback']} handed to Claude — " + "; ".join(parts)
+            + (f" (no price known for {', '.join(sorted(unpriced))})" if unpriced else ""))
+
+
+def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: str = "", thinking: str = "",
+                purpose: str = "") -> str:
     """Look at photos and pick (which candidate shows the subject, which cutout is clean, which still shows a person
     or vehicle) — through Gemini Flash-Lite. Tested on the same 8 candidates: Gemini chose the same two photos
     as Claude with the same crops, in 2 s against 9 s, for about $0.001, sparing ~10k Claude tokens a pick
-    (photo picks were over half of a test run's Claude use). Any Gemini failure: Claude looks instead."""
+    (photo picks were over half of a test run's Claude use). Any Gemini failure: Claude looks instead.
+    `purpose` names the look in the run's Gemini count (gemini_spend_line)."""
     key = os.environ.get("GEMINI_API_KEY", "")
     if key:
         try:
@@ -1703,12 +1728,17 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                 d = r.json()
                 text = "".join(x.get("text", "") for x in ((d.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                                if not x.get("thought")).strip()
+                u = d.get("usageMetadata") or {}
+                tin, tout, tthink = (int(u.get(f) or 0) for f in ("promptTokenCount", "candidatesTokenCount",
+                                                                   "thoughtsTokenCount"))
+                with _SPEND_LOCK:                # an empty answer is billed too: counted with the rest
+                    for b in (GEMINI_PICKS, GEMINI_PICKS["by"].setdefault(f"{purpose or 'photo pick'} | {use}", {
+                            "what": purpose or "photo pick", "model": use, "calls": 0, "in": 0, "out": 0, "think": 0})):
+                        b["calls"] += 1
+                        b["in"] += tin
+                        b["out"] += tout
+                        b["think"] += tthink
                 if text:
-                    u = d.get("usageMetadata") or {}
-                    with _SPEND_LOCK:
-                        GEMINI_PICKS["calls"] += 1
-                        GEMINI_PICKS["in"] += int(u.get("promptTokenCount") or 0)
-                        GEMINI_PICKS["out"] += int(u.get("candidatesTokenCount") or 0)
                     return text
         except Exception:                                        # noqa: BLE001 - Claude looks instead
             pass
@@ -10237,7 +10267,8 @@ def run_pipeline(title: str, minutes: int = 20, force: bool = False,
             final = publish_named_copy(job, title)
             if _styles.uses_real_photos(style) and CLEAN_RENDERS:
                 _clear_render_cache(job, final)
-            _final_check(final)
+            if not getattr(plug, "CHECKS_BEFORE_RENDER", False):   # Mr Truth checks before drawing, never after
+                _final_check(final)
             step(f"DONE -> {final}")
             return final
 
@@ -10390,9 +10421,8 @@ def run_pipeline(title: str, minutes: int = 20, force: bool = False,
                 log(f"Claude this run: {claude_spend_line()}")
                 if CLAUDE_CALLS:
                     log("Claude: biggest consumers\n" + claude_calls_report())
-                if GEMINI_PICKS["calls"] or GEMINI_PICKS["fallback"]:
-                    log(f"Gemini photo picks: {GEMINI_PICKS['calls']} ({GEMINI_PICKS['in'] / 1000:.0f}k in), "
-                        f"{GEMINI_PICKS['fallback']} handed to Claude")
+            if GEMINI_PICKS["calls"] or GEMINI_PICKS["fallback"]:     # also on a run with no Claude call at all
+                log(gemini_spend_line())
         except Exception:                                    # noqa: BLE001 - a log line only
             pass
         # a run that stopped halfway leaves the finished video in the working folder: it goes back up

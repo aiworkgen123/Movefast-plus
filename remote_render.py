@@ -15,6 +15,22 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 
+def frames_of(task):
+    p = task.get("props") or {}
+    return int((p.get("scene") or {}).get("durationFrames") or p.get("durationFrames") or 0)
+
+
+def balanced(todo, workers):
+    """The shots split over the processes by length, longest first, each to the process with the fewest frames so
+    far (as mrtruth._balanced). A fixed every-n-th split left the film waiting 74 s on one process's last shots."""
+    parts, load = [[] for _ in range(max(1, workers))], [0] * max(1, workers)
+    for t in sorted(todo, key=lambda t: -frames_of(t)):
+        k = load.index(min(load))
+        parts[k].append(t)
+        load[k] += frames_of(t)
+    return [p for p in parts if p]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=0, help="render processes (default: cores // 4)")
@@ -42,8 +58,13 @@ def main():
     env = dict(os.environ)
     if a.gl:
         env["MT_GL"] = a.gl
-    parts = [todo[k::workers] for k in range(workers)] if len(todo) > 8 else [todo]
-    parts = [p for p in parts if p]
+    first = None
+    if len(todo) > 8 and workers > 1 and not (work / "bundle" / "index.html").exists():
+        first = min(todo, key=frames_of)          # the bundle is built once, while the shortest shot is drawn
+        rest = [t for t in todo if t is not first]
+    else:
+        rest = todo
+    parts = balanced(rest, workers) if len(todo) > 8 else [p for p in [rest] if p]
     t0 = time.time()
     stop = threading.Event()
 
@@ -62,10 +83,9 @@ def main():
         if p.returncode != 0:
             sys.exit(f"renderer failed: {(p.stderr or p.stdout)[-1200:]}")
 
+    if first is not None:
+        run(99, [first])
     if parts:
-        if len(parts) > 1 and not (work / "bundle" / "index.html").exists():
-            run(99, parts[0][:1])
-            parts[0] = parts[0][1:]
         with ThreadPoolExecutor(max_workers=len(parts)) as ex:
             list(ex.map(lambda kp: run(*kp), enumerate(parts)))
     stop.set()

@@ -141,6 +141,21 @@ def p03_fits(headline: str) -> bool:
     return lines <= 2
 
 
+def _whole_words(text: str, limit: int) -> str:
+    """Words on screen are cut at a whole word, never inside one (2026-10-10: a pod film opened on "The Vatican
+    Apostolic Li"): the longest run of whole words from the start within `limit` characters. A cut line does not end
+    on a joining word or a dangling mark. "" when even the first word is too long."""
+    words, out = str(text or "").split(), []
+    for w in words:
+        if len(" ".join(out + [w])) > limit:
+            break
+        out.append(w)
+    if len(out) < len(words):
+        while out and (out[-1].lower().strip(",.:;-—–'\"") in JOINING or not out[-1].strip(",.:;-—–'\"")):
+            out.pop()
+    return " ".join(out).rstrip(" ,:;-—–")
+
+
 def _hash(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
@@ -198,6 +213,8 @@ def _cfg(engine, style: str) -> dict:
 
 # ── 1. research dossier ───────────────────────────────────────────────────────────────────────────────────────
 def prepare(engine, script: str, job: Path, style: str, force: bool) -> None:
+    if _finishing():                    # a finish joins the saved plan's drawn shots: nothing to research
+        return
     research(engine, script, job, force)
 
 
@@ -438,10 +455,13 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
         return kept
 
     def planned(rng):
-        """A part's shots; a part that comes back empty or starting late is asked again, then in two halves."""
+        """A part's shots; a part that comes back empty or starting late is asked again, then in two halves.
+        'Late' is measured from the part's first subtitle line, not from the 120-s mark: the line at 240 s began at
+        241.7 s and a correct answer was thrown away and asked again twice, then as halves (pod run 2026-10-10)."""
+        first = next((s for s in starts if s >= rng[0]), rng[0])
         for attempt in range(2):
             got = kept_of(rng, one(rng))
-            if got and got[0]["startMs"] <= rng[0] + 1500:
+            if got and got[0]["startMs"] <= first + 1500:
                 return got
             what = "empty" if not got else f"starting at {got[0]['startMs'] // 1000}s"
             engine.log(f"  ⚠ beats {rng[0] // 1000}s-{rng[1] // 1000}s came back {what} - asking again")
@@ -648,23 +668,34 @@ def preflight(engine) -> None:
 
 
 def opportunities(engine, job: Path, script: str, force: bool = False) -> list:
+    """The planner's templates and their words (the repo's visual plan brief), cached per brief: a changed brief,
+    guide, title or script asks again. A failed or empty answer is never saved (2026-10-10: one Claude error saved []
+    and took every planned template away from that job for good)."""
     out = job / "mrtruth" / "templates.json"
-    got = None if force else _load(out)
-    if got is not None:
-        return got
     title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
     guide = _guide()
     prompt = (_prompts()["visual_plan"]
               + ("\n\n## THE CHANNEL'S OWN TEMPLATE GUIDE (the owner's notes; where it disagrees with the above, it wins)\n"
                  + guide if guide else "")
               + f"\n\nTITLE: {title}\n\n<script>\n{script}\n</script>")
+    key = _hash([prompt])
+    got = None if force else _load(out)
+    if isinstance(got, dict) and got.get("key") == key and got.get("opportunities"):
+        return got["opportunities"]
+    if isinstance(got, list) and got:            # a real answer saved before answers carried their brief's key: kept
+        _dump(out, {"key": key, "opportunities": got})
+        return got
     engine.log("Mr Truth: choosing templates and their words (the repo's visual plan brief)...")
     try:
         got = _ask(engine, prompt, 32000, model=engine.SCRIPT_MODEL).get("opportunities") or []
     except RuntimeError as e:
-        engine.log(f"  {e} — the film carries only the templates Mr Truth places by itself")
-        got = []
-    _dump(out, got)
+        engine.log(f"  {e} — the film carries only the templates Mr Truth places by itself (asked again next run)")
+        return []
+    if not isinstance(got, list) or not got:
+        engine.log("  the visual plan came back empty — the film carries only the templates Mr Truth places by itself "
+                   "(not saved: asked again next run)")
+        return []
+    _dump(out, {"key": key, "opportunities": got})
     return got
 
 
@@ -687,13 +718,15 @@ def _dur(r) -> float:
 
 def _can(rows: list, i: int, tid: str, ignore_len: bool = False) -> bool:
     """May template `tid` go on shot i: switched on, the shot free, under its per-film cap, allowed at this position,
-    not a year shot (those belong to P12/P14), and long enough for its animation to finish."""
+    not a year shot (those belong to P12/P14), and long enough for its animation to finish. The first shot is the
+    opening title's (T-11) and takes nothing else: a gallery-strip seated there was overwritten by the title and lost
+    without a word (pod run 2026-10-10)."""
     on, pics, lo, hi, cap, pos, _, _ = LIBRARY[tid]
     if not on or rows[i].get("device"):
         return False
     if cap is not None and sum(1 for r in rows if (r.get("device") or {}).get("id") == tid) >= cap:
         return False
-    if pos == "not-opening" and i == 0:
+    if i == 0 and tid != "P03":
         return False
     if tid not in ("P12", "P14", "chapter-plate", "chapter-title") and i and _year_in(rows[i]["text"]):
         return False                 # a shot that speaks a year belongs to P12/P14 (the repo's G15)
@@ -807,6 +840,9 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
         tid = str(o.get("templateId") or "")
         if tid not in LIBRARY:
             continue
+        if tid == "gallery-strip":          # its place is the first shot or the hook, and the first shot is the title's:
+            engine.log("      planned gallery-strip goes on the shot that ends the hook")   # placed below, once
+            continue
         ms = at_ms(int(o.get("startChar") or 0))
         home = max(0, min(len(rows) - 1, next((k - 1 for k, s in enumerate(starts) if s > ms), len(rows) - 1)))
         quoted = set(_content(" ".join([str(o.get("headline") or "")] + [str(x) for x in o.get("lines") or []])))
@@ -836,42 +872,55 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
             else:
                 engine.log(f"      planned {tid} '{o.get('headline', '')}' found no shot (words not spoken nearby)")
 
-    # every spoken four-figure year takes P12 where nothing else sits (T-2), never two in a row
-    for i, r in enumerate(rows):
-        if not r.get("device") and _year_in(r["text"]) and not (i and (rows[i - 1].get("device") or {}).get("id") in ("P12", "P14")):
-            put(i, {"id": "P12", "year": _year_in(r["text"]), "eraLabel": "", "detail": ""})
-
-    # the opening carries P03 (T-11): the planner's, else the film's own title
+    # the opening carries P03 (T-11): the planner's, else the film's own title. Placed before the years, so the first
+    # shot is never handed a P12 that the title then covers
     if (rows[0].get("device") or {}).get("id") != "P03":
         sections = dossier.get("sections") or []
         cand = [str(s.get("title") or "") for s in sections[:1]] + [re.sub(r"\s*[—:|(-].*$", "", title)]
         head = next((h for h in cand if h and len(h) <= 26 and p03_fits(h)), "")
         if head:
-            kick = str(dossier.get("setting") or dossier.get("period") or "").split(",")[0][:24].strip() or "The story"
+            # whole words only: the kicker of the pod film read "The Vatican Apostolic Li" (2026-10-10)
+            kick = _whole_words(str(dossier.get("setting") or dossier.get("period") or "").split(",")[0], 24) or "The story"
             if set(_content(kick)) & set(_content(head)):
-                kick = str(dossier.get("period") or "The story")[:24]
+                kick = _whole_words(str(dossier.get("period") or ""), 24) or "The story"
             hw = next((w for w in head.split() if w.lower() not in JOINING), head.split()[0])
+            old = (rows[0].get("device") or {}).get("id")
+            if old:                                  # never covered silently: the count stays true
+                engine.log(f"      template {old} on the first shot gives way to the opening title")
+                used[old] = max(0, used.get(old, 0) - 1)
             rows[0]["device"] = {"id": "P03", "kicker": kick, "headline": head, "highlightWords": [re.sub(r"[^\w'-]", "", hw) or hw]}
             used["P03"] = used.get("P03", 0) + 1
 
+    # every spoken four-figure year takes P12 where nothing else sits (T-2), never two in a row
+    for i, r in enumerate(rows):
+        if not r.get("device") and _year_in(r["text"]) and not (i and (rows[i - 1].get("device") or {}).get("id") in ("P12", "P14")):
+            put(i, {"id": "P12", "year": _year_in(r["text"]), "eraLabel": "", "detail": ""})
+
     sections = dossier.get("sections") or []        # chapters: fill_overlays() (owner 2026-10-08)
 
-    # the gallery strip, once, on the shot that ends the hook (the first section, else ~30 s in)
+    # the gallery strip, once, on the shot that ends the hook (the first section, else ~30 s in): a shot that ENDS at
+    # the boundary first, so the first section still opens on its own words. Now that the planner's gallery is no
+    # longer lost on the first shot this placement shows (2026-10-10), and the nearest START put it on the pod film's
+    # protagonist introduction, after the boundary, where his typed caption was planned
     if not used.get("gallery-strip"):
         hook_ms = at_ms(int(sections[1].get("startChar") or 0)) if len(sections) > 1 else 30000
+        inside = lambda k: rows[k]["endMs"] <= hook_ms + 500
         near = sorted((k for k in range(1, len(rows)) if not rows[k].get("device") and rows[k]["startMs"] <= max(hook_ms, 20000) + 15000),
-                      key=lambda k: abs(rows[k]["startMs"] - hook_ms))
+                      key=lambda k: (not inside(k), abs((rows[k]["endMs"] if inside(k) else rows[k]["startMs"]) - hook_ms)))
         need = (BUILD_FRAMES["gallery-strip"] + 4) / FPS          # 4.5 s: the camera's whole move across the four cards
         for k in near[:4]:
             if dur(rows[k]) < need:
-                # no shot is that long (the brief cuts at five seconds): the shot after it joins it, as the repo
-                # cuts the gallery's carrier out of the narration around the hook
-                nxt = rows[k + 1] if k + 1 < len(rows) else None
-                if nxt is None or nxt.get("device") or dur(rows[k]) + dur(nxt) > 6.5 or dur(rows[k]) + dur(nxt) < need:
+                # no shot is that long (the brief cuts at five seconds): the shot beside it joins it, as the repo cuts
+                # the gallery's carrier out of the narration around the hook - the one before when this one ends the
+                # hook (the carrier still ends there), else the one after
+                j = k - 1 if inside(k) else k + 1
+                nb = rows[j] if 1 <= j < len(rows) else None
+                if nb is None or nb.get("device") or dur(rows[k]) + dur(nb) > 6.5 or dur(rows[k]) + dur(nb) < need:
                     continue
-                rows[k]["endMs"] = nxt["endMs"]
-                rows[k]["text"] = f"{rows[k]['text']} {nxt['text']}".strip()
-                del rows[k + 1]
+                k, b = min(j, k), max(j, k)
+                rows[k]["endMs"] = rows[b]["endMs"]
+                rows[k]["text"] = f"{rows[k]['text']} {rows[b]['text']}".strip()
+                del rows[b]
             rows[k]["device"] = {"id": "gallery-strip"}
             used["gallery-strip"] = 1
             break
@@ -995,8 +1044,12 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
         if k < 0 or not head or chapters >= CHAPTERS_MAX:
             continue
-        if len(head) > 25:
-            head = " ".join(head.split()[:4])[:25].rstrip(" ,:-")
+        if len(head) > 25:                       # cut at a whole word (owner 2026-10-10), never inside one
+            cut = _whole_words(" ".join(head.split()[:4]), 25)
+            if not cut:
+                engine.log(f"      chapter '{head}' skipped (its first word is longer than a heading)")
+                continue
+            head = cut
         head = " ".join(w.lower() if j and w.lower() in ("of", "the", "a", "an", "and", "in", "on", "to", "for", "at", "by")
                         else w for j, w in enumerate(head.split()))
         r = rows[k]
@@ -1016,7 +1069,7 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
                     key=lambda k: abs(rows[k]["startMs"] - f * total_s * 1000), default=None)
             if k is None:
                 break
-            head = " ".join(titles[min(chapters, len(titles) - 1)].split()[:4])[:25].rstrip(" ,:-")
+            head = _whole_words(" ".join(titles[min(chapters, len(titles) - 1)].split()[:4]), 25) or "The Turn"
             rows[k]["device"], rows[k]["section_turn"] = {"id": "chapter-plate", "heading": head}, True
             _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
             chapters += 1
@@ -1053,6 +1106,56 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
 
 
 # ── 5. pictures ───────────────────────────────────────────────────────────────────────────────────────────────
+# where the picture stage's time goes (owner 2026-10-10: 1419 s of an 11-minute film's planning, unmeasured). Seconds
+# summed over the shots worked at once, so the parts add up to more than the stage's own clock; n = how many of each
+PIC_T = {}
+_PIC_T_LOCK = threading.Lock()
+
+
+class _timed:
+    """with _timed("judging"): ... — adds the block's seconds to PIC_T[part]."""
+    def __init__(self, part: str):
+        self.part = part
+
+    def __enter__(self):
+        self.t0 = time.time()
+
+    def __exit__(self, *exc):
+        with _PIC_T_LOCK:
+            s, n = PIC_T.get(self.part, (0.0, 0))
+            PIC_T[self.part] = (s + time.time() - self.t0, n + 1)
+
+
+WEB_MAX_PX = 2560       # a downloaded photo is kept at most this big on its long side: 50-170 MP originals were saved,
+                        # staged into the render package and decoded by Chromium as they came (2026-10-10)
+
+
+def _fit_px(im):
+    """The picture, scaled down to WEB_MAX_PX on its long side when it is bigger (a 1080p frame needs ~2100 px for the
+    slow move through the grade); a smaller one comes back as it is."""
+    from PIL import Image
+    if max(im.size) <= WEB_MAX_PX:
+        return im
+    im = im.copy()
+    im.thumbnail((WEB_MAX_PX, WEB_MAX_PX), Image.LANCZOS)
+    return im
+
+
+def _save_web(content: bytes, dest: Path) -> None:
+    """Downloaded bytes onto disk: as they came when the picture is small enough, else scaled down (_fit_px)."""
+    import io
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(content)) as im:
+            big = max(im.size) > WEB_MAX_PX
+            if big:
+                _fit_px(im.convert("RGB")).save(dest, "JPEG", quality=92)
+                return
+    except Exception:                                                # noqa: BLE001 - not readable here: kept as is
+        pass
+    dest.write_bytes(content)
+
+
 _COMMONS_GATE = threading.Semaphore(3)
 _COMMONS_LAST = [0.0]
 _COMMONS_GAP = [0.4]                 # seconds between Wikimedia requests: doubles on a 429, eases back on success
@@ -1099,22 +1202,23 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
         # a busy answer (429) to the search is asked again like a download; it used to read as "no pictures" and was
         # cached, so the shot lost its Commons photos for good (found 2026-10-09, timing the planner)
         pages = []
-        for attempt in range(4):
-            try:
-                _commons_wait()
-                r = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30, params={
-                    "action": "query", "format": "json", "generator": "search", "gsrsearch": f"filetype:bitmap {query}",
-                    "gsrnamespace": 6, "gsrlimit": 15, "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata",
-                    "iiurlwidth": 1920})
-                _commons_said(r.status_code, r.headers.get("retry-after"))
-                if r.status_code == 429 or r.status_code >= 500:
+        with _timed("search"):
+            for attempt in range(4):
+                try:
+                    _commons_wait()
+                    r = requests.get("https://commons.wikimedia.org/w/api.php", headers=UA, timeout=30, params={
+                        "action": "query", "format": "json", "generator": "search", "gsrsearch": f"filetype:bitmap {query}",
+                        "gsrnamespace": 6, "gsrlimit": 15, "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata",
+                        "iiurlwidth": 1920})
+                    _commons_said(r.status_code, r.headers.get("retry-after"))
+                    if r.status_code == 429 or r.status_code >= 500:
+                        refused = True
+                        continue
+                    pages = sorted(((r.json().get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 99))
+                    refused = False
+                    break
+                except Exception:                                    # noqa: BLE001 - asked again, then the web search stands
                     refused = True
-                    continue
-                pages = sorted(((r.json().get("query") or {}).get("pages") or {}).values(), key=lambda p: p.get("index", 99))
-                refused = False
-                break
-            except Exception:                                        # noqa: BLE001 - asked again, then the web search stands
-                refused = True
         for p in pages:
             ii = (p.get("imageinfo") or [{}])[0]
             w, h = int(ii.get("width") or 0), int(ii.get("height") or 0)
@@ -1124,16 +1228,17 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
                 continue
             dest = folder / f"c{len(picks):02d}.jpg"
             try:
-                for attempt in range(3):
-                    _commons_wait()
-                    resp = requests.get(ii.get("thumburl") or ii["url"], headers=UA, timeout=60)
-                    _commons_said(resp.status_code, resp.headers.get("retry-after"))
-                    if resp.status_code != 429:
-                        break
-                if not resp.ok:
-                    refused = refused or resp.status_code == 429
-                    continue
-                dest.write_bytes(resp.content)
+                with _timed("downloads"):
+                    for attempt in range(3):
+                        _commons_wait()
+                        resp = requests.get(ii.get("thumburl") or ii["url"], headers=UA, timeout=60)
+                        _commons_said(resp.status_code, resp.headers.get("retry-after"))
+                        if resp.status_code != 429:
+                            break
+                    if not resp.ok:
+                        refused = refused or resp.status_code == 429
+                        continue
+                    _save_web(resp.content, dest)    # the 1920-px thumbnail as it came; an original over 2560 px scaled
             except Exception:                                        # noqa: BLE001
                 continue
             em = ii.get("extmetadata") or {}
@@ -1347,7 +1452,8 @@ def archive_photos(query: str, folder: Path) -> list:
         if ARCHIVE_DOWN.get(name, 0) >= ARCHIVE_DOWN_AFTER:          # failed that many times in a row: down
             return name, [], False
         try:
-            hits = ARCHIVES[name](query)
+            with _timed("search"):
+                hits = ARCHIVES[name](query)
             ARCHIVE_DOWN[name] = 0
             return name, hits, True
         except Exception as e:                                       # noqa: BLE001 - this shot goes on without it
@@ -1363,7 +1469,8 @@ def archive_photos(query: str, folder: Path) -> list:
         dest = folder / f"a{hashlib.sha1(url.encode()).hexdigest()[:12]}.jpg"
         try:
             if not dest.exists():
-                resp = requests.get(url, headers=_AUA, timeout=60)
+                with _timed("downloads"):
+                    resp = requests.get(url, headers=_AUA, timeout=60)
                 if not resp.ok or len(resp.content) < 20000:
                     return None
                 dest.write_bytes(resp.content)
@@ -1584,8 +1691,9 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
     items = []
     for _ in range(2):                             # one retry: a dropped answer must not cost a shot its pictures
         try:
-            raw = engine.pick_vision(brief, [str(p) for p in small], max_tokens=12000,
-                                     model=JUDGE_MODEL, thinking=JUDGE_THINKING)
+            with _timed("judging"):
+                raw = engine.pick_vision(brief, [str(p) for p in small], max_tokens=12000,
+                                         model=JUDGE_MODEL, thinking=JUDGE_THINKING, purpose="picture judge")
             items = json.loads(re.search(r"\[.*\]", raw, re.DOTALL).group(0))
             if isinstance(items, list) and items:
                 break
@@ -1635,15 +1743,19 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
 
 def archive_names(engine, job: Path, rows: list, dossier: dict, force: bool = False) -> None:
     """row["archive"] = the one name an archive files this shot's subject under (the repo's archive-names brief), or
-    nothing. Neighbours get different names; a name over 3 words, a bare number or the previous shot's is dropped."""
+    nothing. Neighbours get different names; a name over 3 words, a bare number or the previous shot's is dropped.
+    Asked in parts of 60 shots; a part Claude did not answer is asked again on the next run (2026-10-10: a failed
+    part used to be saved as answered, so its shots searched without archive names for good)."""
     out = job / "mrtruth" / "archive_names.json"
     key = _hash([NAMES_V, [r["text"] for r in rows], dossier])
     got = None if force else _load(out)
-    got = got.get("names") if isinstance(got, dict) and got.get("key") == key else None
-    if got is None:
-        got = {}
+    got = dict(got.get("names") or {}) if isinstance(got, dict) and got.get("key") == key else {}
+    # a part counts as answered when Claude named (or declined, null) nearly all of its shots
+    answered = lambda b0: sum(1 for i in range(b0, min(len(rows), b0 + 60)) if str(i) in got) >= 0.9 * (min(len(rows), b0 + 60) - b0)
+    ask = [b0 for b0 in range(0, len(rows), 60) if not answered(b0)]
+    if ask:
         engine.log("Mr Truth: archive names for the picture search (the repo's brief)...")
-        for b0 in range(0, len(rows), 60):
+        for b0 in ask:
             blocks = []
             for i in range(b0, min(len(rows), b0 + 60)):
                 r = rows[i]
@@ -1654,11 +1766,18 @@ def archive_names(engine, job: Path, rows: list, dossier: dict, force: bool = Fa
             prompt = (_prompts()["archive_names"] + "\n" + _film_block(dossier) + "\n\n" + "\n".join(blocks)
                       + '\n\nReturn {"names": [{"index": 0, "name": "..." or null}, ...]}.')
             try:
+                part = {}
                 for x in _ask(engine, prompt, 8000).get("names") or []:
-                    got[str(int(x.get("index")))] = x.get("name")
-            except (RuntimeError, TypeError, ValueError) as e:
+                    i = int(x.get("index"))
+                    if b0 <= i < b0 + 60:
+                        part[str(i)] = x.get("name")
+                got.update(part)
+            except (RuntimeError, TypeError, ValueError, AttributeError) as e:
                 engine.log(f"  archive names: {str(e)[:100]} — the shots keep their own search words")
-        _dump(out, {"key": key, "names": got})
+        left = sum(1 for b0 in ask if not answered(b0))
+        if left:
+            engine.log(f"  archive names: {left} of {len(ask)} part(s) unanswered — asked again next run")
+        _dump(out, {"key": key, "names": got})          # the answered parts only count; the rest are asked again
     prev = None
     for i, r in enumerate(rows):
         name = str(got.get(str(i)) or "").strip()
@@ -1698,10 +1817,11 @@ def brave_search(query: str, folder: Path, n: int = 12) -> list:
             if wait > 0:
                 time.sleep(min(wait, 5.0))
             try:
-                resp = requests.get("https://api.search.brave.com/res/v1/images/search", timeout=30,
-                                    headers={"Accept": "application/json", "X-Subscription-Token": key},
-                                    params={"q": query, "count": min(20, n + 6), "country": "ALL", "search_lang": "en",
-                                            "safesearch": "strict", "spellcheck": 1})
+                with _timed("search"):
+                    resp = requests.get("https://api.search.brave.com/res/v1/images/search", timeout=30,
+                                        headers={"Accept": "application/json", "X-Subscription-Token": key},
+                                        params={"q": query, "count": min(20, n + 6), "country": "ALL", "search_lang": "en",
+                                                "safesearch": "strict", "spellcheck": 1})
             except Exception:                                        # noqa: BLE001 - Commons still stands
                 return []
             with _BRAVE_LOCK:
@@ -1749,7 +1869,8 @@ def brave_search(query: str, folder: Path, n: int = 12) -> list:
 
 
 def _download(cand: dict, dest: Path):
-    """One web photo as a JPEG, kept only when it can fill a 1080p frame: at least 960 wide, landscape, not panorama."""
+    """One web photo as a JPEG, kept only when it can fill a 1080p frame: at least MIN_WIDTH wide, landscape, not
+    panorama. Saved at most WEB_MAX_PX on its long side (_fit_px)."""
     import io
     import requests
     import photofx
@@ -1759,7 +1880,8 @@ def _download(cand: dict, dest: Path):
         if not url:
             continue
         try:
-            g = requests.get(url, headers=photofx._IMG_HEADERS, timeout=20)
+            with _timed("downloads"):
+                g = requests.get(url, headers=photofx._IMG_HEADERS, timeout=20)
             if g.status_code != 200 or len(g.content) < 2000:
                 continue
             im = photofx.load_rgb(io.BytesIO(g.content))
@@ -1768,7 +1890,7 @@ def _download(cand: dict, dest: Path):
         w, h = im.size
         if w >= MIN_WIDTH and h and 1.0 <= w / h <= 2.5:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            im.save(dest, "JPEG", quality=92)
+            _fit_px(im).save(dest, "JPEG", quality=92)
             return dest
     return None
 
@@ -1917,6 +2039,11 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
              for e in dossier.get("keyEntities") or []}
     t0 = time.time()
     b0 = _BRAVE["requests"]
+    with _PIC_T_LOCK:
+        PIC_T.clear()
+    # the open archives are off unless MRTRUTH_ARCHIVES=1 (owner 2026-10-10: dropped, yet still asked ~100 times a film
+    # with SSL errors and time-outs); off, they are not called at all
+    archives_on = os.environ.get("MRTRUTH_ARCHIVES", "0") == "1"
     home_of = lambda r: root / ("s" + hashlib.sha1(r["text"].encode()).hexdigest()[:14])
 
     around = lambda i: (rows[i - 1]["text"] if i else "", rows[i + 1]["text"] if i + 1 < len(rows) else "")
@@ -1960,7 +2087,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             scored = judged(i, commons_photos(archive, home / "commons"), [])
             tried.append(archive)
         done = 1 if any(usable(r, c, max(7.0, _need(r))) for c in scored) else 0
-        if not done:                                 # the open archives (LoC, Openverse, Internet Archive, the Met): free
+        if not done and archives_on:                 # the open archives (LoC, Openverse, Internet Archive, the Met): free
             aq = archive or " ".join(q.split()[:5])
             scored = judged(i, archive_photos(aq, home / "archives"), scored)
             tried.append(f"archives: {aq}")
@@ -1988,8 +2115,11 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
 
     if not os.environ.get("AI_IMAGE_CAP"):          # an explicit AI_IMAGE_CAP in .env still wins
         engine.AI_IMAGE_CAP = max(1, int(round(AI_PER_MIN * rows[-1]["endMs"] / 60000)))
-    engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, then Brave; up to 3 rounds; Gemini judges; "
-               f"AI stand-ins: {AI_MODEL}, at most {getattr(engine, 'AI_IMAGE_CAP', '?')})...")
+    engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, "
+               + ("the open archives, " if archives_on else "")
+               + f"then Brave; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most "
+               f"{getattr(engine, 'AI_IMAGE_CAP', '?')}"
+               + ("" if archives_on else "; open archives off, MRTRUTH_ARCHIVES=1 turns them on") + ")...")
     archive_names(engine, job, rows, dossier, force)
     with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         states = list(ex.map(first_rounds, range(len(rows))))
@@ -2245,6 +2375,9 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                                      for k, v in ARCHIVE_ERRORS.items()) if ARCHIVE_ERRORS else "")
                + ("; skipped as down: " + ", ".join(k for k, v in ARCHIVE_DOWN.items() if v >= ARCHIVE_DOWN_AFTER)
                   if any(v >= ARCHIVE_DOWN_AFTER for v in ARCHIVE_DOWN.values()) else ""))
+    if PIC_T:                                         # where the stage's time went (A12)
+        engine.log(f"    picture time, summed over the {SHOT_WORKERS} shots at once: "
+                   + ", ".join(f"{k} {s:.0f}s ({n}x)" for k, (s, n) in PIC_T.items()))
 
 
 AI_CHECK = """This is a GENERATED stand-in picture for one line of a documentary. Look at it hard and answer ONLY a
@@ -2267,7 +2400,9 @@ def _ai_ok(engine, dest: Path, row: dict, dossier: dict) -> tuple:
     prompt = (AI_CHECK.replace("[FILM]", _film_block(dossier)).replace("[LINE]", row.get("text", ""))
               + f"\nintended picture: {row.get('visualIntent', '')}")
     try:
-        raw = engine.pick_vision(prompt, [str(_small(dest))], max_tokens=4000, model=JUDGE_MODEL, thinking=JUDGE_THINKING)
+        with _timed("AI checks"):
+            raw = engine.pick_vision(prompt, [str(_small(dest))], max_tokens=4000, model=JUDGE_MODEL,
+                                     thinking=JUDGE_THINKING, purpose="AI check")
         x = json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group(0))
     except Exception as e:                                           # noqa: BLE001 - unchecked: not used
         return False, f"not checked ({str(e)[:60]})"
@@ -2295,14 +2430,16 @@ def _draw_ai(engine, prompt: str, dest: Path, label: str) -> None:
     engine.ai_image_slot(label)                      # counts against the film's AI cap (raises when it is reached)
     raw = dest.with_name(dest.stem + "_z.png")
     try:
-        wavespeed.run(AI_MODEL, {"prompt": prompt[:3900], "size": AI_SIZE, "output_format": "png"}, raw, label=label,
-                      log=engine.log)
+        with _timed("AI drawing"):
+            wavespeed.run(AI_MODEL, {"prompt": prompt[:3900], "size": AI_SIZE, "output_format": "png"}, raw, label=label,
+                          log=engine.log)
         Image.open(raw).convert("RGB").save(dest, "JPEG", quality=93)
     except Exception as e:                                            # noqa: BLE001 - the backup draws it instead
         engine.log(f"    {label}: {AI_MODEL} failed ({str(e)[:80]}) - drawing it with the backup")
         with engine._AI_LOCK:                        # the backup claims its own slot: hand this one back
             engine._AI_IMAGES["used"] = max(0, engine._AI_IMAGES["used"] - 1)
-        engine.image_gen(prompt, dest, label=label)
+        with _timed("AI drawing"):
+            engine.image_gen(prompt, dest, label=label)
     finally:
         raw.unlink(missing_ok=True)
 
@@ -2958,11 +3095,22 @@ def _key(path: str) -> str:
 
 
 def _stage(storage: Path, path: str) -> str:
+    """The picture copied into the render's storage; one bigger than WEB_MAX_PX (saved by an older run) goes in
+    scaled down, so the package stays small and Chromium never decodes a 50-170 MP original (2026-10-10)."""
     key = _key(path)
     dest = storage / key
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dest)
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                big = max(im.size) > WEB_MAX_PX
+                if big:
+                    _fit_px(im.convert("RGB")).save(dest, "PNG" if dest.suffix == ".png" else "JPEG", quality=92)
+        except Exception:                                            # noqa: BLE001 - copied as it is
+            big = False
+        if not big:
+            shutil.copy2(path, dest)
     return key
 
 
@@ -3139,6 +3287,23 @@ def export_package(engine, work: Path, todo: list) -> Path:
     return out
 
 
+def _frames_of(task: dict) -> int:
+    p = task.get("props") or {}
+    return int((p.get("scene") or {}).get("durationFrames") or p.get("durationFrames") or 0)
+
+
+def _balanced(todo: list, workers: int) -> list:
+    """The shots split over `workers` processes by their length, longest first, each to the process with the fewest
+    frames so far; each process draws its own longest first. A fixed every-n-th split left one process with the two
+    longest shots and the film waiting 74 s on its last four (pod run 2026-10-10: 1724-2273 frames a process)."""
+    parts, load = [[] for _ in range(max(1, workers))], [0] * max(1, workers)
+    for t in sorted(todo, key=lambda t: -_frames_of(t)):          # stable: equal lengths keep the film's order
+        k = load.index(min(load))
+        parts[k].append(t)
+        load[k] += _frames_of(t)
+    return [p for p in parts if p]
+
+
 def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
     """Render [{id, props, output}] through mrtruth_renderer/movefast/render.mjs, split over `workers` processes."""
     todo = [t for t in tasks if not Path(t["output"]).exists()]
@@ -3147,8 +3312,6 @@ def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
     if os.environ.get("MT_EXPORT_PACKAGE"):
         raise PackageExported(export_package(engine, work, todo))
     node = shutil.which("node") or "/opt/homebrew/bin/node"
-    parts = [todo[k::workers] for k in range(workers)] if len(todo) > 8 else [todo]
-    engine.log(f"Mr Truth: rendering {len(todo)} shot(s) with the repo's compositor ({len(parts)} process(es))...")
     t0 = time.time()
 
     def run(k, part):
@@ -3159,8 +3322,13 @@ def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
         if p.returncode != 0:
             raise RuntimeError(f"Mr Truth renderer failed: {(p.stderr or p.stdout)[-800:]}")
 
-    if len(parts) > 1 and not (work / "bundle" / "index.html").exists():
-        run(0, parts[0][:1])                          # bundle once before the processes share it
+    n = len(todo)
+    if n > 8 and workers > 1 and not (work / "bundle" / "index.html").exists():
+        first = min(todo, key=_frames_of)             # bundle once before the processes share it, on the shortest shot
+        run(0, [first])
+        todo = [t for t in todo if t is not first]
+    parts = _balanced(todo, workers) if n > 8 else [todo]
+    engine.log(f"Mr Truth: rendering {n} shot(s) with the repo's compositor ({len(parts)} process(es), longest first)...")
     with ThreadPoolExecutor(max_workers=len(parts)) as ex:
         list(ex.map(lambda kp: run(*kp), enumerate(parts)))
     engine.log(f"  rendered in {time.time() - t0:.0f}s")
@@ -3191,6 +3359,34 @@ def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
     return out
 
 
+# a finish (run_test.py --segments sets MRTRUTH_FINISH=1): the drawn shots are joined under the saved plan, nothing is
+# planned again and no paid service is asked (owner 2026-10-10: the pod's finish re-planned from the caches, pinged
+# Gemini, Brave and Claude, and matched the drawn shots only while every cache hit)
+def _finishing() -> bool:
+    return os.environ.get("MRTRUTH_FINISH", "0") == "1"
+
+
+# the plugin's checks happen before anything is drawn; make_video's after-render look by Gemini (_final_check) is
+# skipped for this channel (owner 2026-10-10: checks before render, with repairs; nothing is checked after render)
+CHECKS_BEFORE_RENDER = True
+
+
+def _seg_name(sc: dict) -> str:
+    return f"{sc['index']:04d}_{sc['renderKey'][:12]}.mp4"
+
+
+def _usage(engine) -> dict:
+    """What the run used so far, for timing.json (owner 2026-10-10: the ~$2-a-film target could not be checked from
+    the run's own reports): where the picture stage's time went, Gemini's tokens per purpose, Brave, Wikimedia, Claude."""
+    g = dict(getattr(engine, "GEMINI_PICKS", None) or {})
+    c = getattr(engine, "CLAUDE_SPEND", None) or {}
+    return {"pictures_s": {k: round(t, 1) for k, (t, n) in PIC_T.items()},
+            "pictures_n": {k: n for k, (t, n) in PIC_T.items()},
+            "gemini": json.loads(json.dumps(g, default=str)), "brave_requests": _BRAVE["requests"],
+            "wikimedia_requests": COMMONS["requests"],
+            "claude": {k: c.get(k) for k in ("calls", "in", "out", "usd") if k in c}}
+
+
 def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, burn_subs: bool) -> Path:
     final = job / "video.mp4"
     if final.exists() and not force:
@@ -3198,11 +3394,46 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
         return final
     work = job / "mrtruth"
     work.mkdir(parents=True, exist_ok=True)
+    finishing = _finishing()
     clock = [("start", time.time())]
-    def took(step):                              # how long each planning step took, in the log and in timing.json
+    # the planning run's steps go to timing.json; a finish writes timing_finish.json, so the planning numbers are never
+    # overwritten (2026-10-10: the pod's summary read 15 s of planning from the finish, for 31 minutes of it)
+    tfile = work / ("timing_finish.json" if finishing else "timing.json")
+
+    def took(step):                              # how long each step took, in the log and in timing.json
         clock.append((step, time.time()))
         engine.log(f"  ⏱ {step}: {clock[-1][1] - clock[-2][1]:.0f}s")
-        _dump(work / "timing.json", {a: round(t - p, 1) for (a, t), (_, p) in zip(clock[1:], clock)})
+        _dump(tfile, dict({a: round(t - p, 1) for (a, t), (_, p) in zip(clock[1:], clock)}, detail=_usage(engine)))
+    seg_dir = work / "segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    if finishing:
+        sc_list = _saved_plan(engine, job, seg_dir)
+        took("saved plan")
+    else:
+        sc_list = plan_film(engine, job, srt, force, took)
+    tasks = [{"id": "Segment", "props": _props(sc), "output": str(seg_dir / _seg_name(sc))} for sc in sc_list]
+    render(engine, work, tasks, workers=int(_cfg(engine, style).get("render_processes") or 2))
+    engine._concat_segments([Path(t["output"]) for t in tasks], job / "_visual.mp4")
+    audio = _sfx_audio(engine, job, mp3, sc_list)
+    engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False)
+    (job / "_visual.mp4").unlink(missing_ok=True)
+    if audio != mp3:
+        audio.unlink(missing_ok=True)
+    if finishing:
+        took("join, sound and mux")
+    _report(engine, sc_list)
+    for line in check(job):
+        engine.log("  check: " + line)
+    if getattr(engine, "CLEAN_RENDERS", False) and final.exists():
+        for sub in ("segments", "bundle"):
+            shutil.rmtree(work / sub, ignore_errors=True)
+    return final
+
+
+def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
+    """Everything before the drawing: research → beats → templates → pictures → sync → scenes. Writes plan.json,
+    shots.json and credits.json, and returns the scenes."""
+    work = job / "mrtruth"
     preflight(engine)
     script = (job / "script.txt").read_text(encoding="utf-8")
     dossier = research(engine, script, job, force)
@@ -3262,25 +3493,40 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     _dump(work / "shots.json", [{"text": r["text"], "photo": (r.get("pick") or {}).get("photo"), "step": r.get("step"),
                                  "ai": bool((r.get("pick") or {}).get("ai")),
                                  "anchor_switched": r.get("step") in ("anchor", "neighbour", "contextual", "reused")} for r in rows])
-    seg_dir = work / "segments"
-    seg_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [{"id": "Segment", "props": _props(sc), "output": str(seg_dir / f"{sc['index']:04d}_{sc['renderKey'][:12]}.mp4")}
-             for sc in sc_list]
-    render(engine, work, tasks, workers=int(_cfg(engine, style).get("render_processes") or 2))
-    engine._concat_segments([Path(t["output"]) for t in tasks], job / "_visual.mp4")
-    audio = _sfx_audio(engine, job, mp3, sc_list)
-    engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False)
-    (job / "_visual.mp4").unlink(missing_ok=True)
-    if audio != mp3:
-        audio.unlink(missing_ok=True)
-    _credits(job, rows)
-    _report(engine, rows, sc_list)
-    for line in check(job):
-        engine.log("  check: " + line)
-    if getattr(engine, "CLEAN_RENDERS", False) and final.exists():
-        for sub in ("segments", "bundle"):
-            shutil.rmtree(work / sub, ignore_errors=True)
-    return final
+    _credits(job, rows)                          # with the plan, so a finish from it needs nothing else
+    return sc_list
+
+
+def _saved_plan(engine, job: Path, seg_dir: Path) -> list:
+    """The scenes of a finish: plan.json as the planning run saved it, checked against the drawn shots. A shot that
+    was not drawn stops the finish (MRTRUTH_ALLOW_DEGRADED=1 draws it here instead) - it is never planned again."""
+    work = job / "mrtruth"
+    plan = _load(work / "plan.json")
+    if not isinstance(plan, list) or not plan:
+        raise PlanningStopped(f"Mr Truth finish: this job has no saved plan ({work / 'plan.json'}) - plan it first "
+                              f"(run_test.py ... --export), draw it, then finish with --segments")
+    names = [_seg_name(sc) for sc in plan]
+    package = [str(t.get("name") or "") for t in (_load(work / "manifest.json") or {}).get("tasks") or []]
+    stray = [n for n in package if n not in set(names)]
+    missing = [n for n in names if not (seg_dir / n).exists()]
+    if missing:
+        why = (f"; the render package was made for a different plan ({len(stray)} of its shots are not in plan.json)"
+               if stray else "")
+        _stop(engine, f"Mr Truth finish: {len(missing)} of {len(plan)} drawn shots are missing (first {missing[0]}){why}"
+                      f" - unpack the whole segments.tgz into {seg_dir}, or plan and draw again")
+        engine.log(f"  ⚠ the {len(missing)} missing shot(s) are drawn here")
+    engine.log(f"Mr Truth: finishing from the saved plan ({len(plan)} shots, {len(plan) - len(missing)} drawn): "
+               f"nothing is planned again and no paid service is asked")
+    if not (job / "credits.json").exists():      # planned by an older version: the credits from the plan's own records
+        seen, out = set(), []
+        for sc in plan:
+            for a in [sc.get("asset")] + list(sc.get("companions") or []):
+                if a and a.get("path") not in seen:
+                    seen.add(a.get("path"))
+                    out.append({"title": a.get("attribution", ""), "source": "", "url": a.get("sourceUrl", ""),
+                                "license": a.get("license", ""), "artist": ""})
+        _dump(job / "credits.json", out)
+    return plan
 
 
 def _credits(job: Path, rows: list) -> None:
@@ -3294,7 +3540,7 @@ def _credits(job: Path, rows: list) -> None:
     _dump(job / "credits.json", out)
 
 
-def _report(engine, rows: list, sc_list: list) -> None:
+def _report(engine, sc_list: list) -> None:
     devs = {}
     for sc in sc_list:
         if sc.get("device"):

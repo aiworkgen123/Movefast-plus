@@ -22,6 +22,9 @@ INSTALL (into your MoveFast folder, overwriting):
 
 3) FINISH (back on the planning machine; joins shots, mixes sound, final video):
    .venv/bin/python run_test.py script.txt voice.mp3 "Title" 3 --segments segments.tgz
+   The finish uses the plan saved in step 1 (mrtruth/plan.json): nothing is planned again and no Claude, Gemini or
+   Brave call is made. A shot missing from segments.tgz stops it with the shot's name (MRTRUTH_ALLOW_DEGRADED=1 draws
+   it here instead). Its timings go to mrtruth/timing_finish.json; mrtruth/timing.json keeps the planning run's.
 
 NOTES
 - Use the same title/script/voice for steps 1 and 3 so the job folder matches.

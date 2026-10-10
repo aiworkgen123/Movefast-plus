@@ -2,6 +2,8 @@
   .venv/bin/python run_test.py script.txt voice.mp3 "Title" [minutes]                 plan + draw here
   .venv/bin/python run_test.py script.txt voice.mp3 "Title" [minutes] --export        plan here, write render_package.tgz, stop
   .venv/bin/python run_test.py script.txt voice.mp3 "Title" [minutes] --segments segments.tgz   unpack drawn shots, finish here
+A finish joins the drawn shots under the plan the --export run saved (mrtruth/plan.json): nothing is planned again
+and no paid service is asked (MRTRUTH_FINISH=1).
 """
 import sys, os, time, tarfile
 from pathlib import Path
@@ -15,6 +17,8 @@ if "--segments" in args:
 args = [x for x in args if x != "--export"]
 if export:
     os.environ["MT_EXPORT_PACKAGE"] = "1"
+if seg_file:
+    os.environ["MRTRUTH_FINISH"] = "1"      # finish from the saved plan: no re-plan, no preflight pings (owner 2026-10-10)
 from dotenv import load_dotenv; load_dotenv(here / ".env")
 import make_video as mv, motion, styles, mrtruth
 styles.apply_to_engine(mv, motion)
