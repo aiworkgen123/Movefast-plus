@@ -395,17 +395,20 @@ def _cues(engine, srt: Path) -> list:
 
 
 def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool = False) -> list:
-    """[{startMs, endMs, text, visualIntent, queries, entities, mood, sceneType, overlay?}] covering the voice."""
+    """[{startMs, endMs, text, visualIntent, queries, entities, mood, sceneType, overlay?}] covering the voice, at the
+    owner's pace (_paced: Claude's rows are cached as Claude wrote them and paced on every load)."""
     out = job / "mrtruth" / "beats.json"
     key = _hash([BEATS_V, script, dossier])
     got = None if force else _load(out)
     if isinstance(got, dict) and got.get("key") == key and got.get("rows"):
-        return got["rows"]
+        return _paced(engine, got["rows"], _cues(engine, srt))     # the cache holds Claude's rows: paced on every load
     cues = _cues(engine, srt)
     if not cues:
         sys.exit("Mr Truth: the subtitles are empty — nothing to cut to")
     end_ms = cues[-1][1]
     system = _pacing(_prompts()["segmentation"].replace("{TARGET_SECONDS}", f"{TARGET_SCENE_S:.1f}"))
+    # one sentence, one scene (owner 2026-10-10): a run about a person shows him every second SENTENCE, not shot
+    rules = QUERY_RULES.replace("on at least every second shot;", "on at least every second sentence;")
     batches, t = [], 0
     while t < end_ms:
         batches.append((t, min(end_ms, t + int(BATCH_S * 1000))))
@@ -416,7 +419,7 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
         lines = [f"{'>' if f0 <= a < f1 else ' '} [{a}-{b}] {txt}" for a, b, txt in cues
                  if f0 - 30000 <= a < f1 + 15000]
         user = "\n".join(["TRANSCRIPT (authoritative; lines marked \">\" are the focus range, unmarked lines are context only):",
-                          *lines, _film_block(dossier), QUERY_RULES, "", f"FOCUS RANGE: {f0}ms to {f1}ms.",
+                          *lines, _film_block(dossier), rules, "", f"FOCUS RANGE: {f0}ms to {f1}ms.",
                           "Return scenes whose startMs falls inside the focus range, covering it completely and contiguously."])
         prompt = f"{system}\n\n<script>\n{script}\n</script>\n\n{user}\n\nReturn {{\"scenes\": [...]}}."
         try:
@@ -475,17 +478,16 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     rows = [r for r in rows if r["endMs"] - r["startMs"] >= 400] or rows
     for i, r in enumerate(rows):                    # a dropped sliver's time goes to the shot before it
         r["endMs"] = rows[i + 1]["startMs"] if i + 1 < len(rows) else end_ms
-    merged = _calm_short_runs(rows)
-    if merged:
-        engine.log(f"  pacing: {merged} quick cut(s) joined so no more than {SHORT_RUN_MAX} short shots run together")
+    planned = json.loads(json.dumps(rows))          # Claude's own rows are what is cached: re-pacing never re-asks Claude
+    _paced(engine, rows, cues)
     if fell_back:
         engine.log(f"  ⚠ {fell_back} shot(s) could not be planned and are searched by their own words "
                    f"(not cached: the next run plans them again)")
-        if fell_back > max(2, 0.03 * len(rows)):
-            _stop(engine, f"Mr Truth stopped: {fell_back} of {len(rows)} shots could not be planned (Claude did not "
+        if fell_back > max(2, 0.03 * len(planned)):
+            _stop(engine, f"Mr Truth stopped: {fell_back} of {len(planned)} shots could not be planned (Claude did not "
                           f"answer for part of the narration) - run again; the planned parts are not lost")
     else:
-        _dump(out, {"key": key, "rows": rows})
+        _dump(out, {"key": key, "rows": planned})
     engine.log(f"  {len(rows)} shots, {end_ms / 1000 / max(1, len(rows)):.1f}s each on average")
     return rows
 
@@ -512,6 +514,17 @@ def _pacing(brief: str) -> str:
     else:
         brief += "\n- " + new_vary
     brief = brief.replace(old_max, new_max)
+    # two leftovers of the five-second brief told Claude to split a subject into views and to split long beats itself;
+    # without thinking (the pod's API route) it read them as "a scene per subtitle line" (owner 2026-10-10: 216 shots of
+    # 3.05 s, two thirds of the mid-sentence line breaks cut). _pace guarantees the pacing either way.
+    brief = brief.replace("Merging is the OTHER answer and it is only available when the whole beat fits in one scene. "
+                          "Do not reach for it on a subject that holds the narration longer than that; write the "
+                          "different views instead.",
+                          "One sentence is one scene; write different views only when the narration stays on one "
+                          "subject for several sentences.")
+    brief = brief.replace("Split it yourself, here, where you can give each half its own picture to look for.",
+                          f"A sentence longer than {SCENE_MAX_S:.0f} seconds is split at its clause, here, so each half "
+                          f"gets its own picture to look for.")
     return brief.replace("longer than five seconds", f"longer than {SCENE_MAX_S:.0f} seconds")
 
 
@@ -539,6 +552,230 @@ def _calm_short_runs(rows: list) -> int:
             # nothing joinable in this window (overlays on every pair): keep counting, the next shot opens a new pair
         i += 1
     return joins
+
+
+# the pacing as a guarantee (owner 2026-10-10): the segmentation call follows the brief only as well as it reads it —
+# the pod's API route (no thinking) gave 216 shots of 3.05 s, 53% under 3 s, 89 of its 115 quick shots sentence
+# fragments ("death." at 1.02 s). After Claude's rows the code joins (and splits) them to the owner's pace. Cuts stay
+# on subtitle starts and the rows stay contiguous. The aim is a shade under 4.3 s: captions, holds and sync fold a few
+# shots later. MRTRUTH_PACE_AIM moves it; the cache keeps Claude's rows, so a new aim never re-asks Claude.
+PACE_AIM_S = max(2.0, float(os.environ.get("MRTRUTH_PACE_AIM", f"{TARGET_SCENE_S - 0.1:.1f}")))
+PACE_CEIL_S = round(TARGET_SCENE_S + 0.3, 2)   # joining away quick shots never takes the average past 4.6 s
+QUICK_MAX = round(QUICK_SHARE + 0.05, 2)       # over 40% quick cuts the joins absorb the quick shots first
+QUICK_MIN = round(QUICK_SHARE - 0.07, 2)       # under 28% they are kept, longer neighbours joined (content decides)
+PUNCHY_WORDS = 7                     # a whole sentence this short, said in under 3 s, keeps its own quick shot
+LONG_JOIN_S = 6.5                    # a join past this length is a last resort (the long shots are about a quarter)
+_SENT_END = re.compile(r"[.?!…][\"'”’)\]]*$")
+_CLAUSE_END = re.compile(r"[,;:—–-][\"'”’)\]]*$")
+_PLAIN = JOINING | {"his", "her", "its", "was", "were", "is", "are", "be", "that", "this", "it", "he", "she", "they",
+                    "not", "but", "or", "as"}
+
+
+def _cut_kind(words: str) -> int:
+    """How the words before a cut end: 2 a sentence, 1 a clause (comma, colon, dash), 0 mid-sentence."""
+    t = str(words or "").strip()
+    return 2 if _SENT_END.search(t) else 1 if _CLAUSE_END.search(t) else 0
+
+
+def _same_thing(a: dict, b: dict) -> bool:
+    """Two neighbours about one thing: the same person, a shared name, or half their picture words in common."""
+    if a.get("about") and a.get("about") == b.get("about"):
+        return True
+    if {str(e).lower() for e in a.get("entities") or []} & {str(e).lower() for e in b.get("entities") or []}:
+        return True
+    bag = lambda r: {w for w in re.findall(r"[a-z][a-z']{2,}", " ".join(
+        [str(r.get("visualIntent") or "")] + [str(q) for q in (r.get("queries") or [])[:2]]).lower()) if w not in _PLAIN}
+    x, y = bag(a), bag(b)
+    return bool(x and y) and len(x & y) / min(len(x), len(y)) >= 0.5
+
+
+def _retext(r: dict, cues: list) -> None:
+    r["text"] = " ".join(t for a, b, t in cues if r["startMs"] <= a < r["endMs"]) or r["text"]
+
+
+def _join(rows: list, k: int, cues: list) -> None:
+    """rows[k] and rows[k+1] become one shot. The picture brief is a planned row's before a fallback's, then the longer
+    one's (it covers most of the words), then the first's; the other's names stay in entities; a quote or a figure
+    keeps its type; one overlay at most (the first's: _pace never joins a row with an overlay onto the one before)."""
+    a, b = rows[k], rows.pop(k + 1)
+    rank = lambda r: (bool(r.get("unplanned")), r["startMs"] - r["endMs"])
+    lead, other = (b, a) if rank(b) < rank(a) else (a, b)
+    m = dict(lead, startMs=a["startMs"], endMs=b["endMs"], text=f"{a.get('text') or ''} {b.get('text') or ''}".strip())
+    m["entities"] = list(dict.fromkeys(list(lead.get("entities") or []) + list(other.get("entities") or [])))
+    m["about"] = lead.get("about") or other.get("about") or ""
+    if lead.get("sceneType", "imagery") == "imagery" and other.get("sceneType") in ("quote", "data"):
+        m["sceneType"] = other["sceneType"]
+    m.pop("overlay", None)
+    m.pop("unplanned", None)
+    if a.get("overlay") or b.get("overlay"):
+        m["overlay"] = a.get("overlay") or b.get("overlay")
+    if a.get("unplanned") and b.get("unplanned"):
+        m["unplanned"] = True
+    m["joined"] = int(a.get("joined") or 0) + int(b.get("joined") or 0) + 1
+    _retext(m, cues)
+    rows[k] = m
+
+
+def _split_at(rows: list, i: int, cues: list, min_part_ms: int = 1000, min_kind: int = 0) -> bool:
+    """Cut rows[i] at the subtitle start inside it that ends a sentence (else a clause, else any; min_kind 2 only at a
+    sentence end), a cut leaving no part over SCENE_MAX_S first, then the most even one; both parts at least
+    min_part_ms. The second part keeps the brief but searches its conceptual query first, so the two do not hunt one
+    photograph. False when no cut fits."""
+    r = rows[i]
+    best = None
+    for k in range(1, len(cues)):
+        a = cues[k][0]
+        left, right = a - r["startMs"], r["endMs"] - a
+        if min(left, right) < min_part_ms or _cut_kind(cues[k - 1][2]) < min_kind:
+            continue
+        key = (-_cut_kind(cues[k - 1][2]), max(left, right) > SCENE_MAX_S * 1000, abs(left - right), a)
+        best = min(best, key) if best else key
+    if not best:
+        return False
+    a = best[3]
+    q = list(r.get("queries") or [])
+    new = dict(r, startMs=a, queries=[q[1], q[0]] + q[2:] if len(q) > 1 and q[1] else q, split=True)
+    new.pop("overlay", None)
+    new.pop("joined", None)
+    ov = r.get("overlay")
+    try:
+        at = int(float(ov.get("atMs"))) if ov else r["startMs"]
+    except (TypeError, ValueError, AttributeError):
+        at = r["startMs"]
+    if ov and at >= a:                              # the overlay stays with the part that says it
+        new["overlay"] = r.pop("overlay")
+    r["endMs"] = a
+    _retext(r, cues)
+    _retext(new, cues)
+    rows.insert(i + 1, new)
+    return True
+
+
+def _pace(rows: list, cues: list, aim_s: float = PACE_AIM_S) -> dict:
+    """The owner's pacing (2026-10-10) whatever the segmentation call returned: no row over SCENE_MAX_S (split at its
+    best subtitle start), the average at about aim_s and never over PACE_CEIL_S where a cut allows it, quick cuts
+    about a third (a soft target), at most SHORT_RUN_MAX in a row. The joins taken first are the ones a picture editor
+    would make: mid-sentence before a clause before a sentence end, neighbours about the same thing, a quick fragment
+    into its sentence; a punchy whole sentence keeps its own quick shot; an overlay never starts earlier than planned.
+    Rows are only joined or split, so every cut stays on a subtitle start. In place, deterministic and idempotent."""
+    if not rows:
+        return {"splits": 0, "grown": 0, "joins": [0, 0, 0]}
+    ms = lambda r: r["endMs"] - r["startMs"]
+    quick = lambda r: ms(r) < SHORT_S * 1000
+    total = rows[-1]["endMs"] - rows[0]["startMs"]
+    splits, i = 0, 0
+    while i < len(rows):                            # 1. nothing over SCENE_MAX_S; the first part is looked at again
+        if ms(rows[i]) > SCENE_MAX_S * 1000 and _split_at(rows, i, cues):
+            splits += 1
+            continue
+        i += 1
+    want = max(1, round(total / 1000 / aim_s))              # the shot count at the aimed average
+    floor_n = max(1, -(-total // int(PACE_CEIL_S * 1000)))  # never fewer shots than a 4.6 s average allows
+    grow_to = min(want, round(total / 1000 / TARGET_SCENE_S))
+
+    def punchy(i):                                # a short whole sentence: "The Latin was deliberate."
+        r = rows[i]
+        return (quick(r) and len(r["text"].split()) <= PUNCHY_WORDS and _cut_kind(r["text"]) == 2
+                and (i == 0 or _cut_kind(rows[i - 1]["text"]) == 2))
+
+    def crowded():                                  # the shots inside a run of more than SHORT_RUN_MAX quick ones
+        out, run = set(), []
+        for i, r in enumerate(rows + [None]):
+            if r is not None and quick(r):
+                run.append(i)
+                continue
+            if len(run) > SHORT_RUN_MAX:
+                out.update(run)
+            run = []
+        return out
+
+    def best_join(inside, many, share):
+        best = None
+        for k in range(len(rows) - 1):
+            a, b = rows[k], rows[k + 1]
+            d = ms(a) + ms(b)
+            if d > SCENE_MAX_S * 1000 or b.get("overlay"):     # an overlay never starts earlier than planned
+                continue
+            if inside and not (k in inside and k + 1 in inside):
+                continue                                        # a run of quick cuts is broken up first (4 at most)
+            lost = quick(a) + quick(b) - (d < SHORT_S * 1000)   # the quick cuts this join removes
+            if not inside and not many and not lost:
+                continue                                        # past the aimed count only quick shots are absorbed
+            c = (0.0, 1.0, 2.5)[_cut_kind(a["text"])]           # mid-sentence, clause, sentence end
+            c += 3.0 * (punchy(k) + punchy(k + 1))              # a punchy whole line keeps its own quick shot
+            c += max(0.0, d / 1000 - LONG_JOIN_S)               # a very long result is a last resort
+            c -= 0.5 if _same_thing(a, b) else 0.0              # one thing, one shot
+            c += -1.0 * lost if share > QUICK_MAX else 1.0 * lost if share < QUICK_MIN else 0.0
+            key = (round(c, 3), d, k)
+            if best is None or key < best:
+                best = key
+        return best
+
+    def grow_at(i, part_ms, kind):                  # a split that makes no new run of quick shots
+        keep, runs = dict(rows[i]), len(crowded())
+        if not _split_at(rows, i, cues, part_ms, kind):
+            return False
+        if len(crowded()) > runs:
+            rows[i:i + 2] = [keep]
+            return False
+        return True
+
+    joins, grown = [0, 0, 0], 0                     # joins: mid-sentence, at a clause, at a sentence end
+    while True:
+        while len(rows) > 1:                        # 2. joins, best first
+            share, inside = sum(map(quick, rows)) / len(rows), crowded()
+            many = len(rows) > want
+            too_quick = share > QUICK_MAX and len(rows) > floor_n
+            best = best_join(inside, many, share) if inside else None
+            if best is None and (many or too_quick):    # (a run nothing can break, e.g. overlays: pace the rest)
+                best = best_join(set(), many, share)
+            if best is None:
+                break
+            k = best[2]
+            joins[_cut_kind(rows[k]["text"])] += 1
+            _join(rows, k, cues)
+        # 3. over 4.6 s on average (Claude merged whole stretches, or breaking up quick runs took the count under it):
+        # the longest rows split, first into parts of at least SHORT_S, then at a sentence end (a short whole
+        # sentence is a quick shot the owner wants), never into a new run of quick shots. grow_to <= want, so no join
+        # undoes it, and the joins left after it stop at floor_n: one more round at most, and a second pass is a no-op
+        n0 = len(rows)
+        for part_ms, kind in ((int(SHORT_S * 1000), 0), (1000, 2)):   # parts of 3 s; then whole sentences
+            while floor_n > n0 and len(rows) < grow_to:
+                order = sorted(range(len(rows)), key=lambda i: (-ms(rows[i]), i))
+                if not any(ms(rows[i]) >= 2 * part_ms and grow_at(i, part_ms, kind) for i in order):
+                    break
+        if len(rows) == n0:
+            break
+        grown += len(rows) - n0
+    return {"splits": splits, "grown": grown, "joins": joins, "want": want, "floor": floor_n}
+
+
+def _paced(engine, rows: list, cues: list) -> list:
+    """Claude's rows at the owner's pace: _pace, then _calm_short_runs as the safety net, one line in the log."""
+    if not rows:
+        return rows
+    n0, a0 = len(rows), (rows[-1]["endMs"] - rows[0]["startMs"]) / 1000 / len(rows)
+    info = _pace(rows, cues)
+    calm = _calm_short_runs(rows)
+    d = [(r["endMs"] - r["startMs"]) / 1000 for r in rows]
+    run = best = 0
+    for x in d:
+        run = run + 1 if x < SHORT_S else 0
+        best = max(best, run)
+    mid, clause, sent = info["joins"]
+    engine.log(f"  pacing: {n0} planned shots ({a0:.1f}s average) -> {len(rows)} shots, {sum(d) / len(d):.2f}s average, "
+               f"{sum(x < SHORT_S for x in d) / len(d):.0%} under 3 s, {sum(5 <= x <= SCENE_MAX_S for x in d) / len(d):.0%} "
+               f"of 5-8 s, longest {max(d):.1f}s, at most {best} quick in a row ({mid} joined mid-sentence, {clause} at "
+               f"a clause, {sent} at a sentence end, {info['splits'] + info['grown']} split"
+               + (f", {calm} more to calm a run of quick cuts)" if calm else ")"))
+    over = [x for x in d if x > SCENE_MAX_S]
+    if over:
+        engine.log(f"  ⚠ {len(over)} shot(s) still over {SCENE_MAX_S:.0f} s (longest {max(over):.1f}s): one subtitle "
+                   f"line that long has no subtitle start inside it to cut on")
+    if best > SHORT_RUN_MAX:
+        engine.log(f"  ⚠ {best} quick shots in a row: the overlays there block every join (an overlay never starts "
+                   f"earlier than planned)")
+    return rows
 
 
 # ── 4. templates and their words ──────────────────────────────────────────────────────────────────────────────
