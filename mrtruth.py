@@ -1085,9 +1085,29 @@ ARCHIVE_MIN_W = 1000
 _AUA = {"User-Agent": "Mozilla/5.0 (MoveFast-MrTruth/1.0; documentary video tool; low volume)"}
 
 
+def _aget(url, **kw):
+    """requests.get for the open archives: a busy answer (429/503) waits once - Retry-After, at most 10 s - and asks
+    again; any other failure raises with its HTTP status, so the run's log can say WHY an archive failed (2026-10-10:
+    the Library of Congress and the Met were switched off mid-run after errors nobody could read)."""
+    import requests
+    for attempt in range(2):
+        r = requests.get(url, **kw)
+        if r.status_code in (429, 503) and not attempt:
+            try:
+                wait = float(r.headers.get("retry-after") or 3)
+            except ValueError:
+                wait = 3.0
+            time.sleep(min(10.0, max(1.0, wait)))
+            continue
+        break
+    if not r.ok:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return r
+
+
 def _loc_find(q: str) -> list:
     import requests
-    d = requests.get("https://www.loc.gov/photos/", headers=_AUA, timeout=25,
+    d = _aget("https://www.loc.gov/photos/", headers=_AUA, timeout=15,
                      params={"q": q, "fo": "json", "c": 10, "fa": "online-format:image"}).json()
     out = []
     for r in d.get("results") or []:
@@ -1101,7 +1121,7 @@ def _loc_find(q: str) -> list:
 
 def _openverse_find(q: str) -> list:
     import requests
-    d = requests.get("https://api.openverse.org/v1/images/", headers=_AUA, timeout=25,
+    d = _aget("https://api.openverse.org/v1/images/", headers=_AUA, timeout=15,
                      params={"q": q, "page_size": 12, "license_type": "commercial,modification"}).json()
     return [(str(r.get("title") or "")[:200], r["url"], r.get("foreign_landing_url") or r["url"],
              f"{r.get('license', '')} {r.get('license_version', '')}".strip(), str(r.get("creator") or "")[:200],
@@ -1110,14 +1130,14 @@ def _openverse_find(q: str) -> list:
 
 def _ia_find(q: str) -> list:
     import requests
-    d = requests.get("https://archive.org/advancedsearch.php", headers=_AUA, timeout=25,
+    d = _aget("https://archive.org/advancedsearch.php", headers=_AUA, timeout=15,
                      params={"q": f"({q}) AND mediatype:image", "fl[]": ["identifier", "title"], "rows": 6,
                              "output": "json"}).json()
     out = []
     for doc in (d.get("response") or {}).get("docs") or []:
         ident = doc.get("identifier")
         try:
-            meta = requests.get(f"https://archive.org/metadata/{ident}", headers=_AUA, timeout=25).json()
+            meta = _aget(f"https://archive.org/metadata/{ident}", headers=_AUA, timeout=15).json()
         except Exception:                                            # noqa: BLE001
             continue
         jpgs = [f for f in meta.get("files") or [] if str(f.get("name", "")).lower().endswith((".jpg", ".jpeg"))
@@ -1135,12 +1155,12 @@ def _ia_find(q: str) -> list:
 
 def _met_find(q: str) -> list:
     import requests
-    ids = (requests.get("https://collectionapi.metmuseum.org/public/collection/v1.1/search", headers=_AUA, timeout=25,
+    ids = (_aget("https://collectionapi.metmuseum.org/public/collection/v1.1/search", headers=_AUA, timeout=15,
                         params={"q": q, "hasImages": "true"}).json().get("objectIDs") or [])[:6]
     out = []
     for oid in ids:
         try:
-            o = requests.get(f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{oid}", headers=_AUA, timeout=25).json()
+            o = _aget(f"https://collectionapi.metmuseum.org/public/collection/v1/objects/{oid}", headers=_AUA, timeout=15).json()
         except Exception:                                            # noqa: BLE001
             continue
         if o.get("isPublicDomain") and o.get("primaryImage"):
@@ -1153,7 +1173,7 @@ def _met_find(q: str) -> list:
 
 def _europeana_find(q: str) -> list:
     import requests
-    d = requests.get("https://api.europeana.eu/record/v2/search.json", headers=_AUA, timeout=25, params={
+    d = _aget("https://api.europeana.eu/record/v2/search.json", headers=_AUA, timeout=15, params={
         "wskey": os.environ["EUROPEANA_API_KEY"], "query": q, "media": "true", "qf": "TYPE:IMAGE",
         "reusability": "open", "rows": 12}).json()
     return [(str((it.get("title") or [""])[0])[:200], (it.get("edmIsShownBy") or [""])[0], it.get("guid") or "",
@@ -1165,7 +1185,7 @@ def _europeana_find(q: str) -> list:
 # published API; first exercised live when the key arrives (a failure returns no pictures, never an error)
 def _smithsonian_find(q: str) -> list:
     import requests
-    d = requests.get("https://api.si.edu/openaccess/api/v1.0/search", headers=_AUA, timeout=25, params={
+    d = _aget("https://api.si.edu/openaccess/api/v1.0/search", headers=_AUA, timeout=15, params={
         "q": f"{q} AND online_media_type:Images", "api_key": os.environ["SMITHSONIAN_API_KEY"], "rows": 12}).json()
     out = []
     for row in ((d.get("response") or {}).get("rows") or []):
@@ -1182,10 +1202,10 @@ def _rijks_find(q: str) -> list:
     its digital object -> a IIIF image. Public-domain pictures only."""
     import requests
     H = dict(_AUA, Accept="application/ld+json")
-    get = lambda u: requests.get(u, headers=H, timeout=25).json()
+    get = lambda u: _aget(u, headers=H, timeout=15).json()
     found = []
     for field in ("description", "title"):
-        d = requests.get("https://data.rijksmuseum.nl/search/collection", headers=H, timeout=25,
+        d = _aget("https://data.rijksmuseum.nl/search/collection", headers=H, timeout=15,
                          params={field: q, "imageAvailable": "true"}).json()
         found += [x["id"] for x in d.get("orderedItems") or [] if x.get("id") not in found]
         if len(found) >= 4:
@@ -1213,7 +1233,7 @@ def _rijks_find(q: str) -> list:
 
 def _nara_find(q: str) -> list:
     import requests
-    d = requests.get("https://catalog.archives.gov/api/v2", timeout=25, params={"q": q, "rows": 12},
+    d = _aget("https://catalog.archives.gov/api/v2", timeout=15, params={"q": q, "rows": 12},
                      headers=dict(_AUA, **{"x-api-key": os.environ["NARA_API_KEY"]})).json()
     out = []
     for h in ((d.get("body") or {}).get("hits") or {}).get("hits") or []:
@@ -1235,7 +1255,7 @@ for _env, _name, _fn in (("EUROPEANA_API_KEY", "europeana", _europeana_find), ("
         ARCHIVES[_name] = _fn
 
 
-ARCHIVE_DOWN_AFTER = 6                  # an archive failing this many searches in a row is skipped for the run
+ARCHIVE_DOWN_AFTER = 20                 # an archive failing this many searches in a row is skipped for the run
 ARCHIVE_DOWN, ARCHIVE_ERRORS = {}, {}   # failures in a row / in all, per archive (logged with the pictures)
 
 
@@ -1257,10 +1277,12 @@ def archive_photos(query: str, folder: Path) -> list:
             hits = ARCHIVES[name](query)
             ARCHIVE_DOWN[name] = 0
             return name, hits, True
-        except Exception:                                            # noqa: BLE001 - an archive down is no picture
+        except Exception as e:                                       # noqa: BLE001 - this shot goes on without it
+            kind = str(e) if str(e).startswith("HTTP ") else type(e).__name__     # HTTP 429, ReadTimeout, JSONDecodeError
             with _JUDGE_LOCK:
                 ARCHIVE_DOWN[name] = ARCHIVE_DOWN.get(name, 0) + 1
-                ARCHIVE_ERRORS[name] = ARCHIVE_ERRORS.get(name, 0) + 1
+                ARCHIVE_ERRORS.setdefault(name, {}).setdefault(kind, 0)
+                ARCHIVE_ERRORS[name][kind] += 1
             return name, [], False
 
     def fetch(item):
@@ -2091,7 +2113,8 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     engine.log(f"    judge: {JUDGE['asks']} calls, {JUDGE['failed']} unanswered, {g.get('busy', 0)} busy waits, "
                f"{g.get('fallback', 0)} to Claude; {SHOT_WORKERS} shots at once; Wikimedia {COMMONS['requests']} requests, "
                f"{COMMONS['busy']} busy, {COMMONS['failed']} searches short, {COMMONS['wait_s'] / 60:.0f} min spent waiting"
-               + ("; archive errors " + ", ".join(f"{k} {v}" for k, v in ARCHIVE_ERRORS.items()) if ARCHIVE_ERRORS else "")
+               + ("; archive errors " + ", ".join(f"{k} " + "/".join(f"{n}x {why}" for why, n in v.items())
+                                     for k, v in ARCHIVE_ERRORS.items()) if ARCHIVE_ERRORS else "")
                + ("; skipped as down: " + ", ".join(k for k, v in ARCHIVE_DOWN.items() if v >= ARCHIVE_DOWN_AFTER)
                   if any(v >= ARCHIVE_DOWN_AFTER for v in ARCHIVE_DOWN.values()) else ""))
 
@@ -2140,10 +2163,20 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
         if len(nophoto) == 1:
             role, look = nophoto[0].get("role", ""), nophoto[0].get("appearance", "")
     era = "; ".join(x for x in (dossier.get("period"), dossier.get("setting")) if x)
+    # the brief's look sentence describes the film's photographs ("archival photograph, age-toning, parchment
+    # reproduction"); read literally the model draws an old PRINT - burnt borders, a mount, a page of script. 19 of 30
+    # stand-ins were refused for exactly that (pod test 2026-10-10): the look keeps its light, palette and grain only
+    look_ = re.sub(r"\b(archival|archive|vintage|aged|old|antique)\s+(photograph|photo|print|plate)s?\b", r"photograph",
+                   b.get("aiLook") or "Documentary photograph, natural light", flags=re.I)
+    look_ = ", ".join(c.strip() for c in re.split(r"[,.;]", look_) if c.strip() and not re.search(
+        r"\b(reproduction|parchment|scan|print|mount|border|frame|edges?)\b", c, re.I))
+    look_ = (look_ or "Documentary photograph, natural light") + ". "
+    full = ("The photograph fills the entire 16:9 frame edge to edge with clean straight edges, as a modern full-frame "
+            "camera image. ")
     who = (f" If a person appears, it is {role}{(' — ' + look) if look else ''}: anonymous, not a real identifiable "
            f"person, period-correct dress, seen from the side or behind or in shadow." if role else
            " Any person is anonymous, period-correct, not a real identifiable person.")
-    base = (f"{b.get('aiLook') or 'Documentary archive photograph, natural light'}. 16:9, full-bleed. "
+    base = (f"{look_}{full}"
             f"{('Era and place: ' + era + '. ') if era else ''}{('Mood: ' + b['tone'] + '. ') if b.get('tone') else ''}"
             f"{row.get('visualIntent') or row['text']}.{who} ")
     if about_him:                                 # a line about him: a portrait or at-work picture of the man
@@ -2151,16 +2184,15 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
                             f"A photograph of {role}{(' — ' + look) if look else ''}, the main subject of the frame "
                             f"(portrait or at work), for the line: {row['text']}.")
     tries = [base + "Very shallow depth of field: the subject sharp, every page, book and wall softly out of focus so "
-                    "no letter can be read. No signs, labels, plaques or captions. No border, no frame, no burnt edges, "
-                    "nothing modern.",
+                    "no letter can be read; any writing is a soft blur. No signs, labels, plaques or captions. Nothing modern.",
              # the line's intent often names a manuscript and the model draws its letters anyway: drop the intent
-             f"{b.get('aiLook') or 'Documentary archive photograph, natural light'}. 16:9, full-bleed. "
+             f"{look_}{full}"
              f"{('Era and place: ' + era + '. ') if era else ''}{('Mood: ' + b['tone'] + '. ') if b.get('tone') else ''}"
              + (f"{role}{(' — ' + look) if look else ''}, alone in a dim stone corridor or archive aisle, lost in "
                 f"thought, seen from the side; anonymous, not a real identifiable person. " if about_him else
                 f"{row.get('visualIntent') or row['text']} — shown only through closed objects: a shut book's worn "
                 f"cover, spine, clasps or binding, seals, cords, stone, candlelight and shadow. ")
-             + "No book open, no page, document, sign or screen in view. No border or frame. Nothing modern."]
+             + "No book open, no page, document, sign or screen in view. Nothing modern."]
     home = job / "mrtruth" / "pictures" / ("s" + hashlib.sha1(row["text"].encode()).hexdigest()[:14])
     for k, prompt in enumerate(tries):
         dest = home / f"ai_{hashlib.sha1(prompt.encode()).hexdigest()[:8]}.jpg"
@@ -2179,6 +2211,22 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
         got = _load(verdict)
         if not got:
             ok, why = _ai_ok(engine, dest, row, dossier)
+            if not ok and why.startswith("frame —"):  # only a drawn border: crop it off, ask once more (a Gemini check
+                crop = dest.with_name(dest.stem + "_crop.jpg")   # costs far less than a new picture)
+                try:
+                    from PIL import Image
+                    with Image.open(dest) as im:
+                        w, h = im.size
+                        im.convert("RGB").crop((int(w * .1), int(h * .1), int(w * .9), int(h * .9))) \
+                            .resize((w, h), Image.LANCZOS).save(crop, quality=92)
+                    ok, why2 = _ai_ok(engine, crop, row, dossier)
+                    if ok:
+                        crop.replace(dest)
+                        why = "border cropped — " + why2
+                    else:
+                        crop.unlink(missing_ok=True)
+                except Exception:                                    # noqa: BLE001 - the refusal stands
+                    pass
             got = {"ok": ok, "why": why}
             if not why.startswith("not checked"):
                 _dump(verdict, got)
