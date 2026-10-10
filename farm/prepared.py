@@ -50,7 +50,7 @@ def _encoder_source(engine):
             "def log(message):\n    print(message, flush=True)\n\n" + "\n\n".join(definitions) + "\n")
 
 
-def capture_final(job, command, duration, *, fonts_dir, fonts_option, engine):
+def capture_final(job, command, duration, *, fonts_dir, fonts_option, engine, cuts=None):
     root = _CAPTURE.get()
     if root is None:
         return  # Local pipeline executes its original command/helper.
@@ -115,6 +115,8 @@ def capture_final(job, command, duration, *, fonts_dir, fonts_option, engine):
     sources[str(Path(engine.__file__).resolve())] = digest(engine.__file__)
     manifest = {"version": 1, "mode": "prepared_final", "command": args,
                 "duration": duration, "files": copied}
+    if cuts is not None:  # Planned shot starts (seconds): the stall check tells a cut from a slow shot.
+        manifest["cuts"] = [round(float(c), 3) for c in cuts]
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # Local compatibility bookkeeping is deliberately excluded from the bundle.
     (root / "local-sources.json").write_text(json.dumps(sources, indent=2) + "\n")
@@ -140,6 +142,10 @@ def validate(root, sources=False):
     duration = manifest.get("duration")
     if type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0:
         raise ValueError("Invalid expected final duration")
+    cuts = manifest.get("cuts", [])
+    if not isinstance(cuts, list) or not all(type(c) in (int, float) and math.isfinite(c) and 0 <= c <= duration
+                                             for c in cuts):
+        raise ValueError("Invalid planned cuts")
     args = manifest.get("command")
     if not isinstance(args, list) or not all(isinstance(a, str) for a in args) or args[0] != "ffmpeg" or args[-1] != "_video_tmp.mp4":
         raise ValueError("Invalid final encode command")
@@ -199,7 +205,7 @@ def execute(root):
               "p=Path(sys.argv[1]);s=importlib.util.spec_from_file_location('encoder',p/'final_encode.py');"
               "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
               "d=json.loads((p/'manifest.json').read_text());"
-              "m._execute_final_encode(p,d['command'],d['duration'])")
+              "m._execute_final_encode(p,d['command'],d['duration'],*([d['cuts']] if 'cuts' in d else []))")
     subprocess.run([sys.executable, "-c", script, str(root.resolve())], check=True,
                    capture_output=True, env=_encode_env(), timeout=max(1800, int(manifest["duration"] * 10) + 1800))
     final = root / "video.mp4"
