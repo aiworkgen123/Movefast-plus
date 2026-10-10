@@ -6231,18 +6231,30 @@ def _warm_read(path: Path) -> None:
         pass
 
 
-def _picture_stalls(path: Path, hold_s: float = 12.0) -> "float | None":
-    """The second at which the picture stops moving for `hold_s` or longer, or None. Frames are shrunk and
-    blurred first so tape noise and a small label do not count as movement; nothing in a finished video
-    legitimately stands still that long."""
+def _picture_stalls(path: Path, hold_s: float = 12.0, cuts: list = None) -> "float | None":
+    """The second at which the picture stops moving for good while the video goes on (a read of _visual.mp4 that
+    failed halfway: its last frame sits still to the end), or None. Frames are shrunk and blurred first so tape
+    noise, dust and a small label do not count as movement. A freeze counts only when it never ends (it runs to the
+    end of the file) AND it covers a planned cut - `cuts`, the shot starts in seconds - or, with no plan, lasts
+    hold_s. A slow move on a dark photo or a planned 13 s hold ends at its own cut, so it is never one (owner
+    2026-10-10: a 12.4 s slow zoom read as a stall re-muxed an 11-minute film three times)."""
     try:
         p = subprocess.run(["ffmpeg", "-v", "info", "-i", str(path), "-vf",
-                            f"scale=64:-2,boxblur=2,freezedetect=n=0.01:d={hold_s:.1f}", "-an", "-f", "null", "-"],
+                            "scale=64:-2,boxblur=2,freezedetect=n=0.01:d=2", "-an", "-f", "null", "-"],
                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
     except (subprocess.TimeoutExpired, OSError):
         return None
-    m = re.search(r"freeze_start: ([0-9.]+)", p.stderr or "")
-    return float(m.group(1)) if m else None
+    err = p.stderr or ""
+    starts = [float(x) for x in re.findall(r"freeze_start: ([0-9.]+)", err)]
+    ends = [float(x) for x in re.findall(r"freeze_end: ([0-9.]+)", err)]
+    clock = re.findall(r"Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)", err) or re.findall(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)", err)[-1:]
+    dur = int(clock[0][0]) * 3600 + int(clock[0][1]) * 60 + float(clock[0][2]) if clock else None
+    if not starts or (len(ends) >= len(starts) and (dur is None or ends[-1] < dur - 0.5)):
+        return None                              # still for a while, then moving again: a slow shot, not a failed read
+    s = starts[-1]                               # only the last freeze can run to the end
+    if cuts:
+        return s if any(s + 0.25 < float(c) < (dur or 1e9) - 0.25 for c in cuts) else None
+    return s if dur is not None and dur - s >= hold_s else None
 
 
 def _frame_mutes(job: Path, style: str) -> list:
@@ -6290,11 +6302,12 @@ def _denoise_voice(mp3: Path, style: str = "") -> Path:
 def _final_mux(job: Path, mp3: Path, srt: Path, burn_subs: bool, add_qr: bool = False,
                vignette: bool = False, no_dust_ranges: list = None,
                sub_center: bool = False, no_sub_ranges: list = None, vignette_ranges: list = None,
-               look_ranges: list = None, cta_times: list = None) -> None:
+               look_ranges: list = None, cta_times: list = None, cuts: list = None) -> None:
     """Screen-blend the dust overlay, optional black vignette, burn subtitles,
     overlay the QR bottom-right, add voiceover. no_dust_ranges = [(start,end)] time
     windows where the dust is suppressed (e.g. mindmap segments). vignette_ranges: a softer vignette only inside
-    these windows (the documentary's film look), instead of the whole video."""
+    these windows (the documentary's film look), instead of the whole video. cuts: the planned shot starts in
+    seconds, when the style has a plan (the stall check then knows a cut from a slow shot, see _picture_stalls)."""
     sty_f = job / "style.txt"
     job_style = sty_f.read_text(encoding="utf-8").strip() if sty_f.exists() else ""
     # a channel may bring its own overlay (VHS tape noise instead of film dust) and a still laid over every frame
@@ -6455,18 +6468,20 @@ def _final_mux(job: Path, mp3: Path, srt: Path, burn_subs: bool, add_qr: bool = 
         f"subs={'yes' if has_subs else 'no'}, QR={'yes' if has_qr else 'no'}, "
         f"{'hardware' if ff is not soft else 'x264'} encoder)...")
     from farm.prepared import capture_final
-    capture_final(job, soft, total_len, fonts_dir=FONT_DIR, fonts_option=_FONTSDIR, engine=sys.modules[__name__])
+    capture_final(job, soft, total_len, fonts_dir=FONT_DIR, fonts_option=_FONTSDIR, engine=sys.modules[__name__],
+                  cuts=cuts)
     try:
-        _execute_final_encode(job, ff, total_len)
+        _execute_final_encode(job, ff, total_len, cuts)
     except subprocess.CalledProcessError as e:
         if ff is soft:
             raise
         log(f"  hardware encoder failed ({(e.stderr or b'')[-120:]!r}) — encoding with x264 instead")
-        _execute_final_encode(job, soft, total_len)
+        _execute_final_encode(job, soft, total_len, cuts)
 
 
-def _execute_final_encode(job: Path, ff: list, total_len: float) -> None:
-    """Execute the prepared final graph and original cleanup; no AI or planning."""
+def _execute_final_encode(job: Path, ff: list, total_len: float, cuts: list = None) -> None:
+    """Execute the prepared final graph and original cleanup; no AI or planning. cuts: the planned shot starts in
+    seconds, or None (see _picture_stalls)."""
     (job / "_video_tmp.mp4").unlink(missing_ok=True)
     # Hard ceiling: a stalled ffmpeg used to leave the job "running" indefinitely
     # with nothing happening. Fail loudly instead so it can simply be re-run.
@@ -6482,7 +6497,7 @@ def _execute_final_encode(job: Path, ff: list, total_len: float) -> None:
         except subprocess.TimeoutExpired:
             (job / "_video_tmp.mp4").unlink(missing_ok=True)
             sys.exit(f"ffmpeg: the final render stalled (>{mux_timeout}s) — run the job again")
-        stalled = _picture_stalls(job / "_video_tmp.mp4")
+        stalled = _picture_stalls(job / "_video_tmp.mp4", cuts=cuts)
         if stalled is None:
             break
         if attempt < 2:

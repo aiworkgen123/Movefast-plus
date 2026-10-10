@@ -1104,7 +1104,8 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
                 # no shot is that long (the brief cuts at five seconds): the shot after it joins it, as the repo
                 # cuts the gallery's carrier out of the narration around the hook
                 nxt = rows[k + 1] if k + 1 < len(rows) else None
-                if nxt is None or nxt.get("device") or dur(rows[k]) + dur(nxt) > 6.5 or dur(rows[k]) + dur(nxt) < need:
+                if nxt is None or nxt.get("device") or dur(rows[k]) + dur(nxt) > min(6.5, SCENE_MAX_S) \
+                        or dur(rows[k]) + dur(nxt) < need:
                     continue
                 rows[k]["endMs"] = nxt["endMs"]
                 rows[k]["text"] = f"{rows[k]['text']} {nxt['text']}".strip()
@@ -1167,11 +1168,14 @@ Return {{"chapters": [{{"shot": n, "heading": "..."}}], "overlays": [{{"shot": n
 
 def _hold(engine, rows: list, i: int, secs: float, why: str) -> None:
     """Keep shot i on screen for at least `secs`: the shots after it fold into it (their words are still spoken, under
-    the same picture). A template on a folded shot gives way; a chapter, a caption or the opening never does."""
+    the same picture). A template on a folded shot gives way; a chapter, a caption or the opening never does. Never
+    past SCENE_MAX_S (owner 2026-10-10): what a short shot still lacks, sync_overlays takes from the next plain shot."""
     r = rows[i]
     while _dur(r) < secs and i + 1 < len(rows):
         nxt = rows[i + 1]
         if nxt.get("section_turn") or nxt.get("typedCaption") or (nxt.get("device") or {}).get("id") in ("P03", "gallery-strip"):
+            break
+        if nxt["endMs"] - r["startMs"] > SCENE_MAX_S * 1000:
             break
         if nxt.get("device"):
             engine.log(f"      template {nxt['device']['id']} at {nxt['startMs'] / 1000:.0f}s gives way to {why}")
@@ -2464,6 +2468,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             if r.pop("_hold", False) and kept:
                 kept[-1]["endMs"] = r["endMs"]
                 kept[-1]["text"] = f"{kept[-1]['text']} {r['text']}".strip()
+                kept[-1]["hold"] = True               # a planned long hold: the one shot allowed past SCENE_MAX_S
             else:
                 kept.append(r)
         rows[:] = kept
@@ -2834,6 +2839,8 @@ def typed_captions(engine, job: Path, rows: list, script: str, force: bool = Fal
             if nxt.get("section_turn") or nxt.get("typedCaption"):
                 engine.log(f"      typed caption at {r['startMs'] / 1000:.0f}s cannot be held longer (a chapter or caption follows)")
                 break
+            if nxt["endMs"] - r["startMs"] > SCENE_MAX_S * 1000:     # never past 8 s (owner 2026-10-10): sync gives
+                break                                                # the caption the rest from the next plain shot
             if nxt.get("device"):            # the caption is mandatory, a template is not: it gives way
                 engine.log(f"      template {nxt['device']['id']} at {nxt['startMs'] / 1000:.0f}s gives way to a typed caption")
             r["endMs"] = nxt["endMs"]
@@ -2896,104 +2903,507 @@ def _spoken_at(words: list, heard: list, lo: int, hi: int):
     return best[0] if best else None
 
 
-SYNC_MAX_LATE_MS = 1500     # an overlay crowded by the one before may start this much after its word, no more
+SYNC_MAX_LATE_MS = 350      # an overlay crowded by the one before may start this much after its word, no more (was
+                            # 1.5 s; owner 2026-10-10: ON its words, within half a second as the viewer sees it - a
+                            # caption types 0.27 s into its shot, so 0.35 s late is 0.47 s after the word)
 _SYNC_RANK = {"P03": 9, "chapter-plate": 8, "typed caption": 7, "corner-label": 5, "P04": 5, "P17": 5, "P12": 4}
+# the capped layout (owner 2026-10-10: no shot over SCENE_MAX_S anywhere, cuts on the narration, a second sync changes
+# nothing; the pod's 11-min film had five shots of 8-12.4 s, all made here, and 179 of 206 cuts off the narration)
+SYNC_SNAP_MS = 700          # a plain cut the layout moved goes to the nearest subtitle start this close
+CHAPTER_SNAP_MS = 4000      # a chapter opens on the sentence start this close to its shot, never mid-sentence
+CHAPTER_SHIFT_MS = 8000     # how far a chapter may move, sentence start to sentence start, so a typed caption keeps its words
+
+
+def _need_ms(r: dict) -> int:
+    """How long an overlay shot must last: a typed caption's lead, typing and reading, else its template's animation."""
+    if r.get("typedCaption"):
+        return int(1000 * _tc_need_s(r["typedCaption"]["lines"]))
+    tid = (r.get("device") or {}).get("id")
+    return int(1000 * _need_s(tid)) if tid in LIBRARY else SYNC_MIN_SHOT_MS
+
+
+def _cap_ms(r: dict) -> int:
+    """The longest a shot may run (owner 2026-10-10): SCENE_MAX_S, a template no longer than its own longest; a planned
+    long hold from pictures() (instead of a bad repeat, after HOLD_FROM_S) up to HOLD_MAX_S, the one exception."""
+    if r.get("hold"):
+        return int(HOLD_MAX_S * 1000)
+    tid, cap = (r.get("device") or {}).get("id"), int(SCENE_MAX_S * 1000)
+    if not tid or r.get("typedCaption") or tid not in LIBRARY:
+        return cap
+    return min(cap, max(_need_ms(r), int(LIBRARY[tid][3] * 1000)))
+
+
+def _on_screen_ms(r: dict) -> int:
+    """When a shot's words appear: its start, or for a typed caption that types in on its word inside its own shot (a
+    pre-roll, see sync_overlays) the moment the typing starts, less the usual lead."""
+    tc = r.get("typedCaption")
+    if not tc:
+        return r["startMs"]
+    return r["startMs"] + int(round((int(tc.get("startFrame", TYPED_CAPTION_START_F)) - TYPED_CAPTION_START_F) * 1000 / FPS))
+
+
+def _sentence_starts(cues: list) -> list:
+    """0 and every subtitle start that opens a sentence (the line before it ends with . ? ! or …)."""
+    return [0] + [int(cues[k][0]) for k in range(1, len(cues)) if _cut_kind(cues[k - 1][2]) == 2]
+
+
+def _lay(plain: list, a: int, b: int, floor, starts: list) -> list:
+    """Where the plain shots between two overlay shots go: [(start, end)] from a to b. Every inner cut stays where its
+    shot's own line starts (row["_said"]), so only the shots touching a moved overlay change length (owner 2026-10-10:
+    a re-time that changed nothing put 141 cuts off the narration; spreading a shift over every shot between still
+    put 38 off it). A cut moves only as far as a floor or a cap forces it, and then to the nearest subtitle start
+    within SYNC_SNAP_MS that keeps the floors and caps, until none moves (so a second sync moves none). Time no shot
+    may take stays on the last one, for cap_shots to cut."""
+    n = len(plain)
+    f = [floor(x) for x in plain]
+    c = [max(f[j], _cap_ms(x)) for j, x in enumerate(plain)]
+    if b - a < sum(f):                                 # never asked for (the caller drops shots first): squeeze evenly
+        f = [x * (b - a) // max(1, sum(f)) for x in f]
+    end = min(b, a + sum(c))                           # past every cap: the last shot keeps the rest
+    edges = [int(a)]
+    for j in range(1, n):                              # each cut on its own line where the floors and caps allow
+        lo = max(edges[-1] + f[j - 1], end - sum(c[j:]))
+        hi = min(edges[-1] + c[j - 1], end - sum(f[j:]))
+        edges.append(int(min(hi, max(lo, plain[j]["_said"][0]))))
+    edges.append(int(b))
+    for _ in range(n):
+        moved = False
+        for j in range(1, n):
+            p, lo, hi = edges[j], edges[j - 1], edges[j + 1]
+            near = [s for s in starts if abs(s - p) <= SYNC_SNAP_MS and lo + f[j - 1] <= s <= hi - f[j]
+                    and s - lo <= max(c[j - 1], p - lo) and hi - s <= max(c[j], hi - p)]
+            s = min(near, key=lambda s: (abs(s - p), s)) if near else p
+            if s != p:
+                edges[j], moved = s, True
+        if not moved:
+            break
+    return list(zip(edges, edges[1:]))
+
+
+def _chapter_back(rows: list, k: int, sentences: set, latest: int = None):
+    """The shot a chapter on rows[k] can step back to, so a typed caption keeps its words (owner 2026-10-10: the
+    protagonist's introduction was dropped for a chapter on the same words): the nearest earlier plain shot whose own
+    line opens a sentence, within CHAPTER_SHIFT_MS, not past another overlay, not before CHAPTER_FIRST_S, at least 30 s
+    after the chapter before it, its plate done by `latest` when given. The index, or None."""
+    s0 = rows[k]["_said"][0]
+    last = max((x["_said"][0] for x in rows[:k] if x.get("section_turn")), default=-10 ** 9)
+    for j in range(k - 1, 0, -1):
+        y = rows[j]
+        if y.get("device") or y.get("typedCaption") or y.get("section_turn") or y.get("hold"):
+            return None
+        s = y["_said"][0]
+        if s0 - s > CHAPTER_SHIFT_MS or s < CHAPTER_FIRST_S * 1000 or s - last < 30000:
+            return None
+        if s in sentences and (latest is None or s + _need_ms(rows[k]) <= latest):
+            return j
+    return None
+
+
+def _chapter_to(rows: list, k: int, j: int) -> None:
+    """The chapter plate (and its section turn) on rows[k] moves to rows[j]."""
+    x, y = rows[k], rows[j]
+    y["device"], y["section_turn"], y["_seated"] = x["device"], True, True
+    x["device"] = None
+    x.pop("section_turn", None)
+
+
+def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
+    """An overlay whose words are said in a neighbour's own line moves to that neighbour, instead of the film being
+    re-cut around it: a line and its picture stay together (audit 2026-10-10: a label pinned 8.7 s after its shot
+    stretched the shot before it to 12.4 s). Only onto a shot within two of it that is plain or carries a lesser
+    template (which gives way: the two would crowd each other anyway), never a caption or a long hold; onto a
+    chapter's shot only a typed caption, and only when the chapter can step back a sentence (_chapter_back); a
+    template only where it passes the same checks there (_can, _fit_devices), else nothing moves. Once per overlay:
+    the first sync that sees it (row["_seated"])."""
+    moved = 0
+    keys = ("device", "companions", "type_shade")
+    for k, r in enumerate(rows):
+        t = tid(r)
+        if not t or k == 0 or r.get("_seated") or r.get("section_turn") or t in ("P03", "chapter-plate"):
+            continue
+        s0, e0 = r["_said"]
+        at = _spoken_at(_overlay_words(r), heard, s0 - 12000, e0 + 12000)
+        if at is None or s0 - SYNC_TOLERANCE_MS <= at < e0:
+            continue
+        j = next((j for j in range(max(1, k - 2), min(len(rows), k + 3))
+                  if j != k and rows[j]["_said"][0] <= at < rows[j]["_said"][1]), None)
+        x = rows[j] if j is not None else None
+        if x is not None and x.get("section_turn") and r.get("typedCaption") and tid(x) == "chapter-plate":
+            back = _chapter_back(rows, j, sentences, at - SYNC_LEAD_MS)
+            if back is None:
+                continue
+            _chapter_to(rows, j, back)
+            engine.log(f"      chapter at {x['startMs'] / 1000:.1f}s steps back a sentence, to {rows[back]['startMs'] / 1000:.1f}s, "
+                       f"so a typed caption keeps its words")
+        if x is None or x.get("typedCaption") or x.get("section_turn") or x.get("hold") \
+                or tid(x) and _SYNC_RANK.get(tid(x), 1) >= _SYNC_RANK.get(t, 1):
+            continue
+        lesser = {key: x.pop(key) for key in keys if key in x}       # gives way, unless the move is refused
+        x["device"] = None
+        if r.get("typedCaption"):
+            x["typedCaption"] = dict(r.pop("typedCaption"), startFrame=TYPED_CAPTION_START_F)
+        else:
+            dev = r["device"]
+            had = {key: r.pop(key) for key in keys if key in r}
+            r["device"], n0 = None, len(DEV_DROPS)
+            if _can(rows, j, dev["id"], ignore_len=True):
+                x["device"] = dict(dev)
+                _fit_devices(rows, only={id(x)})
+            if (x.get("device") or {}).get("id") != dev["id"]:       # refused there: everything stays where it was
+                del DEV_DROPS[n0:]
+                for key in keys:
+                    x.pop(key, None)
+                x.update(lesser)
+                x.setdefault("device", None)
+                r.update(had)
+                continue
+        x["_seated"] = True
+        moved += 1
+        engine.log(f"      {t} moved from the shot at {r['startMs'] / 1000:.1f}s to the one at {x['startMs'] / 1000:.1f}s, "
+                   f"whose own line says it" + (f" ({lesser['device']['id']} there gives way)" if lesser.get("device") else ""))
+    return moved
 
 
 def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
     """Every text overlay and typed caption starts when its words are heard (SYNC_LEAD_MS before), however the planner
-    seated it. The film is re-cut around them: each overlay shot is pinned to its word and lasts at least what its
-    animation needs; the plain shots between two overlays keep their order and share the time between them. Two
-    overlays whose words come too close for both: the later one starts up to SYNC_MAX_LATE_MS late, else the lesser
-    one goes. Plain shots that no longer fit are dropped (never below SYNC_MIN_SHOT_MS a shot)."""
+    seated it, and the film is re-cut around them within the owner's limits (2026-10-10: no shot over SCENE_MAX_S,
+    cuts on the narration). In order:
+      1. an overlay whose words are said in a neighbour's own line moves to that neighbour (_reseat), once;
+      2. each overlay is pinned to its words, looked for near the narration its shot was cut on (row["_said"], kept
+         across every sync, so a second sync finds the same words). A chapter keeps its sentence start and is never
+         pinned to its heading's words (a dip to black mid-sentence). Words said nowhere near: the overlay goes;
+      3. crowding, in film order: the later one starts up to SYNC_MAX_LATE_MS late, else on a later group of its own
+         words in its own line; a chapter moves to another sentence start so a typed caption keeps its words; else
+         the lesser one goes - and a caption outlives a chapter while more than CHAPTERS_MIN are left;
+      4. the layout: an overlay shot runs from its word to the end of its own line, within [what its animation needs,
+         its cap]; a typed caption whose word comes later in its own line keeps the line's cut and types in on the word
+         (typedCaption.startFrame, a pre-roll); the plain shots between share the rest (_lay: unchanged where nothing
+         moved, cuts snapped to subtitle starts, never past their caps). A plain shot that cannot keep
+         SYNC_MIN_SHOT_MS goes. Time no shot may take (two overlays far apart with nothing between) stays on the shot
+         before for now: cap_shots cuts it on the narration after the last sync.
+    A second call changes nothing."""
+    if not rows:
+        return
     heard = _heard(job, cues)
     total = rows[-1]["endMs"]
     dev_id = lambda r: (r.get("device") or {}).get("id") or ("typed caption" if r.get("typedCaption") else "")
     # only overlays that SAY something are pinned; a wordless animation (photo pop, gallery, mosaic) rides with the
     # plain shots and only keeps the length its animation needs
     tid = lambda r: dev_id(r) if (r.get("typedCaption") or _overlay_words(r) or r is rows[0] and dev_id(r)) else ""
-    need = lambda r: int(1000 * (_tc_need_s(r["typedCaption"]["lines"]) if r.get("typedCaption") else _need_s(dev_id(r))))
-    floor = lambda x: need(x) if dev_id(x) else SYNC_MIN_SHOT_MS
-    anchors = []                                  # [row, target ms]
+    floor = lambda x: _need_ms(x) if dev_id(x) else SYNC_MIN_SHOT_MS
+    rank = lambda r: _SYNC_RANK.get(tid(r), 1)
+    for r in rows:                                   # the narration each shot was cut on, the same for every sync
+        r.setdefault("_said", (r["startMs"], r["endMs"]))
+    sentences, starts = _sentence_starts(cues), sorted({int(a) for a, b, t in cues})
+    seated = _reseat(engine, rows, heard, tid, set(sentences))
+
+    def drop(r, why):
+        engine.log(f"      {tid(r)} at {r['startMs'] / 1000:.1f}s dropped: {why}")
+        for key in ("typedCaption", "section_turn", "companions", "type_shade"):
+            r.pop(key, None)
+        r["device"] = None
+
+    anchors = []                                     # [row, the ms its shot is pinned to]
     for k, r in enumerate(rows):
         if not tid(r):
             continue
+        r["_seated"] = True                          # re-seated (or not) by the first sync that sees it, never again
+        s0, e0 = r["_said"]
         if k == 0:
             anchors.append([r, 0])
-            continue
-        at = _spoken_at(_overlay_words(r), heard, r["startMs"] - 12000, r["endMs"] + 12000)
-        if at is None and tid(r) != "chapter-plate":
-            # words the narrator does not say anywhere near: never on screen out of step with the voice
-            engine.log(f"      {tid(r)} at {r['startMs'] / 1000:.1f}s dropped: its words are not said near it")
-            r.pop("typedCaption", None)
-            r["device"] = None
-            continue
-        anchors.append([r, max(0, at - SYNC_LEAD_MS) if at is not None else r["startMs"]])
-    kept = []
-    for r, t in anchors:                          # resolve crowding in film order
-        if kept:
+        elif tid(r) == "chapter-plate":              # its sentence start, never its heading's words
+            near = [s for s in sentences if abs(s - s0) <= CHAPTER_SNAP_MS]
+            anchors.append([r, min(near, key=lambda s: (abs(s - s0), s)) if near else s0])
+        else:
+            at = _spoken_at(_overlay_words(r), heard, s0 - 12000, e0 + 12000)
+            if at is None:     # words the narrator does not say anywhere near: never on screen out of step with the voice
+                drop(r, "its words are not said near it")
+                continue
+            anchors.append([r, max(0, at - SYNC_LEAD_MS)])
+    chapters = sum(1 for r, _ in anchors if tid(r) == "chapter-plate")
+    kept, late, again, shifted = [], 0, 0, 0
+    for r, t in anchors:                             # crowding, in film order; a pair is settled the same way each time
+        t0 = t
+        while r is not None and kept:
             p, pt = kept[-1]
-            free = pt + need(p)
-            if t < free:
-                if free - t <= SYNC_MAX_LATE_MS:
-                    t = free
-                else:
-                    loser = r if _SYNC_RANK.get(tid(r), 1) <= _SYNC_RANK.get(tid(p), 1) else p
-                    engine.log(f"      {tid(loser)} at {loser['startMs'] / 1000:.1f}s dropped: its words come too close to another overlay's")
-                    loser.pop("typedCaption", None)
-                    loser["device"] = None
-                    if loser is p:
-                        kept.pop()
-                        if kept and t < kept[-1][1] + need(kept[-1][0]):
-                            t = kept[-1][1] + need(kept[-1][0])
-                    else:
-                        continue
-        kept.append([r, t])
+            free = pt + _need_ms(p)
+            if t >= free:
+                break
+            chap = tid(r) == "chapter-plate"
+            if not chap and free - t0 <= SYNC_MAX_LATE_MS:            # a little late beats not at all
+                t, late = free, late + 1
+                break
+            if not chap:                                              # its words again, later in its own line
+                at = _spoken_at(_overlay_words(r), heard, free + SYNC_LEAD_MS, max(r["_said"][1], free + SYNC_LEAD_MS))
+                if at is not None:
+                    t, again = at - SYNC_LEAD_MS, again + 1
+                    break
+            if r.get("typedCaption") and tid(p) == "chapter-plate":  # the chapter steps back onto the shot of
+                k = next(j for j, x in enumerate(rows) if x is p)       # an earlier sentence
+                j = _chapter_back(rows, k, set(sentences), t)
+                lo = kept[-2][1] + _need_ms(kept[-2][0]) if len(kept) > 1 else 0
+                if j is not None and rows[j]["_said"][0] >= lo:
+                    _chapter_to(rows, k, j)
+                    kept[-1], shifted = [rows[j], rows[j]["_said"][0]], shifted + 1
+                    break
+            if chap and p.get("typedCaption"):                       # ... or a sentence later, inside its own line
+                s = min((s for s in sentences if free <= s <= min(t0 + CHAPTER_SHIFT_MS, r["_said"][1] - _need_ms(r))),
+                        default=None)
+                if s is not None:
+                    t, shifted = s, shifted + 1
+                    break
+            loser = r if rank(r) <= rank(p) else p
+            other = p if loser is r else r
+            if loser.get("typedCaption") and tid(other) == "chapter-plate" and chapters > CHAPTERS_MIN:
+                loser, other = other, loser                           # a caption outlives a chapter the film can spare
+            if tid(loser) == "chapter-plate":
+                chapters -= 1
+            drop(loser, f"its words come too close to the {tid(other)}'s at {other['startMs'] / 1000:.1f}s")
+            if loser is r:
+                r = None
+            else:
+                kept.pop()                                            # r meets the one before it, by the same rules
+        if r is not None:
+            kept.append([r, t])
     if not kept:
         return
-    moved = sum(1 for r, t in kept if abs(r["startMs"] - t) > SYNC_TOLERANCE_MS)
-    # lay the film out again: [plain shots] anchor [plain shots] anchor ... [plain shots]
+    # the layout: [plain shots] overlay [plain shots] overlay ... [plain shots]
     pos = {id(r): k for k, r in enumerate(rows)}
-    out, cursor, prev_k = [], 0, -1
-    marks = [(r, t) for r, t in kept] + [(None, total)]
-    for n, (r, t) in enumerate(marks):
+    out, prev, prev_k, cursor, folded, pre_n = [], None, -1, 0, 0, 0
+    marks = kept + [[None, total]]
+    for i, (r, t) in enumerate(marks):
         k = pos[id(r)] if r is not None else len(rows)
         plain = [x for x in rows[prev_k + 1:k] if not tid(x)]
-        # the previous anchor (already in out) may run on; the plain shots between share what it leaves
-        span = t - cursor
-        if out and out[-1] is marks[n - 1][0]:
-            a = out[-1]
-            want = max(need(a), min(a["endMs"] - a["startMs"], span))
-            while plain and span - want < sum(floor(x) for x in plain):
-                plain.remove(min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"])))
-            a_end = cursor + (want if plain else span)
-            a["endMs"] = int(a_end)
-            cursor = a_end
-            span = t - cursor
+        n0 = len(plain)
+        floors = lambda: sum(floor(x) for x in plain)
+        shortest = lambda: min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"], x["startMs"]))
+        keep = 0
+        if prev is not None:                         # 1. the overlay shot before: to the end of its own line, within
+            s_a = prev["startMs"]                    #    [its lead-in and animation, its cap]
+            keep = prev["_pin"] - s_a + _need_ms(prev)
+            while plain and t - s_a - keep < floors():
+                plain.remove(shortest())
+            nat = max(keep, min(_cap_ms(prev), prev["_said"][1] - s_a, t - s_a - floors()))
+            cursor = s_a + min(nat, t - s_a)
         else:
-            while plain and span < sum(floor(x) for x in plain):
-                plain.remove(min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"])))
-        if plain:
-            tot = sum(x["endMs"] - x["startMs"] for x in plain) or 1
-            spare = span - sum(floor(x) for x in plain)
-            at = cursor
-            for j, x in enumerate(plain):
-                w = floor(x) + (x["endMs"] - x["startMs"]) * spare / tot
-                x["startMs"], x["endMs"] = int(at), int(t if j == len(plain) - 1 else at + w)
-                at += w
+            while plain and t - cursor < floors():
+                plain.remove(shortest())
+        folded += n0 - len(plain)
+        pre, room = 0, 0                             # 2. a caption whose word comes later in its own line keeps the
+        if r is not None and r.get("typedCaption"):  #    line's cut and types in on the word (a pre-roll), never
+            (nr, nt), until = marks[i + 1], r["_said"][1]   # shortening the plain shots below their own lines, never
+            after = [x for x in rows[k + 1:pos[id(nr)] if nr is not None else len(rows)] if not tid(x)]
+            while after and nt - t - _need_ms(r) < sum(floor(x) for x in after):   # (the shots the next stretch
+                after.remove(min(after, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"], x["startMs"])))
+            if not after:                            #     keeps) past its cap when it must run on to the next overlay
+                until = max(until, nt)
+            room = _cap_ms(r) - min(_cap_ms(r), max(_need_ms(r), until - t))
+            had = sum(x["_said"][1] - x["_said"][0] for x in plain)
+            pre = max(0, min(t - max(r["_said"][0], cursor), room, t - cursor - max(had, floors())))
+        over = (t - pre - cursor) - sum(_cap_ms(x) for x in plain)
+        if over > 0 and prev is not None:            # 3. more time than the shots between may take: the overlay shot
+            ext = max(0, min(over, _cap_ms(prev) - (cursor - prev["startMs"])))   # before runs on to its cap ...
+            cursor, over = cursor + ext, over - ext
+        if over > 0 and r is not None and r.get("typedCaption"):                  # ... the caption's opens earlier
+            more = max(0, min(over, room - pre, t - cursor - floors() - pre))
+            pre, over = pre + more, over - more
+        if r is not None and not out and not plain:  # the film opens on this overlay's shot
+            pre = t
+        if plain and prev is not None and over <= 0:  # the overlay shot ends on a subtitle start too, where one is near
+            lo, hi = prev["startMs"] + keep, prev["startMs"] + _cap_ms(prev)
+            near = [s for s in starts if abs(s - cursor) <= SYNC_SNAP_MS and lo <= s <= hi
+                    and floors() <= t - pre - s <= sum(_cap_ms(x) for x in plain)]
+            if near:
+                cursor = min(near, key=lambda s: (abs(s - cursor), s))
+        if plain:                                    # 4. the plain shots between
+            if prev is not None:
+                prev["endMs"] = int(cursor)
+            for x, (a, b) in zip(plain, _lay(plain, int(cursor), int(t - pre), floor, starts)):
+                x["startMs"], x["endMs"] = a, b
                 out.append(x)
-            cursor = t
-        elif out and span > 0:                    # nothing between: the shot before runs on to the word
-            out[-1]["endMs"] = int(t)
-            cursor = t
+        elif out:                                    # nothing between: the shot before runs on to the next word
+            out[-1]["endMs"] = int(t - pre)
         if r is not None:
-            r["startMs"] = int(cursor)
+            r["startMs"] = int(t - pre)
+            if r.get("typedCaption"):
+                r["typedCaption"] = dict(r["typedCaption"], startFrame=TYPED_CAPTION_START_F + int(round(pre * FPS / 1000)))
+            pre_n += pre > 0
+            r["_pin"] = t
             out.append(r)
+            prev = r
         prev_k = k
     out[-1]["endMs"] = total
-    dropped = len(rows) - len(out)
     rows[:] = out
-    engine.log(f"  overlays on their words: {len(kept)} pinned ({moved} moved), {dropped} plain shots folded away")
+    off = sum(1 for r, _ in kept if abs(r["startMs"] - r["_said"][0]) > SYNC_TOLERANCE_MS)
+    engine.log(f"  overlays on their words: {len(kept)} pinned ({off} off their own line's cut"
+               + (f", {seated} moved to the shot whose line says them" if seated else "")
+               + (f", {pre_n} captions typing in on their word inside their own shot" if pre_n else "")
+               + (f", {late} a little late, {again} on a later mention" if late or again else "")
+               + (f", {shifted} chapters moved a sentence to make room" if shifted else "")
+               + f"), {folded} plain shots folded away")
+
+
+def _merge(rows: list, k: int) -> None:
+    """rows[k] and rows[k+1] become one shot under the longer one's picture; the other picture is free again (a
+    runner-up of the joined shot), its words stay spoken under the picture that stays."""
+    a, b = rows[k], rows.pop(k + 1)
+    lead, other = (b, a) if b["endMs"] - b["startMs"] > a["endMs"] - a["startMs"] else (a, b)
+    m = dict(lead, startMs=a["startMs"], endMs=b["endMs"], text=f"{a.get('text') or ''} {b.get('text') or ''}".strip())
+    m["_said"] = (a["startMs"], b["endMs"])         # what it is cut on now (a later sync keeps it where it is)
+    m["held"] = list(lead.get("held") or []) + [other.get("text") or ""] + list(other.get("held") or [])
+    mine = (lead.get("pick") or {}).get("photo")
+    spare, seen = [], {mine}
+    for c in list(lead.get("spare") or []) + [other.get("pick")] + list(other.get("spare") or []):
+        if c and not c.get("ai") and c.get("photo") not in seen:
+            spare.append(c)
+            seen.add(c.get("photo"))
+    m["spare"] = spare
+    m["entities"] = list(dict.fromkeys(list(lead.get("entities") or []) + list(other.get("entities") or [])))
+    rows[k] = m
+
+
+def _calm_cuts(rows: list) -> int:
+    """_calm_short_runs after the re-cut: in a run of more than SHORT_RUN_MAX shots under SHORT_S the two plain
+    neighbours whose sum is shortest become one, never over SCENE_MAX_S, never a shot that carries words (a template,
+    a caption, a chapter) or a planned long hold."""
+    fixed = lambda r: bool(r.get("device") or r.get("typedCaption") or r.get("section_turn") or r.get("hold"))
+    joins, i, run = 0, 0, 0
+    while i < len(rows):
+        run = run + 1 if rows[i]["endMs"] - rows[i]["startMs"] < SHORT_S * 1000 else 0
+        if run > SHORT_RUN_MAX:
+            lo = i - run + 1
+            pairs = [(rows[k + 1]["endMs"] - rows[k]["startMs"], k) for k in range(lo, i)
+                     if rows[k + 1]["endMs"] - rows[k]["startMs"] <= SCENE_MAX_S * 1000
+                     and not fixed(rows[k]) and not fixed(rows[k + 1])]
+            if pairs:
+                _merge(rows, min(pairs)[1])
+                joins += 1
+                i, run = lo, 0                       # walk the run again from its start
+                continue
+        i += 1
+    return joins
+
+
+def _part_pool(rows: list, k: int, a: int, b: int) -> list:
+    """The pictures a part [a, b) cut off rows[k] could show, best first: the runner-ups of the shots whose own line
+    is heard there (the part shows THAT line), then rows[k]'s own, then its neighbours'; never one already on screen."""
+    shown = {c.get("photo") for r in rows for c in [r.get("pick")] + list(r.get("companions") or []) if c}
+    heard = lambda x: min(b, x["_said"][1]) - max(a, x["_said"][0]) if x.get("_said") else 0
+    order = sorted((x for x in rows if heard(x) > 0), key=lambda x: (-heard(x), x["startMs"]))
+    order += [rows[k]] + [rows[j] for j in (k - 1, k + 1, k - 2, k + 2) if 0 <= j < len(rows)]
+    pool, seen = [], set()
+    for x in order:
+        for c in x.get("spare") or []:
+            if c.get("photo") and c["photo"] not in shown and c["photo"] not in seen:
+                pool.append(c)
+                seen.add(c["photo"])
+    return pool
+
+
+def _provisional(rows: list, k: int, a: int, pool: list) -> tuple:
+    """A picture for a new part until the reuse/AI stage gives it its own: the pool's first; else a photo the reuse
+    rule allows (shown once, REUSE_GAP_S from that showing, not on a shot beside it); else rows[k]'s continues."""
+    if pool:
+        return dict(pool[0]), "split-spare"
+    shows = {}
+    for y in rows:
+        if y.get("pick"):
+            shows.setdefault(y["pick"]["photo"], []).append(y["startMs"])
+    near = {(rows[j].get("pick") or {}).get("photo") for j in (k - 1, k, k + 1) if 0 <= j < len(rows)}
+    again = [y["pick"] for y in rows if y.get("pick") and not y["pick"].get("ai") and y["pick"]["photo"] not in near
+             and len(shows[y["pick"]["photo"]]) < 2 and all(abs(t - a) >= REUSE_GAP_S * 1000 for t in shows[y["pick"]["photo"]])]
+    if again:
+        best = max(again, key=lambda p: (float(p.get("score") or 0), min(abs(t - a) for t in shows[p["photo"]]), p["photo"]))
+        return dict(best, reused=True), "split-reused"
+    same = next((rows[j]["pick"] for j in (k, k - 1, k + 1) if 0 <= j < len(rows) and rows[j].get("pick")), None)
+    return (dict(same) if same else None), "split-same"
+
+
+def _split_long(engine, rows: list, cues: list, heard: list, starts: list) -> list:
+    """Every shot over its cap is cut in two on the narration (see cap_shots); returns [(ms, seconds, step)]."""
+    done, k = [], 0
+    while k < len(rows):
+        x = rows[k]
+        s, e, cap = x["startMs"], x["endMs"], _cap_ms(x)
+        if e - s <= cap:
+            k += 1
+            continue
+        words = bool(x.get("device") or x.get("typedCaption") or x.get("section_turn"))
+        said = x.get("_said") or (s, e)
+        if words:                                    # the overlay keeps its words and its animation on the first part
+            keep = max(SYNC_MIN_SHOT_MS, x.get("_pin", s) - s + _need_ms(x))
+            aim = s + min(cap, max(keep, said[1] - s))
+        else:
+            keep = SYNC_MIN_SHOT_MS
+            aim = said[1] if s + keep < said[1] < e - keep else (s + e) // 2   # where its own line ends, else halfway
+        lo, hi = s + keep, min(s + cap, e - SYNC_MIN_SHOT_MS)
+        cut = [c for c in starts if lo <= c <= hi] or [ms for ms, _ in heard if lo <= ms <= hi] or [min(s + cap, max(lo, aim))]
+        c = min(cut, key=lambda c: (abs(c - aim), c))
+        own = lambda a, b: max(0, min(b, said[1]) - max(a, said[0]))
+        first_new = not words and own(c, e) > own(s, c)  # the part with less of the shot's own line is the new one
+        a, b = (s, c) if first_new else (c, e)
+        pool = _part_pool(rows, k, a, b)
+        pick, step = _provisional(rows, k, a, pool)
+        src = max(rows, key=lambda y: (min(b, y["_said"][1]) - max(a, y["_said"][0]) if y.get("_said") else -1, -abs(y["startMs"] - a)))
+        part = {key: src[key] for key in ("visualIntent", "queries", "entities", "about", "sceneType", "mood", "era", "stand_in")
+                if key in src}
+        part.update(startMs=int(a), endMs=int(b), device=None, pick=pick, step=step, spare=[], pool=pool, split=True,
+                    needs_picture=True, _said=(int(a), int(b)), _seated=True,
+                    text=" ".join(t for ca, cb, t in cues if a <= ca < b) or next((t for ca, cb, t in cues if ca <= a < cb), x["text"]))
+        if first_new:                                # each part is cut on what it shows now, so a later sync keeps
+            x["startMs"], x["_said"] = int(c), (int(c), e)                     # the cut (an overlay's line still
+            rows.insert(k, part)                                               # opens where its words are looked for)
+        else:
+            x["endMs"], x["_said"] = int(c), ((said[0] if words else s), int(c) if not words or c <= said[1] else said[1])
+            rows.insert(k + 1, part)
+        done.append((int(a), int(b - a), step))
+    return done
+
+
+def cap_shots(engine, job: Path, rows: list, cues: list) -> dict:
+    """After the last sync (owner 2026-10-10): at most SHORT_RUN_MAX quick shots in a row, no shot over its cap
+    (_cap_ms: SCENE_MAX_S, a template's own longest; a planned long hold from pictures() is the one exception).
+      1. a run of more than SHORT_RUN_MAX shots under SHORT_S: two plain neighbours become one (_calm_cuts);
+      2. a shot over its cap is cut on the narration: where its own line ends when it was stretched past it, else at
+         the subtitle start (then the word) nearest its middle; an overlay keeps its words and animation on the first
+         part. The NEW part is a plain shot that needs its own picture, marked for the picture stage that fills it:
+           split=True, needs_picture=True;
+           pool = the pictures it could show, best first: the runner-ups (spare) of the shots whose own line is heard
+                  in it, then the cut shot's own, then its neighbours'; never a photo already on screen;
+           pick = a provisional one, so no shot is ever without a picture: the pool's first (step 'split-spare'), else
+                  a repeat the reuse rule allows ('split-reused'), else the cut shot's picture goes on ('split-same',
+                  logged loudly); its picture brief (visualIntent, queries...) is the line heard there.
+         The reuse/AI stage replaces the provisional pick within the film's budget.
+    Repeats until nothing changes, so a second call changes nothing. Returns {"joins": n, "splits": [(ms, ms, step)]}."""
+    heard = _heard(job, cues)
+    starts = sorted({int(a) for a, b, t in cues})
+    joins, splits = 0, []
+    for _ in range(6):
+        j = _calm_cuts(rows)
+        s = _split_long(engine, rows, cues, heard, starts)
+        joins, splits = joins + j, splits + s
+        if not j and not s:
+            break
+    d = [(r["endMs"] - r["startMs"]) / 1000 for r in rows]
+    run = best = 0
+    for x in d:
+        run = run + 1 if x < SHORT_S else 0
+        best = max(best, run)
+    over = [(r["startMs"], (r["endMs"] - r["startMs"]) / 1000) for r in rows
+            if r["endMs"] - r["startMs"] > _cap_ms(r) or (r["endMs"] - r["startMs"] > SCENE_MAX_S * 1000 and not r.get("hold"))]
+    engine.log(f"  shots after sync: {len(rows)}, {sum(d) / len(d):.2f}s average, {sum(x < SHORT_S for x in d) / len(d):.0%} under "
+               f"3 s, at most {best} quick in a row, longest {max(d):.1f}s"
+               + (f"; {joins} quick runs calmed" if joins else "") + (f"; {len(splits)} cut on the narration" if splits else ""))
+    if splits:
+        how = {"split-spare": "a runner-up", "split-reused": "a repeat for now", "split-same": "THE SAME PICTURE for now"}
+        engine.log(f"  ⚠ {len(splits)} shot(s) were over {SCENE_MAX_S:.0f}s and are cut in two; the new parts need pictures: "
+                   + ", ".join(f"{a // 60000}:{a // 1000 % 60:02d} {n / 1000:.1f}s ({how.get(st, st)})" for a, n, st in splits))
+    if over:
+        engine.log(f"  ⚠ {len(over)} shot(s) still over {SCENE_MAX_S:.0f}s: "
+                   + ", ".join(f"{a // 60000}:{a // 1000 % 60:02d} {n:.1f}s" for a, n in over))
+    if best > SHORT_RUN_MAX:
+        engine.log(f"  ⚠ {best} quick shots in a row: overlays on every pair there, nothing to join")
+    return {"joins": joins, "splits": splits}
 
 
 # ── 5d. no long stretch without words on screen (owner 2026-10-09: the last 4 minutes of a long film had none) ───
@@ -3022,8 +3432,9 @@ Return {{"overlays": [{{"gap": n, "shot": n, "templateId": "...", "headline": ".
 
 
 def _text_times(rows: list) -> list:
-    """Where the film shows words: every shot with a typed caption or a template that says something."""
-    return [r["startMs"] for r in rows if r.get("typedCaption") or (r.get("device") and _overlay_words(r))
+    """Where the film shows words: every shot with a typed caption (from the moment it types in: a caption may type in
+    on its word inside its own shot) or a template that says something."""
+    return [_on_screen_ms(r) for r in rows if r.get("typedCaption") or (r.get("device") and _overlay_words(r))
             or (r.get("device") or {}).get("id") == "chapter-plate"]
 
 
@@ -3486,6 +3897,7 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
             break
         _fit_devices(rows, only=added)
         sync_overlays(engine, job, rows, _cues(engine, srt))
+    cap_shots(engine, job, rows, _cues(engine, srt))   # quick runs calmed, nothing over 8 s (owner 2026-10-10)
     took("sync and gaps")
     marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
     left = _gaps(rows)
@@ -3506,7 +3918,10 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     render(engine, work, tasks, workers=int(_cfg(engine, style).get("render_processes") or 2))
     engine._concat_segments([Path(t["output"]) for t in tasks], job / "_visual.mp4")
     audio = _sfx_audio(engine, job, mp3, sc_list)
-    engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False)
+    # the planned cuts go with it: a freeze is a failed read only if it runs to the end across one of them (a slow
+    # move on a dark photo or a 13 s planned hold ends at its own cut; owner 2026-10-10, three needless re-muxes)
+    engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False,
+                      cuts=[sc["startFrame"] / FPS for sc in sc_list])
     (job / "_visual.mp4").unlink(missing_ok=True)
     if audio != mp3:
         audio.unlink(missing_ok=True)
