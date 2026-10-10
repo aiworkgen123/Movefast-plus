@@ -20,16 +20,21 @@ fit falls back or the shot stays a plain photograph, and nothing stops the run.
     python mrtruth.py check "<job folder>"   # the rules, read back off a finished video's plan
 """
 import hashlib
+import html
 import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).resolve().parent
 RENDERER = HERE / "mrtruth_renderer"
@@ -94,7 +99,8 @@ NAMES_PICTURE = {"P04", "P05", "P17", "framed-card", "corner-label"}     # words
 MIN_WIDTH = 800                 # a web photo must be this wide to fill a 1080p frame through the grade and slow move
 MIN_SCORE = 5.0                 # the judge's 3-5 is "generic, says nothing"; 0-2 wrong era, modern stock, burned-in text
 # cache versions: a change to what a step is told must redo that step on an existing job, not reuse its old answer
-BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 5, 2, 3, 8
+BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 5, 2, 3, 9    # PICK_V 9: Commons, Bing, Brave (2026-10-10)
+JUDGE_MAX = 10                  # pictures in one judge call: Commons' 4 and the web's 6 of round 1 (was 9: one fell off)
 # the picture judge: Flash-Lite at minimal thinking scored a COVID-masked researcher 9 for the 1980s and one image 1 and
 # then 8 (audit 2026-10-08); Mr Truth's judge is a stronger Gemini that thinks a little. Env overrides.
 JUDGE_MODEL = os.environ.get("MRTRUTH_JUDGE_MODEL", "gemini-3.8-flash")
@@ -612,9 +618,12 @@ def _judge_guard(engine) -> None:
 def preflight(engine) -> None:
     """Every paid service the picture planner leans on, checked before a minute is spent (owner 2026-10-09: Gemini
     and Brave both ran dry mid-film and the run carried on quietly, leaving a quarter of an 11-minute film without a
-    fitting picture). A dry picture judge or web search stops the run with the reason; MRTRUTH_ALLOW_DEGRADED=1
-    carries on anyway. A low AI-picture balance is a warning only."""
+    fitting picture). A dry picture judge stops the run with the reason; MRTRUTH_ALLOW_DEGRADED=1 carries on anyway.
+    Brave is only Bing's backup now (owner 2026-10-10): a dry or missing Brave is a warning - unless the web search is
+    Brave alone (MRTRUTH_WEB_SEARCH=brave) - and the run stops later only if Bing fails as well. Bing itself is checked
+    by its canary just before the first picture search. A low AI-picture balance is a warning only."""
     import requests
+    _search_reset(engine)                            # a new film: Bing's and Brave's counts and verdicts start again
     bad, warn = [], []
     g = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if g:
@@ -629,14 +638,35 @@ def preflight(engine) -> None:
     else:
         bad.append("Gemini: no GEMINI_API_KEY")
     b = (os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
+    brave_only = WEB_SEARCH == "brave"
+    if WEB_SEARCH != "brave":
+        try:
+            import curl_cffi  # noqa: F401 - Bing is asked through it
+        except ImportError:
+            _BING.update(why="curl_cffi is not installed (pip install curl_cffi==0.16.3)", at=time.time(),
+                         recheck_at=float("inf"), checked=True)
+            warn.append("Bing (free web pictures) is off: curl_cffi is not installed (pip install curl_cffi==0.16.3) - "
+                        "Brave carries the web search")
     if b:
         try:
             r = requests.get("https://api.search.brave.com/res/v1/images/search", timeout=30, params={"q": "archive", "count": 1},
                              headers={"Accept": "application/json", "X-Subscription-Token": b})
-            if r.status_code in (402, 403, 429):
-                bad.append(f"Brave (web picture search): {str(r.json().get('error', {}).get('detail', r.text))[:140]}")
+            if r.status_code in (401, 402, 403, 429):
+                why = f"HTTP {r.status_code}: {str(r.json().get('error', {}).get('detail', r.text))[:140]}"
+                if brave_only:
+                    bad.append(f"Brave (web picture search): {why}")
+                else:
+                    warn.append(f"Brave (Bing's backup) answered {why} - Bing alone carries the web search")
+                    if r.status_code != 429:
+                        _BRAVE_OUT["why"] = f"{why} (at the start)"
         except Exception as e:                                       # noqa: BLE001
             warn.append(f"Brave could not be checked ({str(e)[:80]})")
+    else:
+        _BRAVE_OUT["why"] = "no BRAVE_SEARCH_API_KEY"
+        (bad if brave_only else warn).append("Brave: no BRAVE_SEARCH_API_KEY" + ("" if brave_only else
+                                             " - nothing backs Bing up if it fails"))
+    if _BRAVE_OUT["why"] and _BING.get("why"):
+        bad.append(f"no web picture search: Bing {_BING['why']}; Brave {_BRAVE_OUT['why']}")
     a = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     if a and str(os.environ.get("CLAUDE_PROVIDER", "")).lower() == "anthropic":
         try:                                         # a one-token call: a dry Claude account stops the run here, not
@@ -1190,13 +1220,15 @@ def _commons_said(status: int, retry_after=None) -> None:
 
 
 def commons_photos(query: str, folder: Path, n: int = 4) -> list:
-    """[(candidate, path)] landscape photographs from Wikimedia Commons (the repo's archive), 1920px thumbnails."""
+    """[(candidate, path)] landscape photographs from Wikimedia Commons (the repo's archive), 1920px thumbnails.
+    Every candidate says where it came from (provider 'commons', img: the file fetched)."""
     import requests
     folder.mkdir(parents=True, exist_ok=True)
     meta = folder / "commons.json"
     got = _load(meta)
     if got is not None and got.get("q") == query:
-        return [(c, Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
+        return [(dict(c, provider="commons"), Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
+    _count("commons")
     picks, refused = [], False
     with _COMMONS_GATE:
         # a busy answer (429) to the search is asked again like a download; it used to read as "no pictures" and was
@@ -1243,11 +1275,13 @@ def commons_photos(query: str, folder: Path, n: int = 4) -> list:
                 continue
             em = ii.get("extmetadata") or {}
             picks.append({"photo": str(dest), "title": re.sub(r"^File:|\.\w+$", "", p.get("title", "")),
-                          "url": ii.get("descriptionurl") or "", "source": "commons.wikimedia.org",
+                          "url": ii.get("descriptionurl") or "", "source": "commons.wikimedia.org", "provider": "commons",
+                          "img": ii.get("thumburl") or ii.get("url") or "",
                           "license": re.sub(r"<[^>]+>", "", str((em.get("LicenseShortName") or {}).get("value") or "")),
                           "artist": re.sub(r"<[^>]+>", "", str((em.get("Artist") or {}).get("value") or ""))[:200]})
             if len(picks) >= n:
                 break
+    _count("commons_found", 1 if picks else 0)
     if refused:                                      # Wikimedia said busy: not cached, the next run asks again
         with _COMMONS_LOCK:
             COMMONS["failed"] += 1
@@ -1446,7 +1480,7 @@ def archive_photos(query: str, folder: Path) -> list:
     meta = folder / "archives.json"
     got = _load(meta)
     if got is not None and got.get("q") == query:
-        return [(c, Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
+        return [(dict(c, provider="archive"), Path(c["photo"])) for c in got["picks"] if Path(c["photo"]).exists()]
 
     def one(name):
         if ARCHIVE_DOWN.get(name, 0) >= ARCHIVE_DOWN_AFTER:          # failed that many times in a row: down
@@ -1482,7 +1516,8 @@ def archive_photos(query: str, folder: Path) -> list:
                     im.convert("RGB").resize((2400, int(2400 * ih / iw))).save(dest, quality=92)
         except Exception:                                            # noqa: BLE001
             return None
-        return {"photo": str(dest), "title": title, "url": page, "source": name, "license": lic, "artist": credit}
+        return {"photo": str(dest), "title": title, "url": page, "source": name, "license": lic, "artist": credit,
+                "provider": "archive", "img": url}
 
     with ThreadPoolExecutor(max_workers=len(ARCHIVES)) as ex:
         found = list(ex.map(one, ARCHIVES))
@@ -1511,6 +1546,80 @@ def _luma(path: Path) -> float:
         g = g.resize((64, max(1, int(64 * g.size[1] / max(1, g.size[0])))))
         px = list(g.getdata())
     return sum(px) / (255.0 * max(1, len(px)))
+
+
+# ── one photo, however it reached the film (owner 2026-10-10: a photo - the same bytes or a near copy - is shown at most
+# twice): the same bytes, or the same picture at another size, encoding or tone. Measured on the -long job's 711
+# distinct files (252,405 pairs, each close pair looked at side by side, 2026-10-10): its 9 near copies (re-hosts, a
+# Commons thumbnail of a web original, a grey-ground papyrus) sit 0-4 bits apart on a 64-bit DCT hash with a 32x32
+# grey correlation of 0.984-1.0; no two different pictures within 8 bits correlate above 0.93 (two slides of one
+# template, 2 bits) - two openings of one manuscript reached 0.96 at 12 bits. 150 files copied at 640-1920 px, at
+# JPEG quality 60 or darkened (x0.6) stayed within 8 bits at 0.995 or more. A 16x16 dHash cannot draw the line: a
+# copy sat at 14 bits (the papyrus at 32) and two different pages at 15. A crop of a few percent is another picture.
+SAME_BITS, SAME_CORR = 8, 0.97
+_IDENT, _IDENT_LOCK = {}, threading.Lock()
+_DCT32 = []
+
+
+def _ident(path):
+    """(sha1 of the file's bytes, 64-bit DCT hash, 32x32 grey vector) of a picture, cached per file (name, size, time).
+    The bytes' sha1 is the photo's id; the hash and vector are None for a file that is not a picture, and the whole
+    is None when the file is gone."""
+    import numpy as np
+    from PIL import Image
+    p = Path(path)
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    key = (str(p), st.st_size, st.st_mtime_ns)
+    with _IDENT_LOCK:
+        got = _IDENT.get(key)
+    if got is not None:
+        return got
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return None
+    try:
+        with Image.open(p) as im:
+            im.draft("L", (256, 256))                # a JPEG is decoded at 1/2-1/8 size: same hash, far less work
+            a = np.asarray(im.convert("L").resize((32, 32), Image.LANCZOS), dtype=np.float64)
+    except Exception:                                                # noqa: BLE001 - not a picture: its bytes only
+        got = (hashlib.sha1(data).hexdigest(), None, None)
+    else:
+        if not _DCT32:
+            k = np.arange(32)
+            _DCT32.append(np.cos(np.pi * (2 * k[None, :] + 1) * k[:, None] / 64))
+        c = _DCT32[0]
+        low = (c @ a @ c.T)[:8, :8].flatten()[1:]    # the lowest 63 frequencies, without the mean
+        bits = int("".join("1" if x else "0" for x in low > np.median(low)), 2)
+        v = (a.flatten() - a.mean()) / (a.std() + 1e-6)
+        got = (hashlib.sha1(data).hexdigest(), bits, (v / len(v)).astype(np.float32))
+    with _IDENT_LOCK:
+        _IDENT[key] = got
+    return got
+
+
+def _photo_id(path) -> str:
+    """The photo's id: the sha1 of its bytes (the path itself when the file is gone)."""
+    got = _ident(path)
+    return got[0] if got else str(path)
+
+
+def _same(a, b) -> bool:
+    """One photo: the same file or the same bytes, or a near copy (DCT hash within SAME_BITS and the grey pictures
+    correlated at SAME_CORR or more). The one test of photo identity for every step that counts showings."""
+    if str(a) == str(b):
+        return True
+    x, y = _ident(a), _ident(b)
+    if not x or not y:
+        return False
+    if x[0] == y[0]:
+        return True
+    if x[1] is None or y[1] is None or bin(x[1] ^ y[1]).count("1") > SAME_BITS:
+        return False
+    return float((x[2] * len(x[2])) @ y[2]) >= SAME_CORR
 
 
 def _distinct(photo: str, others: list) -> bool:
@@ -1787,29 +1896,453 @@ def archive_names(engine, job: Path, rows: list, dossier: dict, force: bool = Fa
         prev = name or prev
 
 
-# ── Mr Truth's own Brave client: the owner's plan takes 50 requests a second, so up to 10 run at once here
-#    (MoveFast's photofx.brave_images holds one lock for every channel; Documentary keeps using that one) ──────────
+# ── the web picture search (owner 2026-10-10): Wikimedia Commons first, then Bing Images - free, asked the way a browser
+#    asks (curl_cffi with Chrome's handshake; a plain Python request is answered with unrelated pictures) - and Brave
+#    only as the backup: for a Bing search that failed, was blocked or came back unrelated, and for a shot whose
+#    searches together leave fewer than BING_MIN_USABLE pictures able to fill the frame. Bing's health is watched three
+#    ways: a canary before the first search (two searches whose answers are known), a guard on every answer (the share
+#    of its rows carrying the search's own words) and a latch (BING_BAD_OF[0] bad answers in the last BING_BAD_OF[1])
+#    that hands the web search to Brave, says so loudly, and asks the canary again after a pause.
+#    MRTRUTH_WEB_SEARCH=brave is the old order (Brave for every search), the instant way back.
+WEB_SEARCH = (os.environ.get("MRTRUTH_WEB_SEARCH") or "bing").strip().lower()
+BING_AT_ONCE = int(os.environ.get("MRTRUTH_BING_AT_ONCE", "3"))      # Bing searches in flight at once, all shots together
+BING_GAP = float(os.environ.get("MRTRUTH_BING_GAP", "0.5"))          # seconds between two Bing requests (a pod took 3 at
+                                                                      # once 0.3 s apart, and 8 at once with no gap: 0 blocks)
+BING_MIN_USABLE = int(os.environ.get("MRTRUTH_BING_MIN_USABLE", "2"))   # a shot's searches leaving fewer pictures that fit:
+                                                                         # Brave is asked as well
+BRAVE_LAST_MAX = int(os.environ.get("MRTRUTH_BRAVE_LAST_MAX", "30"))    # Brave searches a film may make while Bing works
+                                                                         # (a thin answer, nothing downloaded); 0 = none
+BING_SAFE = (os.environ.get("MRTRUTH_BING_SAFE") or "strict").strip().lower()   # strict, as Brave was always asked
+SHOP_PICTURES = os.environ.get("MRTRUTH_SHOP_PICTURES", "1") == "1"   # a shop or auction listing of a photo or print
+BING_PARAMS = dict({"form": "HDRSC2", "first": "1", "setmkt": "en-US", "setlang": "en", "cc": "US"},
+                   **({"adlt": BING_SAFE} if BING_SAFE in ("strict", "off") else {}))
+# the guard, measured 2026-10-10: the share of an answer's first 20 rows whose title, page or address carries a word of
+# the search. Healthy Bing from a pod: 0.25 or more on 116 searches (its first 8 rows, title and site only); healthy
+# Brave answers, 386 in the order local films asked them: 1 under this, never 3 in 8; a degraded Bing (a proxy in the
+# way): 0.0 on 7 of 12 answers, switched off after its 6th search.
+BING_UNRELATED = 0.10
+# ... and an answer keyed on one word passes that (degraded Bing: 'Vatican' for a Vatican library search). The share
+# of rows carrying TWO of the search's words: degraded 0.0-0.05 on all 12; healthy pod answers, as a median over 10 in
+# a row, never under 0.25 - but healthy Brave answers in the order a film asked them fell to 0.04 (a run of abstract
+# lines). So a median under this only asks the canary again (free): Bing is switched off when the canary fails too.
+BING_ONE_WORD = 0.10
+BING_BAD_OF = (3, 8)                     # bad answers among the last searches that switch Bing off
+BING_RECHECK_S, BING_RECHECKS = 180.0, 3     # Bing off: the canary is asked again after 3, 6 and 12 minutes
+BING_SLOW_S = 30.0                       # a 429: every Bing search waits this long, then the search is asked once more
+CANARY = (("Codex Vaticanus", ("vaticanus",)), ("Eiffel Tower 1889", ("eiffel", "tower")))   # a pod: 20/20 and 17/20
+CANARY_RETRY_S = 3.0
+FIT_MAX_MP = 40.0                        # a reported original bigger than this is not fetched (147-172 MP on a pod)
+
+SEARCH = {}                              # this film's searches, by kind (reset by preflight): logged, search.json
+_SEARCH_LOCK = threading.Lock()
+_BING = {}
+_BRAVE_OUT = {"why": ""}                 # Brave cannot be asked this film: no key, or out of credit
+_WEB = {"dead": "", "said": False}       # no web search left (Bing off, Brave out): every web search stops the run
+_HOSTS_OUT = {}                          # Bing pictures refused, per site (for tuning the lists below)
+_BING_GATE = threading.Semaphore(BING_AT_ONCE)
+_BING_PACE = [0.0]
+_BING_CANARY_LOCK = threading.Lock()
+_SAY = [print]                           # where the search's own warnings go: the engine's log once a film starts
+
+
+def _search_reset(engine=None) -> None:
+    """A new film: every count, latch and verdict on Bing and Brave starts again."""
+    with _SEARCH_LOCK:
+        SEARCH.clear()
+        _HOSTS_OUT.clear()
+        _BING.clear()
+        _BING.update(why="", at=0.0, n_at=0, recent=deque(maxlen=BING_BAD_OF[1]), two=deque(maxlen=10),
+                     slow_until=0.0, recheck_at=0.0, rechecks=0, checked=False, canary="", t0=time.time())
+        _BRAVE_OUT["why"] = ""
+        _WEB.update(dead="", said=False)
+    with _IDENT_LOCK:                                # the last film's pictures: their identities are not needed again
+        _IDENT.clear()
+    if engine is not None and hasattr(engine, "log"):
+        _SAY[0] = engine.log
+
+
+_search_reset()
+
+
+def _count(key: str, n: int = 1) -> None:
+    with _SEARCH_LOCK:
+        SEARCH[key] = SEARCH.get(key, 0) + n
+
+
+def _web_dead() -> None:
+    """Bing off and Brave out: no web picture search is left this film. The run stops (owner 2026-10-09: never a quietly
+    worse film), and every later web search stops with it, unless MRTRUTH_ALLOW_DEGRADED=1 (then Commons alone)."""
+    bing = "not used (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else _BING.get("why")
+    if not (bing and _BRAVE_OUT["why"]):
+        return
+    msg = (f"Mr Truth stopped: no web picture search left - Bing: {bing}; Brave: {_BRAVE_OUT['why']} - top up Brave "
+           f"(or wait for Bing) and run again; nothing found so far is lost")
+    if os.environ.get("MRTRUTH_ALLOW_DEGRADED") == "1":
+        if not _WEB["said"]:
+            _WEB["said"] = True
+            _SAY[0](f"  ⚠ {msg} (carrying on with Commons alone: MRTRUTH_ALLOW_DEGRADED=1)")
+        return
+    _WEB["dead"] = msg
+    raise OutOfCredit(msg)
+
+
+class _BingRows(HTMLParser):
+    """The results of a Bing Images page (Documentary's photofx._BingRows): each <a class="iusc"> holds the original
+    (murl), its page (purl), Bing's thumbnail (turl) and the title (t) in its `m` JSON, and the original's size (expw,
+    exph) in its link. A row it cannot read is skipped."""
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "a" and "iusc" in str(a.get("class") or "").split() and a.get("m"):
+            try:
+                m = json.loads(a["m"])
+                q = parse_qs(urlparse(a.get("href") or "").query)
+            except (ValueError, TypeError):
+                return
+            if isinstance(m, dict):
+                self.rows.append(dict(m, w=(q.get("expw") or [None])[0], h=(q.get("exph") or [None])[0]))
+
+
+def _int(v):
+    return int(v) if str(v if v is not None else "").strip().isdigit() else None
+
+
+def _bing_rows(text: str) -> list:
+    """[{murl, purl, turl, t, w, h}] read off a Bing Images page; a broken row is skipped, a cut-off page gives what
+    it has. w and h are whole numbers or None."""
+    page = _BingRows()
+    try:
+        page.feed(text or "")
+        page.close()
+    except Exception:                                                # noqa: BLE001 - the rows read so far stand
+        pass
+    out = []
+    for m in page.rows:
+        url = str(m.get("murl") or "")
+        if url.startswith("http"):
+            out.append({"murl": url, "purl": str(m.get("purl") or ""), "turl": str(m.get("turl") or ""),
+                        "t": html.unescape(str(m.get("t") or ""))[:300], "w": _int(m.get("w")), "h": _int(m.get("h"))})
+    return out
+
+
+_NOT_ASKED = {"the", "and", "for", "with", "from", "his", "her", "its", "their", "into", "over", "under", "old",
+              "vintage", "historic", "historical", "archival", "archive", "black", "white", "colour", "color", "close",
+              "closeup", "wide", "detail", "view", "photo", "photograph", "image", "interior", "exterior", "scene",
+              "shot", "dramatic", "famous", "early", "original", "rare", "late", "mid", "century", "era", "period",
+              "style", "portrait"}
+
+
+def _asked(query: str) -> list:
+    """The search's own words: 3 letters or more, not an era or describing word."""
+    return list(dict.fromkeys(w for w in re.findall(r"[^\W\d_]+", str(query or "").lower())
+                              if len(w) >= 3 and w not in _NOT_ASKED))
+
+
+def _on_topic(query: str, rows: list, k: int = 1, top: int = 20):
+    """The share of the first `top` rows whose title, page or address carries `k` or more of the search's own words
+    (by their stem: 'priest' matches 'priests'); None when the search has fewer than k such words."""
+    words = _asked(query)
+    if len(words) < k or not rows:
+        return None
+    hit = 0
+    for r in rows[:top]:
+        text = " ".join(str(r.get(x) or "") for x in ("t", "purl", "murl", "title", "source", "url"))
+        hay = " " + " ".join(re.findall(r"[^\W\d_]+", text.lower()))
+        hit += sum(1 for w in words if " " + w[:max(4, len(w) - 2)] in hay) >= k
+    return hit / min(top, len(rows))
+
+
+class _BingError(Exception):
+    """kind: http_<code>, captcha, no_results, thin_page, unrelated, error:<Type>, curl_cffi missing."""
+
+
+def _bing_get(query: str):
+    """The one request to Bing Images."""
+    from curl_cffi import requests as curl
+    return curl.get("https://www.bing.com/images/search", impersonate="chrome", timeout=20,
+                    params=dict(BING_PARAMS, q=query))
+
+
+def _bing_fetch(query: str) -> list:
+    """The rows of one Bing Images page - BING_AT_ONCE requests at once, BING_GAP apart - or _BingError when the page
+    fails or looks blocked."""
+    with _BING_GATE:
+        with _SEARCH_LOCK:
+            start = max(time.time(), _BING_PACE[0] + BING_GAP, _BING.get("slow_until", 0.0))
+            _BING_PACE[0] = start
+            SEARCH["bing_requests"] = SEARCH.get("bing_requests", 0) + 1
+        time.sleep(max(0.0, start - time.time()))
+        try:
+            with _timed("search"):
+                r = _bing_get(query)
+        except ImportError:
+            raise _BingError("curl_cffi missing") from None
+        except Exception as e:                                       # noqa: BLE001 - a time-out, a reset connection
+            raise _BingError(f"error:{type(e).__name__}") from None
+    if r.status_code != 200:
+        raise _BingError(f"http_{r.status_code}")
+    text = r.text or ""
+    rows = _bing_rows(text)
+    if not rows:                                     # Bing answers even nonsense with ~35 pictures: empty is a block
+        low = text.lower()
+        raise _BingError("captcha" if any(w in low for w in ("captcha", "unusual traffic", "verify you are human"))
+                         else "no_results")
+    return rows
+
+
+def bing_canary() -> tuple:
+    """(ok, detail): the two CANARY searches. Each must answer with 20 rows or more, 40% of the first 20 carrying all
+    its words (degraded Bing answered 'Codex Vaticanus' with OpenAI Codex, 0 of 20). A failing one is asked once more
+    after CANARY_RETRY_S. 2-4 free requests."""
+    res = []
+    for q, words in CANARY:
+        good, note = False, ""
+        for attempt in range(2):
+            try:
+                rows = _bing_fetch(q)
+            except _BingError as e:
+                note = f"'{q}' {e}"
+                if str(e) == "curl_cffi missing":
+                    break
+            else:
+                top = rows[:20]
+                hit = sum(1 for m in top if all(w in " ".join(str(m.get(x) or "") for x in ("t", "purl", "murl")).lower()
+                                                for w in words))
+                note = f"'{q}' {hit}/{len(top)}" + ("" if len(rows) >= 20 else f" ({len(rows)} rows)")
+                good = len(rows) >= 20 and hit >= 0.4 * len(top)
+                if good:
+                    break
+            if attempt == 0:
+                time.sleep(CANARY_RETRY_S)
+        res.append((good, note))
+    _count("bing_canaries")
+    return all(g for g, _ in res), ", ".join(n for _, n in res)
+
+
+def _bing_off(why: str) -> None:
+    """Bing is switched off for now: said once, loudly; the canary is asked again after a pause (never for a missing
+    curl_cffi). With Brave out as well, the run stops (_web_dead)."""
+    with _SEARCH_LOCK:
+        if _BING["why"]:
+            return
+        final = "curl_cffi" in why                   # not installed: no re-check can help
+        pause = BING_RECHECK_S * 2 ** _BING["rechecks"]
+        _BING.update(why=why, at=time.time(), n_at=SEARCH.get("bing", 0), recent=deque(maxlen=BING_BAD_OF[1]),
+                     two=deque(maxlen=10), recheck_at=float("inf") if final or _BING["rechecks"] >= BING_RECHECKS
+                     else time.time() + pause)
+        SEARCH["bing_off"] = SEARCH.get("bing_off", 0) + 1
+        t = _BING["at"] - _BING["t0"]
+        again = _BING["recheck_at"] != float("inf")
+    _SAY[0](f"  ⚠ Bing (free web pictures) is OFF after {_BING['n_at']} searches, {int(t // 60)}:{int(t % 60):02d} "
+            f"into the picture search: {why} - Brave (the backup, ~$0.005 a search) carries the web search"
+            + (f"; Bing is checked again in {pause / 60:.0f} min" if again else " for the rest of this film"))
+    _web_dead()
+
+
+def _bing_recheck() -> bool:
+    """Bing is off: True once the canary passes again. Asked by one shot when the pause is over, at most BING_RECHECKS
+    times a film; every other search meanwhile goes to Brave."""
+    if not _BING["why"]:
+        return True
+    if time.time() < _BING["recheck_at"] or not _BING_CANARY_LOCK.acquire(blocking=False):
+        return False
+    try:
+        if not _BING["why"] or time.time() < _BING["recheck_at"]:
+            return not _BING["why"]
+        ok, detail = bing_canary()
+        with _SEARCH_LOCK:
+            _BING["rechecks"] += 1
+            n, was = _BING["rechecks"], _BING["why"]
+            SEARCH["bing_rechecks"] = n
+            if ok:
+                _BING.update(why="", recent=deque(maxlen=BING_BAD_OF[1]), two=deque(maxlen=10))
+            else:
+                _BING["recheck_at"] = (time.time() + BING_RECHECK_S * 2 ** n if n < BING_RECHECKS else float("inf"))
+        if ok:
+            _SAY[0](f"  Bing is back ON after re-check {n} ({detail}); it was off for: {was}")
+        else:
+            _SAY[0](f"  ⚠ Bing re-check {n} of {BING_RECHECKS} failed ({detail}): Brave carries on"
+                    + (f", next check in {BING_RECHECK_S * 2 ** n / 60:.0f} min" if n < BING_RECHECKS else
+                       " for the rest of this film"))
+        return ok
+    finally:
+        _BING_CANARY_LOCK.release()
+
+
+def _bing_ready() -> bool:
+    """Bing may be asked now: the canary has passed this film (asked once, before the first search) and Bing is on."""
+    off = ""
+    if not _BING["checked"] and not _BING["why"]:
+        with _BING_CANARY_LOCK:
+            if not _BING["checked"] and not _BING["why"]:
+                ok, detail = bing_canary()
+                _BING.update(checked=True, canary=detail)
+                if ok:
+                    _SAY[0](f"  Bing (free web pictures): ok - {detail}")
+                else:
+                    off = f"the start check failed ({detail})"
+    if off:
+        _bing_off(off)
+    return not _BING["why"] or _bing_recheck()
+
+
+def _bing_outcome(query: str, kind: str, rows=None) -> None:
+    """One Bing answer, counted. Bing is switched off on a block (HTTP 403, a captcha, a second 429), on BING_BAD_OF[0]
+    bad answers among the last BING_BAD_OF[1], and when its answers have been keyed on one word for 10 searches and
+    the canary fails as well."""
+    off, one_word = "", None
+    with _SEARCH_LOCK:
+        SEARCH["bing"] = SEARCH.get("bing", 0) + 1
+        key = "bing_ok" if not kind else "bing_" + kind.split(":")[0].replace(" ", "_")
+        SEARCH[key] = SEARCH.get(key, 0) + 1
+        _BING["recent"].append(bool(kind))
+        if kind in ("http_403", "captcha", "http_429", "curl_cffi missing"):
+            off = {"http_403": "blocked (HTTP 403)", "captcha": "a captcha page (blocked)",
+                   "http_429": "too many requests (HTTP 429, twice)",
+                   "curl_cffi missing": "curl_cffi is not installed (pip install curl_cffi==0.16.3)"}[kind]
+        elif sum(_BING["recent"]) >= BING_BAD_OF[0]:
+            off = f"{sum(_BING['recent'])} of the last {len(_BING['recent'])} answers bad (the last: {kind})"
+        elif not kind and rows:
+            two = _on_topic(query, rows, k=2)
+            if two is not None:
+                _BING["two"].append(two)
+                med = statistics.median(_BING["two"])
+                if len(_BING["two"]) == _BING["two"].maxlen and med < BING_ONE_WORD:
+                    one_word = med
+                    _BING["two"].clear()                 # the next look needs 10 new answers
+    if off:
+        _bing_off(off)
+    elif one_word is not None and _BING_CANARY_LOCK.acquire(blocking=False):
+        try:                                             # answers keyed on one word, or only abstract lines? the canary
+            ok, detail = bing_canary()                   # knows: degraded Bing fails it, a healthy one passes
+        finally:
+            _BING_CANARY_LOCK.release()
+        _count("bing_one_word_checks")
+        if not ok:
+            _bing_off(f"answers keyed on one word of the search (median {one_word:.2f} of the last 10 answers' rows "
+                      f"carry two of its words) and the canary failed ({detail})")
+
+
+def bing_search(query: str, folder: Path) -> tuple:
+    """([candidate], why): one search on Bing Images, its rows as candidates that pass _web_ok. why is '' for an
+    answer, 'off' while Bing is switched off, else what went wrong (counted; the caller asks Brave). Healthy answers
+    are cached per folder, query and search settings; a failed, blocked or unrelated one is asked again next run."""
+    query = str(query or "").strip()
+    if not query:
+        return [], ""
+    cache = folder / "bing" / (_hash([query, BING_PARAMS])[:20] + ".json")
+    got = _load(cache)
+    if isinstance(got, dict) and got.get("q") == query and isinstance(got.get("rows"), list):
+        return _bing_cands(got["rows"]), ""
+    if not _bing_ready():
+        _count("bing_while_off")
+        return [], "off"
+    kind, rows = "", []
+    for attempt in range(2):
+        try:
+            rows = _bing_fetch(query)
+        except _BingError as e:
+            kind = str(e)
+            if kind == "http_429" and attempt == 0:      # everyone slows down for 30 s, then this one asks again
+                with _SEARCH_LOCK:
+                    _BING["slow_until"] = max(_BING["slow_until"], time.time() + BING_SLOW_S)
+                continue
+        else:
+            kind = ""
+            if len(rows) < 5:
+                kind = "thin_page"
+            else:
+                share = _on_topic(query, rows)
+                kind = "unrelated" if share is not None and share < BING_UNRELATED else ""
+        break
+    _bing_outcome(query, kind, rows)
+    if kind:
+        return [], kind
+    _dump(cache, {"q": query, "params": BING_PARAMS, "rows": rows})
+    return _bing_cands(rows), ""
+
+
+def _bing_cands(rows: list) -> list:
+    """Bing rows as web candidates {url (the original), thumb, source (its page), title, w, h, provider}: no address
+    twice, and only what _web_ok lets through (the refused sites are counted, for tuning the lists)."""
+    out, seen = [], set()
+    for m in rows:
+        try:
+            url = str(m.get("murl") or "")
+            if not url.startswith("http") or url in seen:
+                continue
+            seen.add(url)
+            page = str(m.get("purl") or "")
+            c = {"url": url, "thumb": str(m.get("turl") or "") or url, "source": page or (urlparse(url).hostname or ""),
+                 "title": str(m.get("t") or ""), "w": _int(m.get("w")), "h": _int(m.get("h")), "provider": "bing"}
+        except (AttributeError, TypeError, ValueError):              # a row from a broken cache
+            continue
+        if _web_ok(c):
+            out.append(c)
+        else:
+            host = (urlparse(page or url).hostname or "?").lower().removeprefix("www.")
+            with _SEARCH_LOCK:
+                _HOSTS_OUT[host] = _HOSTS_OUT.get(host, 0) + 1
+    return out
+
+
+# ── Mr Truth's own Brave client, the backup: up to 10 at once (MoveFast's photofx.brave_images holds one lock for
+#    every channel; Documentary keeps using that one) ────────────────────────────────────────────────────────────
 _BRAVE_GATE = threading.Semaphore(10)
 _BRAVE = {"slow_until": 0.0, "requests": 0}
 _BRAVE_LOCK = threading.Lock()
 
 
-def brave_search(query: str, folder: Path, n: int = 12) -> list:
-    """[{url, thumb, title, source}] from Brave Images, filtered like photofx.brave_images; cached per query."""
-    import os
+def _brave_get(query: str, n: int, key: str):
+    """The one request to Brave Images."""
     import requests
-    from urllib.parse import urlparse
-    import photofx
+    return requests.get("https://api.search.brave.com/res/v1/images/search", timeout=30,
+                        headers={"Accept": "application/json", "X-Subscription-Token": key},
+                        params={"q": query, "count": min(20, n + 6), "country": "ALL", "search_lang": "en",
+                                "safesearch": "strict", "spellcheck": 1})
+
+
+def _brave_out(why: str) -> None:
+    """Brave cannot be asked again this film: said once, loudly. With Bing off as well, the run stops (_web_dead)."""
+    with _SEARCH_LOCK:
+        if _BRAVE_OUT["why"]:
+            return
+        _BRAVE_OUT["why"] = why
+    _SAY[0](f"  ⚠ Brave (the backup web search) is OUT: {why}"
+            + (" - Bing alone carries the web search" if WEB_SEARCH != "brave" and not _BING.get("why") else ""))
+    _web_dead()
+
+
+def brave_search(query: str, folder: Path, n: int = 12, *, why: str = "thin") -> list:
+    """[{url, thumb, title, source, w, h, provider}] from Brave Images, only what _web_ok lets through; cached per
+    folder and query. `why` is why Brave was asked (counted): 'bing_off', 'bing_failed', 'thin', 'nodl', or 'brave'
+    (MRTRUTH_WEB_SEARCH=brave). While Bing works ('thin', 'nodl') a film makes at most BRAVE_LAST_MAX such searches.
+    Without a key, or out of credit (401/402/403), Brave is out for the rest of the film (_brave_out)."""
     query = str(query or "").strip()
     if not query:
         return []
     cache = folder / "brave" / (hashlib.sha256(query.encode()).hexdigest()[:20] + ".json")
     got = _load(cache)
-    if got is not None:
-        return got
+    if isinstance(got, dict) and isinstance(got.get("rows"), list):
+        return [c for c in got["rows"] if isinstance(c, dict) and _web_ok(c)][:n]
+    if isinstance(got, list):                    # an answer saved before 2026-10-10 (filtered the old way then)
+        return [c for c in got if isinstance(c, dict) and _web_ok(c)][:n]
+    if _BRAVE_OUT["why"]:
+        return []
     key = (os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
     if not key:
+        _brave_out("no BRAVE_SEARCH_API_KEY")
         return []
+    with _SEARCH_LOCK:
+        if why in ("thin", "nodl"):              # Bing works: Brave only within the film's allowance
+            if SEARCH.get("brave_extra", 0) >= BRAVE_LAST_MAX:
+                SEARCH["brave_capped"] = SEARCH.get("brave_capped", 0) + 1
+                return []
+            SEARCH["brave_extra"] = SEARCH.get("brave_extra", 0) + 1
+        SEARCH["brave_" + why] = SEARCH.get("brave_" + why, 0) + 1
     payload = None
     with _BRAVE_GATE:
         for _ in range(3):
@@ -1818,11 +2351,8 @@ def brave_search(query: str, folder: Path, n: int = 12) -> list:
                 time.sleep(min(wait, 5.0))
             try:
                 with _timed("search"):
-                    resp = requests.get("https://api.search.brave.com/res/v1/images/search", timeout=30,
-                                        headers={"Accept": "application/json", "X-Subscription-Token": key},
-                                        params={"q": query, "count": min(20, n + 6), "country": "ALL", "search_lang": "en",
-                                                "safesearch": "strict", "spellcheck": 1})
-            except Exception:                                        # noqa: BLE001 - Commons still stands
+                    resp = _brave_get(query, n, key)
+            except Exception:                                        # noqa: BLE001 - Commons and Bing still stand
                 return []
             with _BRAVE_LOCK:
                 _BRAVE["requests"] += 1
@@ -1834,11 +2364,11 @@ def brave_search(query: str, folder: Path, n: int = 12) -> list:
                     _BRAVE["slow_until"] = max(_BRAVE["slow_until"], time.time() + max(0.5, reset))
             if resp.status_code == 429:
                 continue
-            if resp.status_code in (401, 402, 403) and os.environ.get("MRTRUTH_ALLOW_DEGRADED") != "1":
-                # out of credit (or the key revoked) DURING a run: stop, never plan the rest without web pictures
-                # (2026-10-10: Brave ran dry minutes into a pod run that had passed the start-up check)
-                raise OutOfCredit(f"Mr Truth stopped: Brave web picture search answered HTTP {resp.status_code} "
-                                  f"({resp.text[:120]}) - top up Brave and run again; nothing found so far is lost")
+            if resp.status_code in (401, 402, 403):
+                # out of credit (or the key revoked) during a run: Brave is out; with Bing off too the run stops, it
+                # never plans the rest without web pictures (2026-10-10: Brave ran dry minutes into a pod run)
+                _brave_out(f"HTTP {resp.status_code} ({resp.text[:120]})")
+                return []
             if resp.status_code == 200:
                 payload = resp.json()
             break
@@ -1852,94 +2382,213 @@ def brave_search(query: str, folder: Path, n: int = 12) -> list:
         if not isinstance(original, str) or original in seen:
             continue
         host = (urlparse(original).hostname or "").lower()
-        if not host or host.endswith("brave.com") or any(h in (page + " " + original).lower() for h in photofx.STOCK_HOSTS):
+        if not host or host.endswith("brave.com"):
             continue
         seen.add(original)
         thumb = (row.get("thumbnail") or {}).get("src") if isinstance(row.get("thumbnail"), dict) else None
-        try:
-            w, h = int(props.get("width") or 0), int(props.get("height") or 0)
-        except (TypeError, ValueError):
-            w, h = 0, 0
-        found.append({"url": original, "thumb": thumb or original, "source": page or host, "w": w, "h": h,
-                      "title": re.sub(r"<[^>]*>", "", str(row.get("title") or "")), "provider": "brave"})
-    found = photofx.people_photos(found)[:n]
+        found.append({"url": original, "thumb": thumb or original, "source": page or host, "w": _int(props.get("width")),
+                      "h": _int(props.get("height")), "title": re.sub(r"<[^>]*>", "", str(row.get("title") or "")),
+                      "provider": "brave"})
     if payload is not None:
-        _dump(cache, found)
-    return found
+        _dump(cache, {"q": query, "rows": found})
+    return [c for c in found if _web_ok(c)][:n]
+
+
+def _fits(c: dict) -> bool:
+    """A web picture whose reported size can fill the frame: MIN_WIDTH wide or more, landscape up to 2.5:1, no giant
+    (FIT_MAX_MP). An unknown size is fetched and measured. Bing's reported size matched the file 40 times of 40."""
+    w, h = _int(c.get("w")), _int(c.get("h"))
+    if not w:
+        return True
+    return bool(h) and w >= MIN_WIDTH and 1.0 <= w / h <= 2.5 and w * h <= FIT_MAX_MP * 1e6
+
+
+_WIKI_ORIGINAL = re.compile(r"^https?://upload\.wikimedia\.org/wikipedia/commons/(\w)/(\w\w)/([^/?#]+\.(?:jpe?g|png))$",
+                            re.I)
+
+
+def _wiki_thumb(url: str, w=None) -> str:
+    """A Wikimedia Commons original wider than 1920 px, as its 1920-px thumbnail: the same picture for a fraction of
+    the bytes (the web search often points at the full original). Only JPEG and PNG names have such a thumbnail."""
+    m = _WIKI_ORIGINAL.match(str(url or ""))
+    if not m or not (_int(w) or 0) > 1920:
+        return url
+    return f"https://upload.wikimedia.org/wikipedia/commons/thumb/{m[1]}/{m[2]}/{m[3]}/1920px-{m[3]}"
 
 
 def _download(cand: dict, dest: Path):
     """One web photo as a JPEG, kept only when it can fill a 1080p frame: at least MIN_WIDTH wide, landscape, not
-    panorama. Saved at most WEB_MAX_PX on its long side (_fit_px)."""
+    panorama. Saved at most WEB_MAX_PX on its long side (_fit_px). A Wikimedia file is fetched as Commons is: its
+    1920-px thumbnail, with the tool's User-Agent, through the Wikimedia gate."""
     import io
     import requests
     import photofx
     if dest.exists():
         return dest
-    for url in [cand.get("url")]:          # the original only: Brave's thumbnails are 500 px
-        if not url:
-            continue
-        try:
-            with _timed("downloads"):
+    url = _wiki_thumb(cand.get("url"), cand.get("w"))
+    if not url:
+        return None
+    wiki = "upload.wikimedia.org" in str(url)
+    try:
+        with _timed("downloads"):
+            if wiki:
+                _commons_wait()
+                g = requests.get(url, headers=UA, timeout=20)
+                _commons_said(g.status_code, g.headers.get("retry-after"))
+                _count("wikimedia_web")
+            else:                                    # the original only: Bing's and Brave's thumbnails are 300-500 px
                 g = requests.get(url, headers=photofx._IMG_HEADERS, timeout=20)
-            if g.status_code != 200 or len(g.content) < 2000:
-                continue
-            im = photofx.load_rgb(io.BytesIO(g.content))
-        except Exception:                                            # noqa: BLE001 - not an image, blocked, timed out
-            continue
-        w, h = im.size
-        if w >= MIN_WIDTH and h and 1.0 <= w / h <= 2.5:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            _fit_px(im).save(dest, "JPEG", quality=92)
-            return dest
+        if g.status_code != 200 or len(g.content) < 2000:
+            return None
+        im = photofx.load_rgb(io.BytesIO(g.content))
+    except Exception:                                                # noqa: BLE001 - not an image, blocked, timed out
+        return None
+    w, h = im.size
+    if w >= MIN_WIDTH and h and 1.0 <= w / h <= 2.5:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _fit_px(im).save(dest, "JPEG", quality=92)
+        return dest
     return None
 
 
-# Pages a documentary picture never comes from: shops and listings, free-stock libraries and their re-hosts,
-# clip-art and template sites. Checked on the page and the image address and on the title, before anything is
-# downloaded — and on Brave answers read back from the cache, so it also cleans an existing job.
+# Pages a documentary picture never comes from: free-stock libraries and their re-hosts, clip-art and template sites.
+# Checked on the page and the image address and on the title, before anything is downloaded — and on answers read back
+# from the cache, so it also cleans an existing job.
 _JUNK_URL = re.compile(
-    r"/products?/|/cdn/shop/|cdn\.shopify\.com|/listing/|/dp/|/itm/|[?&]variant="
-    r"|(?:^|[/.])(?:pinterest|pinimg|unsplash|pexels|pixabay|stickpng|freepik|vecteezy|pngtree|pngwing|cleanpng|kindpng"
-    r"|canva|rawpixel|depositphotos|123rf|bigstockphoto|pond5|storyblocks|envato|creativemarket|etsy|amazon|ebay"
-    r"|aliexpress|walmart|wayfair|redbubble|zazzle|society6|teepublic)\."
+    r"(?:^|[/.])(?:pinterest|pinimg|unsplash|pexels|pixabay|stickpng|freepik|vecteezy|pngtree|pngwing|cleanpng|kindpng"
+    r"|canva|rawpixel|depositphotos|123rf|bigstockphoto|pond5|storyblocks|envato|creativemarket|redbubble|zazzle"
+    r"|society6|teepublic)\."
     r"|-unsplash\.|unsplash-image-|pexels-photo|istock-|shutterstock_|adobestock_|gettyimages-", re.I)
 _JUNK_TITLE = re.compile(
-    r"\b(for sale|buy now|add to cart|free shipping|gift ideas?|home decor|wall decor|wall clock|décor|stock photo|"
-    r"stock image|royalty[- ]free|free download|transparent png|png image|clipart|clip art|vector art|mockup)\b", re.I)
+    r"\b(gift ideas?|home decor|wall decor|wall clock|décor|stock photo|stock image|royalty[- ]free|free download|"
+    r"transparent png|png image|clipart|clip art|vector art|mockup)\b", re.I)
 # archives, museums, libraries and universities: never dropped by the patterns above (a museum's own
 # /collections/ page or a print in a library's online shop is still a real picture of the thing)
 _ARCHIVE_HOST = re.compile(
     r"(?:^|[/.])(?:wikimedia|wikipedia|loc\.gov|si\.edu|archives\.gov|nara|europeana|archive\.org|bl\.uk|bnf\.fr|"
     r"vatlib\.it|vaticanlibrary|digi\.vatlib|metmuseum|britishmuseum|rijksmuseum|vam\.ac\.uk|getty\.edu|"
     r"nationalarchives|iwm\.org\.uk|npg\.org\.uk|e-codices|gallica)|\.edu(?:/|$)|\.ac\.uk(?:/|$)|museum|library|archiv", re.I)
+# Sites Bing returns a lot that never give a documentary picture (pod probe 2026-10-10): AI-picture farms (stockcake's
+# "Free ... Image", craiyon), video thumbnails (a title burned in: 10 of 355 Bing rows, 1 in 10,056 Brave rows) and
+# image farms that re-host anything. Stock libraries are photofx.STOCK_HOSTS (a watermark across every preview).
+_STOCK_MORE = ("stockcake.", "craiyon.", "lexica.art", "openart.ai", "nightcafe.", "playgroundai.", "starryai.",
+               "pixai.art", "ytimg.com", "youtube.com", "youtu.be", "vimeocdn.", "inspiredpencil.", "fity.club",
+               "arabsstock.")
+_AI_TITLE = re.compile(r"\b(ai[- ]generated|generated (?:by|with) ai|premium ai image|ai art|ai image)\b", re.I)
+_MERCH_WORDS = re.compile(r"\b(lego|funko|hot wheels|slot car|figurines?|t-?shirts?|mugs?|stickers?|decals?|phone case)\b",
+                          re.I)
+# Owner 2026-10-09 (Documentary; Mr Truth from 2026-10-10): a print shop, an auction or a marketplace is fine when it
+# sells the picture itself - a real old photo sold as a print, an engraving, an antique manuscript leaf. A listing
+# passes when its title names one (PRINT_WORDS) and no decor or merchandise; MRTRUTH_SHOP_PICTURES=0 keeps every
+# listing out, as before (photofx.people_photos' shops and words).
+_SHOP_URL = re.compile(
+    r"/products?/|/cdn/shop/|cdn\.shopify\.com|/listing/|/dp/|/itm/|[?&]variant="
+    r"|(?:^|[/.])(?:etsy|etsystatic|amazon|media-amazon|ebay|ebayimg|aliexpress|alibaba|walmart|wayfair|temu|mercari"
+    r"|poshmark|worthpoint|hobbydb|liveauctioneers|invaluable|catawiki|fineartamerica|pixels|displate|allposters"
+    r"|posterazzi)\.", re.I)
+_SHOP_TITLE = re.compile(r"\b(for sale|buy now|add to cart|free shipping)\b", re.I)
+PRINT_WORDS = re.compile(r"\b(photos?|photographs?|prints?|engravings?|lithographs?|etchings?|woodcuts?|postcards?|"
+                         r"carte de visite|cabinet card|daguerreotypes?|tintypes?|albumen|stereoviews?|paintings?|"
+                         r"portraits?|drawings?|antique|manuscripts?|codex|leaf|folio|incunabula?|maps?)\b", re.I)
+
+
+def _web_ok(c: dict) -> bool:
+    """One filter for every web picture, Bing's and Brave's, before anything is downloaded: no stock library, AI-picture
+    farm, video thumbnail, image farm, free-stock or clip-art page, no merchandise or toy, and a shop or auction listing
+    only of a photo, print or old object. A museum, library, archive or university page always passes."""
+    import photofx
+    url, page, thumb = (str(c.get(k) or "") for k in ("url", "source", "thumb"))
+    title = str(c.get("title") or "")
+    page_host = re.sub(r"^https?://", "", page).split("/")[0].lower()
+    if _ARCHIVE_HOST.search(page_host):
+        return True
+    where = f"{page} {url}".lower()
+    if any(h in where for h in _STOCK_MORE) or any(h in where for h in photofx.STOCK_HOSTS if "etsy" not in h):
+        return False
+    if page_host.endswith("storage.googleapis.com"):         # pages parked on cloud storage: image farms
+        return False
+    if (_JUNK_URL.search(f"{url} {page} {thumb}") or _JUNK_TITLE.search(title) or _AI_TITLE.search(title)
+            or _MERCH_WORDS.search(title)):
+        return False
+    shop = bool(_SHOP_URL.search(f"{url} {page}") or _SHOP_TITLE.search(title)
+                or any(h in where for h in photofx.SHOP_HOSTS))
+    if not SHOP_PICTURES:
+        return not shop and not photofx.TOY_WORDS.search(title)
+    return not shop or bool(PRINT_WORDS.search(title))
 
 
 def _junk(c: dict) -> bool:
-    where = " ".join(str(c.get(k) or "") for k in ("url", "source", "thumb"))
-    page = str(c.get("source") or c.get("url") or "")
-    if _ARCHIVE_HOST.search(re.sub(r"^https?://", "", page).split("/")[0]):
-        return False
-    return bool(_JUNK_URL.search(where) or _JUNK_TITLE.search(str(c.get("title") or "")))
+    """Not a picture a documentary takes from the web (the opposite of _web_ok)."""
+    return not _web_ok(c)
 
 
-def web_photos(queries: list, folder: Path, n: int = 6) -> list:
-    """[(candidate, path)] — Brave for each query (at most two), the downloads side by side. Shop, stock and
-    clip-art pages are dropped before download (_junk)."""
-    cands, seen = [], set()
-    for q in [q for q in dict.fromkeys(str(x or "").strip() for x in queries) if q][:2]:
-        for c in brave_search(q, folder):
-            if c["url"] not in seen and not _junk(c):
-                seen.add(c["url"])
-                cands.append(c)
-    # Brave says how big each original is: only the ones that can fill the frame are downloaded
-    fit = [c for c in cands if not c.get("w") or (c["w"] >= MIN_WIDTH and c.get("h") and 1.0 <= c["w"] / c["h"] <= 2.5)]
-    picks = fit[: n + 4]
+def _take_turns(lists: list, k: int) -> list:
+    """Up to k candidates that can fill the frame, one from each list in turn, no address twice."""
+    queues = [[c for c in got if _fits(c)] for got in lists]
+    out, seen = [], set()
+    while len(out) < k and any(queues):
+        for q in queues:
+            while q:
+                c = q.pop(0)
+                if c["url"] not in seen:
+                    seen.add(c["url"])
+                    out.append(c)
+                    break
+            if len(out) >= k:
+                break
+    return out
+
+
+def _fetch(picks: list, folder: Path) -> list:
+    """[(candidate, path)] of the candidates that download and fill the frame, fetched side by side, in their order."""
+    if not picks:
+        return []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        paths = list(ex.map(lambda kc: _download(kc[1], folder / f"w{hashlib.sha1(kc[1]['url'].encode()).hexdigest()[:12]}.jpg"),
-                            enumerate(picks)))
-    out = [({"title": c.get("title", ""), "url": c.get("source") or c["url"], "source": c.get("source", "web"), "license": ""}, p)
-           for c, p in zip(picks, paths) if p]
+        paths = list(ex.map(lambda c: _download(c, folder / f"w{hashlib.sha1(c['url'].encode()).hexdigest()[:12]}.jpg"),
+                            picks))
+    return [(c, p) for c, p in zip(picks, paths) if p]
+
+
+def web_photos(queries: list, folder: Path, n: int = 6, skip=()) -> list:
+    """[(candidate, path)] for a shot's web searches (the first two of `queries`): Bing for each, Brave as its backup -
+    for each search Bing failed, was blocked on or answered with junk (or while Bing is off), and once when both
+    searches together leave fewer than BING_MIN_USABLE pictures that fit. MRTRUTH_WEB_SEARCH=brave: Brave for each.
+    Stock, AI, clip-art and shop pages never reach a download (_web_ok). The searches share the downloads, taken in
+    turn (2026-10-10: Bing fills ten slots from one search, and the second - the archive name, the role - was never
+    fetched); a near copy of a picture already kept, or of one in `skip`, is dropped (_same)."""
+    if _WEB["dead"]:
+        raise OutOfCredit(_WEB["dead"])
+    qs = [q for q in dict.fromkeys(str(x or "").strip() for x in queries) if q][:2]
+    lists, braved = [], False
+    if WEB_SEARCH == "brave":
+        lists, braved = [brave_search(q, folder, why="brave") for q in qs], True
+    else:
+        failed = []
+        for q in qs:
+            got, why = bing_search(q, folder)
+            lists.append(got)
+            if why:
+                failed.append((q, why))
+        for q, why in failed:                        # the backup for a search Bing could not answer
+            lists.append(brave_search(q, folder, why="bing_off" if why == "off" else "bing_failed"))
+            braved = True
+        if qs and not failed and len({c["url"] for got in lists for c in got if _fits(c)}) < BING_MIN_USABLE:
+            lists.append(brave_search(qs[0], folder, why="thin"))      # thin, both searches together
+            braved = True
+    picks = _take_turns(lists, n + 4)
+    got = _fetch(picks, folder)
+    if not got and not braved and qs:                # Bing's pictures would not download: Brave's might
+        tried = {c["url"] for c in picks}
+        got = _fetch(_take_turns([[c for c in brave_search(qs[0], folder, why="nodl") if c["url"] not in tried]], n + 4),
+                     folder)
+    out, kept = [], [str(p) for p in skip]
+    for c, p in got:
+        if any(_same(p, k) for k in kept):
+            _count("web_copies")
+            continue
+        kept.append(str(p))
+        out.append(({"title": c.get("title", ""), "url": c.get("source") or c["url"], "source": c.get("source", "web"),
+                     "license": "", "provider": c.get("provider") or "web", "img": c["url"]}, p))
     return out[:n]
 
 
@@ -1949,12 +2598,85 @@ _DESCRIPTIVE = {"old", "vintage", "historic", "historical", "archival", "archive
                 "exterior", "scene", "shot", "footage", "dramatic", "famous", "early", "original", "rare"}
 
 
+def _plain(query: str, k: int) -> str:
+    """The search's first k plain words: its years, eras and describing words taken out."""
+    words = [w for w in re.sub(_DATEISH, " ", str(query or "")).split() if w.lower().strip(",.") not in _DESCRIPTIVE]
+    return " ".join(words[:k])
+
+
 def _broader(query: str, names: list) -> list:
     """Round 2: the same subject, worded wider — the full archive name of the thing, and the plain words of the
     search with its years, eras and describing words taken out (a too-narrow search is the commonest empty one)."""
-    plain = [w for w in re.sub(_DATEISH, " ", str(query or "")).split() if w.lower().strip(",.") not in _DESCRIPTIVE]
-    tries = [*(n for n in names if n), " ".join(plain[:4]), " ".join(plain[:3]), " ".join(plain[:2])]
+    tries = [*(n for n in names if n), _plain(query, 4), _plain(query, 3), _plain(query, 2)]
     return [q for q in dict.fromkeys(tries) if q and q.lower() != str(query or "").lower()][:2]
+
+
+def _search_plan(rows: list, dossier: dict) -> list:
+    """Each shot's round-1 searches, decided in film order before any of them runs: {q, web, commons, names, stand}.
+      commons  the archive name of a named thing, else the shot's search in three plain words (owner 2026-10-10:
+               Wikimedia Commons first, for every shot - it was searched for 43 shots of 216); taken already by
+               an earlier shot: the plain words of its other searches, else no Commons search in round 1
+      web      the shot's search and its second: the archive name, or the other wording (for a person of whom no
+               likeness exists, the role's searches - never the name)
+    A search an earlier shot already runs is not run again: the shot takes its next wording (2026-10-10: 29 shots
+    shared their first search with another and 4 searches ran 5 times each - the same answer only gives the same
+    pictures again, a repeat; 12 of the 14 archive names were one library)."""
+    canon = {str(e.get("name", "")).lower(): str(e.get("canonicalSearchName") or e.get("name") or "")
+             for e in dossier.get("keyEntities") or []}
+    ran_web, ran_commons, out = set(), set(), []
+    for r in rows:
+        lit, con, mood = (list(r.get("queries") or []) + ["", "", ""])[:3]
+        # a dossier name is only an archive name when it is one: at most 3 words, no appositive ("X, Sicilian priest")
+        names = [n for n in (canon.get(str(e).lower(), str(e)) for e in r.get("entities") or [] if str(e).strip())
+                 if len(n.split()) <= 3 and "," not in n and "/" not in n]
+        q = lit or r.get("visualIntent") or r["text"]
+        archive = str(r.get("archive") or "").strip() or (names[0] if names else "")
+        stand = _stand_in(r, dossier)
+        if stand:                                    # a person of whom no likeness exists: search the ROLE, not the name
+            sur = _surname(stand)
+            archive = stand.get("commons") or ""
+            web = [x for x in (stand.get("portrait"), stand.get("web")) if x] + \
+                  [x for x in (lit, con, mood) if x and not (sur and sur in x.lower())]
+            names = [archive] if archive else []
+            q = (web or [q])[0]
+        else:
+            web = [q, archive or con, con, mood]
+        web = [x for x in dict.fromkeys(str(x or "").strip() for x in web) if x]
+        # Commons: the name, else the plain words of the shot's searches in turn - and nothing when an earlier shot
+        # already asked every one of them (its answer would only bring the same pictures again)
+        wordings = [x for x in dict.fromkeys([archive, *(_plain(w, 3) for w in [q] + web), *(_plain(w, 2) for w in web)])
+                    if x]
+        commons = next((x for x in wordings if x.lower() not in ran_commons), "")
+        fresh = [x for x in web if x.lower() not in ran_web]
+        web = (fresh + [x for x in web if x not in fresh])[:2]
+        ran_web.update(x.lower() for x in web)
+        ran_commons.add(commons.lower())
+        out.append({"q": web[0] if web else q, "web": web, "commons": commons, "names": names, "stand": stand})
+    return out
+
+
+COMMONS_EDGE = 1.0      # a Commons photo goes ahead of a web one scored up to this much higher (owner 2026-10-10: Commons
+                        # first - its pictures are licensed and credited); the order only, never the score a bar reads
+
+
+def _rank(c: dict) -> tuple:
+    """Sort key of judged candidates: score, a usable Commons photo up by COMMONS_EDGE and first on a tie."""
+    edge = (COMMONS_EDGE if c.get("provider") == "commons" and c.get("score", 0) >= MIN_SCORE and not c.get("flags")
+            and c.get("depiction") != "unrelated" else 0.0)
+    return -(float(c.get("score", 0)) + edge), 0 if edge else 1
+
+
+def _provider(pick) -> str:
+    """Where a picture on screen came from: commons, bing, brave, archive or ai (an older pick: read off its folder)."""
+    if not pick:
+        return ""
+    if pick.get("ai"):
+        return "ai"
+    if pick.get("provider"):
+        return str(pick["provider"])
+    folder = Path(str(pick.get("photo") or "")).parent.name
+    return ("commons" if folder.startswith("commons") else "archive" if folder == "archives"
+            else "web" if folder.startswith("web") else "other")
 
 
 ANCHOR_PROMPT = """You are the picture researcher of a history documentary that is built from photographs only.
@@ -2022,8 +2744,12 @@ def _need(r: dict) -> float:
 def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) -> None:
     """row["pick"] = the shot's picture, row["step"] = how it was found, row["spare"] = its runner-ups.
 
-    Search, up to three rounds a shot, stopping the moment one photo passes the judge at the shot's own bar:
-      1  the archive name on Wikimedia Commons (judged first: a 7 ends the shot), then Brave with the shot's search
+    Search, up to three rounds a shot, stopping the moment one photo passes the judge at the shot's own bar
+    (owner 2026-10-10: Wikimedia Commons first, then Bing - free - and Brave only as Bing's backup):
+      1  Commons (the archive name of a named thing, else the shot's search in plain words) and the web (the shot's
+         two searches: Bing, Brave when Bing fails or comes back thin), judged together; a Commons photo goes first
+         within COMMONS_EDGE. A search an earlier shot runs is not run twice: the shot takes its next wording.
+         With MRTRUTH_ARCHIVES=1 the open archives come in between, judged as before (a 7 from Commons ends it).
       2  only when round 1 came back THIN (fewer than 4 usable photos): the same subject, worded wider
       3  still failing, and the shot names a person/place/object: a different ANCHOR from the same narration
          (one Claude call for all such shots). A shot that names nothing takes a contextual photo instead.
@@ -2031,16 +2757,15 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     otherwise "fits the context"): exact photo → the new anchor's photo → a contextual real photo (score 3+) →
     a good unused neighbour photo → an AI stand-in under AI_IMAGE_CAP → over the cap, a real photo from earlier in
     the video (never within 3 shots, at most twice). No text cards while the video has photos. Only an exact photo
-    may carry a template that names what the picture is. (Bing was tried as a last round and dropped: 1 photo in ~26
-    tries, for most of the search time.)"""
+    may carry a template that names what the picture is. A near copy of a photo is judged once (_same)."""
     import photofx
     root = job / "mrtruth" / "pictures"
-    canon = {str(e.get("name", "")).lower(): str(e.get("canonicalSearchName") or e.get("name") or "")
-             for e in dossier.get("keyEntities") or []}
     t0 = time.time()
     b0 = _BRAVE["requests"]
     with _PIC_T_LOCK:
         PIC_T.clear()
+    _SAY[0] = engine.log
+    _BING["t0"] = t0
     # the open archives are off unless MRTRUTH_ARCHIVES=1 (owner 2026-10-10: dropped, yet still asked ~100 times a film
     # with SSL errors and time-outs); off, they are not called at all
     archives_on = os.environ.get("MRTRUTH_ARCHIVES", "0") == "1"
@@ -2049,11 +2774,21 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     around = lambda i: (rows[i - 1]["text"] if i else "", rows[i + 1]["text"] if i + 1 < len(rows) else "")
     film_key = _hash([PICK_V, dossier.get("visualBrief") or {}])     # a new brief re-judges every shot
 
-    def judged(i, found, prior, row=None):
+    def judged(i, found, prior, row=None, against=()):
+        """prior + the judge's verdicts on the new pictures in `found`: a picture already judged here, or a near copy
+        of one (here or in `against`), is not sent again - the web often returns the Commons file itself."""
         have = {c["photo"] for c in prior}
-        new = [(c, p) for c, p in found if str(p) not in have and _shape_ok(p)]
-        return sorted(prior + judge(engine, row or rows[i], new[:9], dossier, *around(i)),
-                      key=lambda c: -c["score"]) if new else prior
+        kept, new = [c["photo"] for c in prior] + [str(x) for x in against], []
+        for c, p in found:
+            if str(p) in have or not _shape_ok(p):
+                continue
+            if any(_same(p, k) for k in kept):
+                _count("judge_copies")
+                continue
+            kept.append(str(p))
+            new.append((c, p))
+        return sorted(prior + judge(engine, row or rows[i], new[:JUDGE_MAX], dossier, *around(i)),
+                      key=_rank) if new else prior
 
     def usable(r, c, bar):
         return c["score"] >= bar and _studio_ok(r, c) and c.get("depiction") != "unrelated" and not c.get("flags")
@@ -2062,48 +2797,38 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         return any(usable(r, c, _need(r)) for c in scored)
 
     def first_rounds(i):
-        r, home = rows[i], home_of(rows[i])
+        r, home, sp = rows[i], home_of(rows[i]), plan[i]
         state = None if force else _load(home / "pick.json")
         if (state and state.get("text") == r["text"] and state.get("v") == PICK_V and state.get("film") == film_key
                 and state.get("complete", True) and all(Path(c["photo"]).exists() for c in state["cands"])):
             return state
-        lit, con, _mood = (r.get("queries") or ["", "", ""])[:3]
-        # a dossier name is only an archive name when it is one: at most 3 words, no appositive ("X, Sicilian priest")
-        names = [n for n in (canon.get(str(e).lower(), str(e)) for e in r.get("entities") or [] if str(e).strip())
-                 if len(n.split()) <= 3 and "," not in n and "/" not in n]
-        q = lit or r.get("visualIntent") or r["text"]
-        archive = str(r.get("archive") or "").strip() or (names[0] if names else "")
-        web_q = [q, archive or con]
-        stand = _stand_in(r, dossier)
-        if stand:                                    # a person of whom no likeness exists: search the ROLE, not the name
-            sur = _surname(stand)
-            archive = stand.get("commons") or ""
-            web_q = [x for x in (stand.get("portrait"), stand.get("web")) if x] + \
-                    [x for x in (lit, con) if x and sur not in x.lower()]
-            names = [archive] if archive else []
-            q = web_q[0] or q
-        scored, tried = [], [q]
-        if archive:
-            scored = judged(i, commons_photos(archive, home / "commons"), [])
-            tried.append(archive)
-        done = 1 if any(usable(r, c, max(7.0, _need(r))) for c in scored) else 0
-        if not done and archives_on:                 # the open archives (LoC, Openverse, Internet Archive, the Met): free
-            aq = archive or " ".join(q.split()[:5])
-            scored = judged(i, archive_photos(aq, home / "archives"), scored)
-            tried.append(f"archives: {aq}")
+        q, web_q, cq, names, stand = sp["q"], sp["web"], sp["commons"], sp["names"], sp["stand"]
+        commons = commons_photos(cq, home / "commons") if cq else []
+        scored, tried = [], list(dict.fromkeys(x for x in [*web_q, cq] if x))
+        if archives_on:                              # as before: Commons judged on its own (a 7 ends it), the open
+            scored = judged(i, commons, [])          # archives (LoC, Openverse, Internet Archive, the Met), the web
             done = 1 if any(usable(r, c, max(7.0, _need(r))) for c in scored) else 0
-        if not done:
-            scored = judged(i, web_photos(web_q, home / "web"), scored)
+            if not done:
+                aq = cq or " ".join(q.split()[:5])
+                scored = judged(i, archive_photos(aq, home / "archives"), scored)
+                tried.append(f"archives: {aq}")
+                done = 1 if any(usable(r, c, max(7.0, _need(r))) for c in scored) else 0
+            if not done:
+                scored = judged(i, web_photos(web_q, home / "web"), scored)
+                done = 1 if passes(r, scored) else 0
+        else:                                        # Commons and the web judged in one call, Commons first
+            scored = judged(i, commons + web_photos(web_q, home / "web", skip=[p for _, p in commons]), [])
             done = 1 if passes(r, scored) else 0
         # thin: fewer than 4 photos the judge would let on screen (was: fewer than 4 photos of any score)
         if not done and sum(1 for c in scored if usable(r, c, CONTEXT_SCORE)) < 4:
             wider = _broader(q, names)
             found = []
             for k, w in enumerate(wider):
-                found += commons_photos(w, home / f"commons_r2_{k}")
-            found += web_photos(wider, home / "web_r2")
+                if w.lower() != cq.lower():          # the wording round 1 asked Commons already
+                    found += commons_photos(w, home / f"commons_r2_{k}")
+            found += web_photos(wider, home / "web_r2", skip=[p for _, p in found])
             scored = judged(i, found, scored)
-            tried += wider
+            tried += [w for w in wider if w not in tried]
             done = 2 if passes(r, scored) else 0
         if stand:                                    # a role figure is never the named person: no name over it
             scored = [dict(c, stand_in=True) for c in scored]
@@ -2115,12 +2840,15 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
 
     if not os.environ.get("AI_IMAGE_CAP"):          # an explicit AI_IMAGE_CAP in .env still wins
         engine.AI_IMAGE_CAP = max(1, int(round(AI_PER_MIN * rows[-1]["endMs"] / 60000)))
+    web = ("then Brave (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else
+           f"then Bing (free), Brave as backup (at most {BRAVE_LAST_MAX} for thin answers)")
     engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, "
                + ("the open archives, " if archives_on else "")
-               + f"then Brave; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most "
+               + f"{web}; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most "
                f"{getattr(engine, 'AI_IMAGE_CAP', '?')}"
                + ("" if archives_on else "; open archives off, MRTRUTH_ARCHIVES=1 turns them on") + ")...")
     archive_names(engine, job, rows, dossier, force)
+    plan = _search_plan(rows, dossier)
     with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         states = list(ex.map(first_rounds, range(len(rows))))
 
@@ -2162,11 +2890,11 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                 who = f" Any person shown must be {st['stand_in']}, anonymous." if st.get("stand_in") else ""
                 stand = dict(r, visualIntent=f"Show {a['anchor']} ({a.get('kind') or 'stand-in'}) for this line, in the "
                              f"film's era, setting and tone.{who} Originally wanted: {r.get('visualIntent', '')}")
-                found = (commons_photos(a.get("commons") or a["anchor"], home / "commons_r3")
-                         + web_photos([a.get("web") or a["anchor"]], home / "web_r3"))
-                have = {c["photo"] for c in st["cands"]}
-                new = [dict(c, anchor_switched=True) for c in judged(i, found, [], row=stand) if c["photo"] not in have]
-                st["cands"] = sorted(st["cands"] + new, key=lambda c: -c["score"])
+                found = commons_photos(a.get("commons") or a["anchor"], home / "commons_r3")
+                found += web_photos([a.get("web") or a["anchor"]], home / "web_r3", skip=[p for _, p in found])
+                have = [c["photo"] for c in st["cands"]]
+                new = [dict(c, anchor_switched=True) for c in judged(i, found, [], row=stand, against=have)]
+                st["cands"] = sorted(st["cands"] + new, key=_rank)
                 st["round"] = 3 if passes(r, st["cands"]) else 0
                 st["anchor"] = a
                 st["complete"] = not any(c.get("unjudged") for c in st["cands"])
@@ -2199,7 +2927,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         if (st.get("borrow") or {}).get("key") == bkey:
             return st["borrow"]["cands"]
         again = [dict(c, anchor_switched=True, borrowed=True, stand_in=bool(st.get("stand_in")))
-                 for c in judged(i, [(c, Path(c["photo"])) for c in pool], [])]
+                 for c in judged(i, [(c, Path(c["photo"])) for c in pool], [], against=list(have))]
         st["borrow"] = {"key": bkey, "cands": again}
         if not any(c.get("unjudged") for c in again):
             _dump(home / "pick.json", st)
@@ -2338,7 +3066,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             elif near_any:
                 pick, step = dict(near_any[0], contextual=True), "contextual"
         r["pick"], r["step"], r["stand_in"] = pick, step, states[i].get("stand_in", "")
-        audit[-1]["step"] = step
+        audit[-1]["step"], audit[-1]["src"] = step, _provider(pick)
         r["spare"] = [c for c in cands if pick and c["photo"] != pick["photo"] and usable(r, c, MIN_SCORE)
                       and not c["studio"] and seen(c["photo"]) == 0][:3]
         if pick:
@@ -2372,12 +3100,53 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                f"{g.get('fallback', 0)} to Claude; {SHOT_WORKERS} shots at once; Wikimedia {COMMONS['requests']} requests, "
                f"{COMMONS['busy']} busy, {COMMONS['failed']} searches short, {COMMONS['wait_s'] / 60:.0f} min spent waiting"
                + ("; archive errors " + ", ".join(f"{k} " + "/".join(f"{n}x {why}" for why, n in v.items())
-                                     for k, v in ARCHIVE_ERRORS.items()) if ARCHIVE_ERRORS else "")
+                                     for k, v in ARCHIVE_ERRORS.items()) if archives_on and ARCHIVE_ERRORS else "")
                + ("; skipped as down: " + ", ".join(k for k, v in ARCHIVE_DOWN.items() if v >= ARCHIVE_DOWN_AFTER)
-                  if any(v >= ARCHIVE_DOWN_AFTER for v in ARCHIVE_DOWN.values()) else ""))
+                  if archives_on and any(v >= ARCHIVE_DOWN_AFTER for v in ARCHIVE_DOWN.values()) else ""))
+    _search_report(engine, job, rows, _BRAVE["requests"] - b0)
     if PIC_T:                                         # where the stage's time went (A12)
         engine.log(f"    picture time, summed over the {SHOT_WORKERS} shots at once: "
                    + ", ".join(f"{k} {s:.0f}s ({n}x)" for k, (s, n) in PIC_T.items()))
+
+
+def _search_report(engine, job: Path, rows: list, brave_requests: int) -> dict:
+    """The film's searches in the log and in mrtruth/search.json (owner 2026-10-10: Commons, Bing and Brave each
+    counted, Bing's blocks and junk answers, what Brave was asked for, and where the pictures on screen came from)."""
+    with _SEARCH_LOCK:
+        S, hosts = dict(SEARCH), sorted(_HOSTS_OUT.items(), key=lambda kv: -kv[1])
+    g = lambda k: S.get(k, 0)
+    blocked = g("bing_http_403") + g("bing_http_429") + g("bing_captcha")
+    failed = g("bing") - g("bing_ok") - g("bing_unrelated") - g("bing_thin_page") - blocked
+    on_screen = {}
+    for r in rows:
+        if r.get("pick"):
+            k = _provider(r["pick"])
+            on_screen[k] = on_screen.get(k, 0) + 1
+    off = ""
+    if _BING.get("why"):
+        t = _BING["at"] - _BING.get("t0", _BING["at"])
+        off = f"; Bing OFF at {int(t // 60)}:{int(t % 60):02d} after {_BING['n_at']} searches: {_BING['why']}"
+    engine.log(f"    search: Commons {g('commons')} searches ({g('commons_found')} with photos); "
+               + ("Bing not used (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else
+                  f"Bing {g('bing')} searches ({g('bing_ok')} ok, {g('bing_thin_page')} thin, {failed} failed, "
+                  f"{g('bing_unrelated')} unrelated, {blocked} blocked; {g('bing_requests')} requests, "
+                  f"{g('bing_rechecks')} re-checks, {g('bing_one_word_checks')} one-word checks){off}")
+               + f"; Brave {brave_requests} requests (Bing off {g('brave_bing_off')}, Bing failed {g('brave_bing_failed')}, "
+               f"thin {g('brave_thin')}, no downloads {g('brave_nodl')}"
+               + (f", {g('brave_capped')} over the {BRAVE_LAST_MAX} allowed" if g("brave_capped") else "")
+               + (f", MRTRUTH_WEB_SEARCH=brave {g('brave_brave')}" if g("brave_brave") else "")
+               + (f"; OUT: {_BRAVE_OUT['why']}" if _BRAVE_OUT["why"] else "") + ")"
+               + (f"; copies judged once {g('judge_copies') + g('web_copies')}" if g("judge_copies") + g("web_copies") else ""))
+    engine.log("    on screen by source: " + (", ".join(f"{k} {v}" for k, v in sorted(on_screen.items(), key=lambda kv: -kv[1]))
+                                              or "nothing"))
+    if hosts:
+        engine.log("    web pictures refused, by site (top 10): " + ", ".join(f"{h} {n}" for h, n in hosts[:10]))
+    out = {"search": S, "web_search": WEB_SEARCH, "bing_params": BING_PARAMS, "bing_canary": _BING.get("canary", ""),
+           "bing_off": _BING.get("why", ""), "bing_off_after_searches": _BING.get("n_at", 0) if _BING.get("why") else None,
+           "brave_out": _BRAVE_OUT["why"], "brave_requests": brave_requests, "on_screen_by_source": on_screen,
+           "refused_hosts": dict(hosts[:40])}
+    _dump(job / "mrtruth" / "search.json", out)
+    return out
 
 
 AI_CHECK = """This is a GENERATED stand-in picture for one line of a documentary. Look at it hard and answer ONLY a
@@ -2530,7 +3299,7 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
     else:
         return None
     return {"photo": str(dest), "title": "AI picture", "url": "", "source": "ai", "license": "generated",
-            "score": 5.0, "anchor": (0.5, 0.5), "ai": True, "studio": False, "subject": ""}
+            "score": 5.0, "anchor": (0.5, 0.5), "ai": True, "studio": False, "subject": "", "provider": "ai"}
 
 
 def _record_names(pick: dict, label: str) -> bool:
@@ -3383,7 +4152,7 @@ def _usage(engine) -> dict:
     return {"pictures_s": {k: round(t, 1) for k, (t, n) in PIC_T.items()},
             "pictures_n": {k: n for k, (t, n) in PIC_T.items()},
             "gemini": json.loads(json.dumps(g, default=str)), "brave_requests": _BRAVE["requests"],
-            "wikimedia_requests": COMMONS["requests"],
+            "wikimedia_requests": COMMONS["requests"], "search": dict(SEARCH), "bing_off": _BING.get("why", ""),
             "claude": {k: c.get(k) for k in ("calls", "in", "out", "usd") if k in c}}
 
 
@@ -3491,7 +4260,7 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     took("scenes")
     _dump(work / "plan.json", sc_list)
     _dump(work / "shots.json", [{"text": r["text"], "photo": (r.get("pick") or {}).get("photo"), "step": r.get("step"),
-                                 "ai": bool((r.get("pick") or {}).get("ai")),
+                                 "ai": bool((r.get("pick") or {}).get("ai")), "provider": _provider(r.get("pick")),
                                  "anchor_switched": r.get("step") in ("anchor", "neighbour", "contextual", "reused")} for r in rows])
     _credits(job, rows)                          # with the plan, so a finish from it needs nothing else
     return sc_list

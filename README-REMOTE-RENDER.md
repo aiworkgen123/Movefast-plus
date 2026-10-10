@@ -11,6 +11,12 @@ INSTALL (into your MoveFast folder, overwriting):
 1) PLAN (where Claude + Gemini + your keys are, ~1 minute for 3 min of video; nothing heavy is drawn):
    .venv/bin/python run_test.py script.txt voice.mp3 "Title" 3 --export
    -> output/mr-truth/_work/<slug>/mrtruth/render_package.tgz   (about 56 MB per 3 minutes)
+   Pictures are searched on Wikimedia Commons first, then Bing (free; it needs curl_cffi from requirements.txt), with
+   Brave only as Bing's backup (a failed, blocked or junk answer, or too few pictures that fit; at most
+   MRTRUTH_BRAVE_LAST_MAX=30 a film while Bing works). The log says "Bing (free web pictures): ok" before the first
+   search, "Bing ... is OFF" (and why) if it stops answering, and counts every search in its "search:" line and in
+   mrtruth/search.json. A dry or missing Brave key is a warning now; the run stops only when Bing is off as well.
+   MRTRUTH_WEB_SEARCH=brave goes back to Brave for every search.
 
 2) DRAW (any Linux machine: Netcup server, RunPod pod). Needs node 20+, the Chromium libraries
    (apt install libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1
