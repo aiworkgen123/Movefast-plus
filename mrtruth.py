@@ -34,7 +34,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RENDERER = HERE / "mrtruth_renderer"
 FPS = 30
-TARGET_SCENE_S = 4.0                 # the repo's DEFAULT_TARGET_SCENE_MS
+TARGET_SCENE_S = 4.3                 # the owner's reference films: 4.1-4.6 s average, cut on the narration (2026-10-10)
+QUICK_SHARE, LONG_SHARE = 0.35, 0.25 # their mix: about a third of shots under 3 s, about a quarter of 5-8 s ones
+SCENE_MAX_S = 8.0                    # longest planned shot (was the repo's five seconds)
+SHORT_S, SHORT_RUN_MAX = 3.0, 4      # never more than four shots under three seconds in a row
 BATCH_S = 120.0                      # segmentation focus range per call (240 lost two thirds of an 11-min film)
 GRADE = {"lut": "documentary-neutral", "vignette": 0.18, "grain": 0.06}   # the repo's DEFAULT_GRADE
 # the shadow look (renderer Grade.tsx): tight dark vignette, a dimmer, muted, harder picture. 0 = off, 1 = full.
@@ -91,12 +94,17 @@ NAMES_PICTURE = {"P04", "P05", "P17", "framed-card", "corner-label"}     # words
 MIN_WIDTH = 800                 # a web photo must be this wide to fill a 1080p frame through the grade and slow move
 MIN_SCORE = 5.0                 # the judge's 3-5 is "generic, says nothing"; 0-2 wrong era, modern stock, burned-in text
 # cache versions: a change to what a step is told must redo that step on an existing job, not reuse its old answer
-BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 3, 2, 3, 8
+BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 5, 2, 3, 8
 # the picture judge: Flash-Lite at minimal thinking scored a COVID-masked researcher 9 for the 1980s and one image 1 and
 # then 8 (audit 2026-10-08); Mr Truth's judge is a stronger Gemini that thinks a little. Env overrides.
 JUDGE_MODEL = os.environ.get("MRTRUTH_JUDGE_MODEL", "gemini-3.8-flash")
 JUDGE_THINKING = os.environ.get("MRTRUTH_JUDGE_THINKING", "low")
 SUBJECT_MAX, SUBJECT_GAP = 2, 6      # one view of one subject: at most twice a film, never within 6 shots
+REUSE_GAP_S = 90.0                     # a photo shown before comes back only after this much of the film (owner 2026-10-10)
+# a long hold instead of a bad repeat (owner 2026-10-10, from the reference films: 4, 2 and 3 such holds in ~20 minutes):
+# only after HOLD_FROM_S, at most HOLD_MAX_N a film (one per HOLD_EVERY_S of film), at most half of them before
+# HOLD_PREFER_S, and only where the shot would otherwise repeat a photo shown twice already or within REUSE_GAP_S
+HOLD_FROM_S, HOLD_PREFER_S, HOLD_MAX_S, HOLD_MAX_N, HOLD_EVERY_S = 720.0, 900.0, 13.0, 4, 300.0
 CHAPTER_FIRST_S, CHAPTER_GAP_S = 25.0, 90.0    # the dossier's sections are movements; only some are chapters
 TITLE_CEILING = {"P03": 0.72, "P12": 0.75, "P14": 0.75, "shadow-up": 0.55, "top-title": 0.62, "corner-label": 0.62}
 JOINING = {"the", "a", "an", "of", "and", "in", "at", "on", "for", "to", "from", "by", "with"}
@@ -107,6 +115,7 @@ BURN_SHARE, BURN_PER_MIN, BURN_GAP_S, BURN_MAX_RUN = 0.2, 4.0, 6.0, 2
 DIP_FRAMES, FLASH_FRAMES, PUSH_FRAMES, SLIDE_FRAMES, BURN_IN, BURN_OUT = 18, 8, 11, 18, 14, 12
 LEAK_SHARE, LEAK_MIN_S, LEAK_PREFER_S = 0.08, 2.0, 3.0     # the light leak plate (renderer fx/leak)
 TURN_SHARE, TURN_MIN_S, TURN_PREFER_S = 0.11, 2.5, 3.5    # the cinematic turn (renderer CinemaTurn.tsx)
+TURN_MAX_S, LEAK_MAX_S = 5.0, 4.5      # the turn's move lasts ~3.7 s and the leak's sweep loops at 3 s: not on longer shots
 DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.13, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
@@ -396,7 +405,7 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     if not cues:
         sys.exit("Mr Truth: the subtitles are empty — nothing to cut to")
     end_ms = cues[-1][1]
-    system = _prompts()["segmentation"].replace("{TARGET_SECONDS}", f"{TARGET_SCENE_S:.1f}")
+    system = _pacing(_prompts()["segmentation"].replace("{TARGET_SECONDS}", f"{TARGET_SCENE_S:.1f}"))
     batches, t = [], 0
     while t < end_ms:
         batches.append((t, min(end_ms, t + int(BATCH_S * 1000))))
@@ -466,6 +475,9 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     rows = [r for r in rows if r["endMs"] - r["startMs"] >= 400] or rows
     for i, r in enumerate(rows):                    # a dropped sliver's time goes to the shot before it
         r["endMs"] = rows[i + 1]["startMs"] if i + 1 < len(rows) else end_ms
+    merged = _calm_short_runs(rows)
+    if merged:
+        engine.log(f"  pacing: {merged} quick cut(s) joined so no more than {SHORT_RUN_MAX} short shots run together")
     if fell_back:
         engine.log(f"  ⚠ {fell_back} shot(s) could not be planned and are searched by their own words "
                    f"(not cached: the next run plans them again)")
@@ -476,6 +488,57 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
         _dump(out, {"key": key, "rows": rows})
     engine.log(f"  {len(rows)} shots, {end_ms / 1000 / max(1, len(rows)):.1f}s each on average")
     return rows
+
+
+def _pacing(brief: str) -> str:
+    """The repo's segmentation brief with the owner's pacing (2026-10-10), measured on three reference films that viewers
+    loved: shots average about 4.3 s because a cut follows the narration, not a clock — mostly one picture per
+    sentence, a short punchy line its own quick shot, a long sentence about ONE thing one long shot, a split only where
+    the narration moves to a new thing. 96% of their cuts land on a pause or a clause end."""
+    old_vary = "Some beats want two seconds, some want five."
+    new_vary = ("Some beats want two seconds, some want seven. CUT ON THE NARRATION, NOT ON A CLOCK: usually one scene per "
+                "sentence. A short punchy line (\"Dark, smooth, cold?\") is its own quick scene of one to three seconds. "
+                "A long sentence about ONE thing — a quote, a verse being read, a description of one object or place — "
+                "stays ONE scene, up to eight seconds. Split a sentence only where it moves to a NEW thing: a new name, "
+                "place, object or the next item of a list. THE RHYTHM COMES FROM CONTRAST: about a third of the scenes "
+                "are QUICK CUTS under three seconds — a punchy line, a name, a date, each item of a list, a short "
+                "question — and roughly a quarter are long scenes of five to eight seconds; the rest sit in between. "
+                f"Over the whole film the average comes to about {TARGET_SCENE_S:.1f} seconds. "
+                f"Never write more than {SHORT_RUN_MAX} scenes under three seconds in a row.")
+    old_max = "NEVER write a scene longer than five seconds."
+    new_max = f"NEVER write a scene longer than {SCENE_MAX_S:.0f} seconds."
+    if old_vary in brief:
+        brief = brief.replace(old_vary, new_vary)
+    else:
+        brief += "\n- " + new_vary
+    brief = brief.replace(old_max, new_max)
+    return brief.replace("longer than five seconds", f"longer than {SCENE_MAX_S:.0f} seconds")
+
+
+def _calm_short_runs(rows: list) -> int:
+    """No more than SHORT_RUN_MAX shots under SHORT_S in a row (the reference films top out at three to five): in a
+    longer run the two neighbours whose sum is shortest become one shot (never over SCENE_MAX_S, never across a shot
+    that carries an overlay). Only a stretch with no joinable pair at all stays as it is. Returns the joins made."""
+    joins, i, run = 0, 0, 0
+    while i < len(rows):
+        run = run + 1 if rows[i]["endMs"] - rows[i]["startMs"] < SHORT_S * 1000 else 0
+        if run > SHORT_RUN_MAX:
+            lo = i - run + 1
+            pairs = [(rows[k + 1]["endMs"] - rows[k]["startMs"], k) for k in range(lo, i)
+                     if rows[k + 1]["endMs"] - rows[k]["startMs"] <= SCENE_MAX_S * 1000
+                     and not rows[k].get("overlay") and not rows[k + 1].get("overlay")]
+            if pairs:
+                _, k = min(pairs)
+                a, b = rows[k], rows.pop(k + 1)
+                a["endMs"] = b["endMs"]
+                a["text"] = f"{a['text']} {b['text']}".strip()
+                a["entities"] = list(dict.fromkeys(list(a.get("entities") or []) + list(b.get("entities") or [])))
+                joins += 1
+                i, run = lo, 0                       # walk the run again from its start
+                continue
+            # nothing joinable in this window (overlays on every pair): keep counting, the next shot opens a new pair
+        i += 1
+    return joins
 
 
 # ── 4. templates and their words ──────────────────────────────────────────────────────────────────────────────
@@ -1913,7 +1976,10 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         _dump(home / "pick.json", state)
         return state
 
-    engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, then Brave; up to 3 rounds; Gemini judges)...")
+    if not os.environ.get("AI_IMAGE_CAP"):          # an explicit AI_IMAGE_CAP in .env still wins
+        engine.AI_IMAGE_CAP = max(1, int(round(AI_PER_MIN * rows[-1]["endMs"] / 60000)))
+    engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, then Brave; up to 3 rounds; Gemini judges; "
+               f"AI stand-ins: {AI_MODEL}, at most {getattr(engine, 'AI_IMAGE_CAP', '?')})...")
     archive_names(engine, job, rows, dossier, force)
     with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         states = list(ex.map(first_rounds, range(len(rows))))
@@ -2036,7 +2102,27 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         s = c.get("subject") or ""
         return not s or (subj_n.get(s, 0) < SUBJECT_MAX and i - subj_last.get(s, -99) > gap)
 
-    picked, steps, audit = [], {}, []
+    picked, steps, audit, holds, hold_at = [], {}, [], [], []
+    film_s = rows[-1]["endMs"] / 1000
+    hold_n = min(HOLD_MAX_N, int(film_s // HOLD_EVERY_S))
+
+    def since_s(photo):                               # seconds of film since this photo was last on screen
+        last = shown_sig.get(sig(photo), [0, None])[1]
+        return 1e9 if last is None or last < 0 else (rows[i]["startMs"] - rows[last]["startMs"]) / 1000
+
+    def can_hold(k):
+        """Hold the picture before through shot k: late in the film, within the film's budget, on a plain shot."""
+        t = rows[k]["startMs"] / 1000
+        if t < HOLD_FROM_S or len(holds) >= hold_n or k == 0 or not picked or picked[-1][0] != k - 1:
+            return False
+        if t < HOLD_PREFER_S and sum(1 for h in holds if rows[h]["startMs"] / 1000 < HOLD_PREFER_S) >= max(1, hold_n // 2):
+            return False
+        for x in (rows[k], rows[k - 1]):             # neither the held shot nor the one it stretches carries words:
+            if x.get("device") or x.get("typedCaption") or x.get("overlay"):   # a template has no exit, it would
+                return False                                                   # stay up across the next sentence
+        r_ = rows[k]
+        start = next(j for j in range(k - 1, -1, -1) if not rows[j].get("_hold"))
+        return (r_["endMs"] - rows[start]["startMs"]) / 1000 <= HOLD_MAX_S
     dark_first = lambda cs: sorted(cs, key=lambda c: _luma(Path(c["photo"])) > TITLE_CEILING["P03"])
     for i, (r, cands) in enumerate(zip(rows, found)):
         dev = r.get("device") or {}
@@ -2086,15 +2172,22 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                 pick, step = dict(sorted(weak, key=lambda c: -c["score"])[0], contextual=True), "contextual"
         if pick is None:                              # 6. last: a photo shown before, never close by, at most twice
             again = [c for c in cands + borrowed[i] if usable(r, c, bar) and seen(c["photo"]) < 2
-                     and i - shown_sig.get(sig(c["photo"]), [0, -99])[1] > 8 and varied(c, i, gap=8)]
+                     and since_s(c["photo"]) >= REUSE_GAP_S and varied(c, i, gap=8)]
             back = [p for k, p in reversed(picked) if not p.get("ai") and p["score"] >= MIN_SCORE
-                    and seen(p["photo"]) < 2 and i - k > 8 and varied(p, i, gap=8)]
-            if not (again or back):                   # never a shot with no picture: a closer repeat before none
-                back = [p for k, p in reversed(picked) if not p.get("ai") and p["score"] >= MIN_SCORE
-                        and seen(p["photo"]) < 3 and i - k > 5]
+                    and seen(p["photo"]) < 2 and (r["startMs"] - rows[k]["startMs"]) / 1000 >= REUSE_GAP_S
+                    and varied(p, i, gap=8)]
+            if not (again or back) and can_hold(i):   # the only repeat left is a bad one: the picture before stays
+                pick, step = None, "hold"
+                r["_hold"] = True
+                holds.append(i)
+                hold_at.append(r["startMs"] / 1000)
+            elif not (again or back):                 # never a shot with no picture: a closer repeat before none
+                back = sorted((p for k, p in picked if not p.get("ai") and p["score"] >= MIN_SCORE
+                               and seen(p["photo"]) < 3 and i - k > 5),
+                              key=lambda p: (seen(p["photo"]), -since_s(p["photo"])))
             if again or back:
                 pick, step = dict((again or back)[0], reused=True), "reused"
-        if pick is None:                              # 7. never a text-only screen (owner 2026-10-09): the least-shown
+        if pick is None and step != "hold":           # 7. never a text-only screen (owner 2026-10-09): the least-shown
             # picture of the film so far that is not within 3 shots, else any judged photo of this line or a neighbour
             back = sorted(((k, p) for k, p in picked if i - k > 3 and p["score"] >= 3),
                           key=lambda kp: (seen(kp[1]["photo"]), -kp[0]))
@@ -2118,11 +2211,22 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             picked.append((i, pick))
         steps[step] = steps.get(step, 0) + 1
     _dump(job / "mrtruth" / "pick_audit.json", audit)
+    if holds:                                         # a held shot's time and words go to the shot before it
+        kept = []
+        for r in rows:
+            if r.pop("_hold", False) and kept:
+                kept[-1]["endMs"] = r["endMs"]
+                kept[-1]["text"] = f"{kept[-1]['text']} {r['text']}".strip()
+            else:
+                kept.append(r)
+        rows[:] = kept
+        engine.log(f"  long holds instead of a repeat: {len(holds)} of {hold_n} allowed, at "
+                   + ", ".join(f"{int(t // 60)}:{int(t % 60):02d}" for t in hold_at))
     by_round = [sum(1 for st in states if st.get("round") == k) for k in (1, 2, 3)]
     engine.log(f"  pictures in {time.time() - t0:.0f}s (search rounds: 1 {by_round[0]}, 2 {by_round[1]}, 3 {by_round[2]}); "
                f"on screen: exact {steps.get('exact', 0)}, another anchor {steps.get('anchor', 0)}, contextual "
                f"{steps.get('contextual', 0)}, neighbour {steps.get('neighbour', 0)}, AI {steps.get('ai', 0)}, earlier photo "
-               f"{steps.get('reused', 0)}, none {steps.get(None, 0)}; Brave requests {_BRAVE['requests'] - b0}")
+               f"{steps.get('reused', 0)}, long hold {steps.get('hold', 0)}, none {steps.get(None, 0)}; Brave requests {_BRAVE['requests'] - b0}")
     g = getattr(engine, "GEMINI_PICKS", None) or {}
     engine.log(f"    judge: {JUDGE['asks']} calls, {JUDGE['failed']} unanswered, {g.get('busy', 0)} busy waits, "
                f"{g.get('fallback', 0)} to Claude; {SHOT_WORKERS} shots at once; Wikimedia {COMMONS['requests']} requests, "
@@ -2164,6 +2268,33 @@ def _ai_ok(engine, dest: Path, row: dict, dossier: dict) -> tuple:
         fits = 0.0
     bad = [k for k in ("text", "modern", "frame") if yes(x.get(k))]
     return (not bad and fits >= 5), (", ".join(bad) or f"fits {fits:g}") + f" — {str(x.get('why') or '')[:100]}"
+
+
+# AI stand-ins (owner 2026-10-10): Z-Image Turbo on WaveSpeed, $0.005 a picture against Seedream 4.0's $0.027, and in the
+# side-by-side test it passed the check more often (7/8 against 6/8). Seedream (the engine's own picture service) is the
+# backup when it fails. At most AI_PER_MIN pictures per minute of film (the reference channels use about three).
+AI_MODEL = os.environ.get("MRTRUTH_AI_MODEL", "wavespeed-ai/z-image/turbo")
+AI_SIZE = os.environ.get("MRTRUTH_AI_SIZE", "1536*864")      # Z-Image's largest 16:9 (each side at most 1536)
+AI_PER_MIN = float(os.environ.get("MRTRUTH_AI_PER_MIN", "4"))
+
+
+def _draw_ai(engine, prompt: str, dest: Path, label: str) -> None:
+    """One stand-in through AI_MODEL; the engine's picture service (Seedream) when that fails."""
+    import wavespeed
+    from PIL import Image
+    engine.ai_image_slot(label)                      # counts against the film's AI cap (raises when it is reached)
+    raw = dest.with_name(dest.stem + "_z.png")
+    try:
+        wavespeed.run(AI_MODEL, {"prompt": prompt[:3900], "size": AI_SIZE, "output_format": "png"}, raw, label=label,
+                      log=engine.log)
+        Image.open(raw).convert("RGB").save(dest, "JPEG", quality=93)
+    except Exception as e:                                            # noqa: BLE001 - the backup draws it instead
+        engine.log(f"    {label}: {AI_MODEL} failed ({str(e)[:80]}) - drawing it with the backup")
+        with engine._AI_LOCK:                        # the backup claims its own slot: hand this one back
+            engine._AI_IMAGES["used"] = max(0, engine._AI_IMAGES["used"] - 1)
+        engine.image_gen(prompt, dest, label=label)
+    finally:
+        raw.unlink(missing_ok=True)
 
 
 def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role: str = "", look: str = "",
@@ -2220,7 +2351,7 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
                 return None
         else:
             try:
-                engine.image_gen(prompt, dest, label=f"mrtruth shot {i}")
+                _draw_ai(engine, prompt, dest, label=f"mrtruth shot {i}")
             except Exception as e:                                   # noqa: BLE001 - next step: an earlier photo
                 engine.log(f"    shot {i}: no AI picture — {str(e)[:80]}")
                 return None
@@ -2921,7 +3052,8 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             sc["grade"] = {k: v for k, v in sc["grade"].items() if k != "shadow"}
     want = round(LEAK_SHARE * len(out))
     empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
-             and not sc.get("ambience") and not sc.get("textCard") and sc["durationFrames"] >= LEAK_MIN_S * FPS]
+             and not sc.get("ambience") and not sc.get("textCard")
+             and LEAK_MIN_S * FPS <= sc["durationFrames"] <= LEAK_MAX_S * FPS]
     empty.sort(key=lambda k: (out[k]["durationFrames"] < LEAK_PREFER_S * FPS, _content_draw(str(k) + "leak")))
     took, gap = set(), max(2, len(out) // max(1, 2 * want))
     for k in empty:
@@ -2946,7 +3078,8 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
     # them, the light leak included); its own measured move replaces the Ken Burns one
     want = round(TURN_SHARE * len(out))
     empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
-             and not sc.get("ambience") and not sc.get("textCard") and sc["durationFrames"] >= TURN_MIN_S * FPS]
+             and not sc.get("ambience") and not sc.get("textCard")
+             and TURN_MIN_S * FPS <= sc["durationFrames"] <= TURN_MAX_S * FPS]
     empty.sort(key=lambda k: (out[k]["durationFrames"] < TURN_PREFER_S * FPS, _content_draw(str(k) + "turn")))
     took, gap = set(), max(2, len(out) // max(1, 2 * want))
     for k in empty:
@@ -3078,7 +3211,12 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     took("more overlays")
     typed_captions(engine, job, rows, script, force)
     took("typed captions")
-    pictures(engine, job, rows, dossier, force)
+    cap0 = getattr(engine, "AI_IMAGE_CAP", None)
+    try:
+        pictures(engine, job, rows, dossier, force)
+    finally:                                         # the per-minute AI cap belongs to this film only
+        if cap0 is not None:
+            engine.AI_IMAGE_CAP = cap0
     took("pictures")
     DEV_DROPS.clear()
     PEOPLE_NAMES.clear()
