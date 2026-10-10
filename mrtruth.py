@@ -1641,6 +1641,11 @@ def brave_search(query: str, folder: Path, n: int = 12) -> list:
                     _BRAVE["slow_until"] = max(_BRAVE["slow_until"], time.time() + max(0.5, reset))
             if resp.status_code == 429:
                 continue
+            if resp.status_code in (401, 402, 403) and os.environ.get("MRTRUTH_ALLOW_DEGRADED") != "1":
+                # out of credit (or the key revoked) DURING a run: stop, never plan the rest without web pictures
+                # (2026-10-10: Brave ran dry minutes into a pod run that had passed the start-up check)
+                raise OutOfCredit(f"Mr Truth stopped: Brave web picture search answered HTTP {resp.status_code} "
+                                  f"({resp.text[:120]}) - top up Brave and run again; nothing found so far is lost")
             if resp.status_code == 200:
                 payload = resp.json()
             break
@@ -2031,7 +2036,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         s = c.get("subject") or ""
         return not s or (subj_n.get(s, 0) < SUBJECT_MAX and i - subj_last.get(s, -99) > gap)
 
-    picked, steps = [], {}
+    picked, steps, audit = [], {}, []
     dark_first = lambda cs: sorted(cs, key=lambda c: _luma(Path(c["photo"])) > TITLE_CEILING["P03"])
     for i, (r, cands) in enumerate(zip(rows, found)):
         dev = r.get("device") or {}
@@ -2046,6 +2051,13 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         near = [c for c in borrowed[i] if usable(r, c, bar) and new_ok(c)]
         options = ([(c, "anchor" if c.get("anchor_switched") else "exact") for c in fresh]
                    + [(c, "contextual") for c in ctx] + [(c, "neighbour") for c in near])
+        # why the fresh photos of this line were or were not usable (pick_audit.json: the reused-photo diagnosis)
+        good = [c for c in cands + borrowed[i] if usable(r, c, bar) or c in _contextual(r, cands)]
+        audit.append({"i": i, "text": r["text"][:90], "round": states[i].get("round"), "cands": len(cands),
+                      "best": max([c["score"] for c in cands] or [0]), "good": len(good),
+                      "good_shown": sum(1 for c in good if seen(c["photo"]) > 0),
+                      "good_subject_cap": sum(1 for c in good if seen(c["photo"]) == 0 and not varied(c, i)),
+                      "subjects": sorted({c.get("subject") or "" for c in good})[:6]})
         pick, step = None, None
         about_him = bool(states[i].get("stand_in"))
         if about_him:
@@ -2093,6 +2105,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             elif near_any:
                 pick, step = dict(near_any[0], contextual=True), "contextual"
         r["pick"], r["step"], r["stand_in"] = pick, step, states[i].get("stand_in", "")
+        audit[-1]["step"] = step
         r["spare"] = [c for c in cands if pick and c["photo"] != pick["photo"] and usable(r, c, MIN_SCORE)
                       and not c["studio"] and seen(c["photo"]) == 0][:3]
         if pick:
@@ -2104,6 +2117,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                 subj_last[pick["subject"]] = i
             picked.append((i, pick))
         steps[step] = steps.get(step, 0) + 1
+    _dump(job / "mrtruth" / "pick_audit.json", audit)
     by_round = [sum(1 for st in states if st.get("round") == k) for k in (1, 2, 3)]
     engine.log(f"  pictures in {time.time() - t0:.0f}s (search rounds: 1 {by_round[0]}, 2 {by_round[1]}, 3 {by_round[2]}); "
                f"on screen: exact {steps.get('exact', 0)}, another anchor {steps.get('anchor', 0)}, contextual "
@@ -2121,8 +2135,11 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
 
 AI_CHECK = """This is a GENERATED stand-in picture for one line of a documentary. Look at it hard and answer ONLY a
 JSON object: {"text": true|false, "modern": true|false, "frame": true|false, "fits": 0-10, "why": "one sentence"}
-text: PROMINENT writing — a sign, label, plaque, caption, title, or a page of letters in sharp focus that a viewer
-  would try to read (legible or garbled). Faint, distant or out-of-focus script on old books or walls does NOT count.
+text: PROMINENT writing in the LATIN alphabet — a sign, label, plaque, caption, title, modern print, or a page of
+  Latin-alphabet letters in sharp focus that a viewer would try to read (legible or garbled). It does NOT count:
+  faint, distant or out-of-focus script; and script in another writing system (Ge'ez, Hebrew, Greek, Arabic, Syriac,
+  cuneiform, hieroglyphs, medieval calligraphy) on a manuscript, scroll, book page, tablet or inscription that is the
+  subject of the picture — that reads as authentic to a viewer (owner 2026-10-10).
 modern: anything after the film's period (see below): modern clothes, lamps, furniture, devices.
 frame: a fake border, burnt edges, a photo-frame, a vignette ring or a collage.
 fits: how well it shows this line in the film's era, setting and tone (8 = an editor would keep it).
@@ -2162,7 +2179,6 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
         nophoto = [p for p in b.get("people") or [] if not p.get("likenessKnown")]
         if len(nophoto) == 1:
             role, look = nophoto[0].get("role", ""), nophoto[0].get("appearance", "")
-    era = "; ".join(x for x in (dossier.get("period"), dossier.get("setting")) if x)
     # the brief's look sentence describes the film's photographs ("archival photograph, age-toning, parchment
     # reproduction"); read literally the model draws an old PRINT - burnt borders, a mount, a page of script. 19 of 30
     # stand-ins were refused for exactly that (pod test 2026-10-10): the look keeps its light, palette and grain only
@@ -2171,29 +2187,29 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
     look_ = ", ".join(c.strip() for c in re.split(r"[,.;]", look_) if c.strip() and not re.search(
         r"\b(reproduction|parchment|scan|print|mount|border|frame|edges?)\b", c, re.I))
     look_ = (look_ or "Documentary photograph, natural light") + ". "
-    full = ("The photograph fills the entire 16:9 frame edge to edge with clean straight edges, as a modern full-frame "
-            "camera image. ")
-    who = (f" If a person appears, it is {role}{(' — ' + look) if look else ''}: anonymous, not a real identifiable "
-           f"person, period-correct dress, seen from the side or behind or in shadow." if role else
-           " Any person is anonymous, period-correct, not a real identifiable person.")
-    base = (f"{look_}{full}"
-            f"{('Era and place: ' + era + '. ') if era else ''}{('Mood: ' + b['tone'] + '. ') if b.get('tone') else ''}"
-            f"{row.get('visualIntent') or row['text']}.{who} ")
-    if about_him:                                 # a line about him: a portrait or at-work picture of the man
-        base = base.replace(f"{row.get('visualIntent') or row['text']}.",
-                            f"A photograph of {role}{(' — ' + look) if look else ''}, the main subject of the frame "
-                            f"(portrait or at work), for the line: {row['text']}.")
-    tries = [base + "Very shallow depth of field: the subject sharp, every page, book and wall softly out of focus so "
-                    "no letter can be read; any writing is a soft blur. No signs, labels, plaques or captions. Nothing modern.",
-             # the line's intent often names a manuscript and the model draws its letters anyway: drop the intent
-             f"{look_}{full}"
-             f"{('Era and place: ' + era + '. ') if era else ''}{('Mood: ' + b['tone'] + '. ') if b.get('tone') else ''}"
-             + (f"{role}{(' — ' + look) if look else ''}, alone in a dim stone corridor or archive aisle, lost in "
-                f"thought, seen from the side; anonymous, not a real identifiable person. " if about_him else
-                f"{row.get('visualIntent') or row['text']} — shown only through closed objects: a shut book's worn "
-                f"cover, spine, clasps or binding, seals, cords, stone, candlelight and shadow. ")
-             + "No book open, no page, document, sign or screen in view. Nothing modern."]
+    # the owner's chosen prompt (2026-10-10, Z-Image test on the Enoch/Ethiopian manuscripts, "perfect"): the film's
+    # look, the subject, an eye-level viewpoint, realism tied to the film's own time and place, one fixed closing line
+    where = ", ".join(x for x in (dossier.get("setting"), dossier.get("period")) if x)
+    real = (f"Candid, unposed documentary photograph{(' of ' + where) if where else ''}; natural available light, real skin "
+            f"texture with pores and wrinkles, natural imperfections, slight film grain, true-to-life colours; only objects "
+            f"that belong in this time and place. ")
+    tail = ("The photograph fills the entire 16:9 frame edge to edge. Not a painting, not CGI, not an illustration; any "
+            "writing is too small or soft to read; no frame or border.")
+    who = (f" The person is {role}{(' — ' + look) if look else ''}: anonymous, not a real identifiable person." if role
+           else " Any person is anonymous, not a real identifiable person.")
+    subject = (f"A photograph of {role}{(' — ' + look) if look else ''}, the main subject of the frame (portrait or at "
+               f"work), for the line: {row['text']}" if about_him else (row.get("visualIntent") or row["text"]))
+    view = "Seen at eye level, as a person standing there would see it. "
+    tries = [f"{look_}{subject.rstrip('.')}.{who} {view}{real}{tail}",
+             # second try, when the first is refused: the same look and realism, the subject through its objects
+             f"{look_}"
+             + (f"{role}{(' — ' + look) if look else ''}, alone in a dim stone corridor or archive aisle, lost in thought, "
+                f"seen from the side; anonymous, not a real identifiable person. " if about_him else
+                f"{(row.get('visualIntent') or row['text']).rstrip('.')}, shown through its objects and its place: worn "
+                f"bindings, seals, cords, stone, candlelight and shadow. ")
+             + f"{view}{real}{tail}"]
     home = job / "mrtruth" / "pictures" / ("s" + hashlib.sha1(row["text"].encode()).hexdigest()[:14])
+    home.mkdir(parents=True, exist_ok=True)
     for k, prompt in enumerate(tries):
         dest = home / f"ai_{hashlib.sha1(prompt.encode()).hexdigest()[:8]}.jpg"
         verdict = home / (dest.stem + ".check.json")
