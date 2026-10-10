@@ -617,6 +617,16 @@ def preflight(engine) -> None:
                 bad.append(f"Brave (web picture search): {str(r.json().get('error', {}).get('detail', r.text))[:140]}")
         except Exception as e:                                       # noqa: BLE001
             warn.append(f"Brave could not be checked ({str(e)[:80]})")
+    a = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if a and str(os.environ.get("CLAUDE_PROVIDER", "")).lower() == "anthropic":
+        try:                                         # a one-token call: a dry Claude account stops the run here, not
+            r = requests.post("https://api.anthropic.com/v1/messages", timeout=30,   # minutes into planning
+                              headers={"x-api-key": a, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                              json={"model": "claude-haiku-5-5", "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]})
+            if r.status_code in (400, 401, 402, 403) and "credit" in r.text.lower() or r.status_code in (401, 402):
+                bad.append(f"Claude (Anthropic API): {str(r.json().get('error', {}).get('message', r.text))[:140]}")
+        except Exception as e:                                       # noqa: BLE001
+            warn.append(f"Claude could not be checked ({str(e)[:80]})")
     w = (os.environ.get("WAVESPEED_API_KEY") or "").strip()
     if w:
         try:
