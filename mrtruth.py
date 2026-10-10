@@ -1878,7 +1878,11 @@ def _same(a, b) -> bool:
     correlated at SAME_CORR or more). The one test of photo identity for every step that counts showings."""
     if str(a) == str(b):
         return True
-    x, y = _ident(a), _ident(b)
+    return _same_ids(_ident(a), _ident(b))
+
+
+def _same_ids(x, y) -> bool:
+    """_same on two _ident() results (a pass over the whole film reads each file's identity once)."""
     if not x or not y:
         return False
     if x[0] == y[0]:
@@ -4773,36 +4777,70 @@ def _calm_cuts(rows: list) -> int:
     return joins
 
 
+def _showings(rows: list, companions: bool = False) -> tuple:
+    """The photos on screen, one entry per photo however it reached the film (_same: the same bytes or a near copy;
+    owner 2026-10-10): ([(photo, identity, [startMs of each showing])], {path: entry index}). The gallery's and
+    the multi-picture templates' companions count as on screen when `companions`; showings count shots' own pictures."""
+    groups, of = [], {}
+    for y in rows:
+        for n, c in enumerate([y.get("pick")] + (list(y.get("companions") or []) if companions else [])):
+            p = (c or {}).get("photo")
+            if not p:
+                continue
+            if p not in of:
+                me = _ident(p)
+                of[p] = next((g for g, (q, x, _) in enumerate(groups) if p == q or _same_ids(me, x)), len(groups))
+                if of[p] == len(groups):
+                    groups.append((p, me, []))
+            if not n:
+                groups[of[p]][2].append(y["startMs"])
+    return groups, of
+
+
 def _part_pool(rows: list, k: int, a: int, b: int) -> list:
     """The pictures a part [a, b) cut off rows[k] could show, best first: the runner-ups of the shots whose own line
-    is heard there (the part shows THAT line), then rows[k]'s own, then its neighbours'; never one already on screen."""
-    shown = {c.get("photo") for r in rows for c in [r.get("pick")] + list(r.get("companions") or []) if c}
+    is heard there (the part shows THAT line), then rows[k]'s own, then its neighbours'. Only pictures the checks
+    passed for their own line (clean, kind or better: the shot's bar, _need), never one already on screen - nor a
+    near copy of one (_same) - and no two copies of one photo in the pool."""
+    groups, _ = _showings(rows, companions=True)
     heard = lambda x: min(b, x["_said"][1]) - max(a, x["_said"][0]) if x.get("_said") else 0
     order = sorted((x for x in rows if heard(x) > 0), key=lambda x: (-heard(x), x["startMs"]))
     order += [rows[k]] + [rows[j] for j in (k - 1, k + 1, k - 2, k + 2) if 0 <= j < len(rows)]
-    pool, seen = [], set()
+    pool, seen = [], [g[1] for g in groups]
+    shown = {g[0] for g in groups}
     for x in order:
         for c in x.get("spare") or []:
-            if c.get("photo") and c["photo"] not in shown and c["photo"] not in seen:
-                pool.append(c)
-                seen.add(c["photo"])
+            p = c.get("photo")
+            if not p or p in shown or c.get("ai") or not (_clean(c) and _tier(c) >= KIND):
+                continue
+            me = _ident(p)
+            if any(_same_ids(me, y) for y in seen):
+                continue
+            pool.append(c)
+            seen.append(me)
+            shown.add(p)
     return pool
 
 
 def _provisional(rows: list, k: int, a: int, pool: list) -> tuple:
     """A picture for a new part until the reuse/AI stage gives it its own: the pool's first; else a photo the reuse
-    rule allows (shown once, REUSE_GAP_S from that showing, not on a shot beside it); else rows[k]'s continues."""
+    rule allows (owner 2026-10-10: a photo - the same bytes or a near copy - shown at most twice, REUSE_GAP_S from
+    its other showing, never on a shot beside it; and one the checks passed: clean, kind or better), the best tier
+    first, then the farthest; else rows[k]'s continues."""
     if pool:
         return dict(pool[0]), "split-spare"
-    shows = {}
+    groups, of = _showings(rows)
+    near = {of.get((rows[j].get("pick") or {}).get("photo")) for j in (k - 1, k, k + 1) if 0 <= j < len(rows)}
+    again = []
     for y in rows:
-        if y.get("pick"):
-            shows.setdefault(y["pick"]["photo"], []).append(y["startMs"])
-    near = {(rows[j].get("pick") or {}).get("photo") for j in (k - 1, k, k + 1) if 0 <= j < len(rows)}
-    again = [y["pick"] for y in rows if y.get("pick") and not y["pick"].get("ai") and y["pick"]["photo"] not in near
-             and len(shows[y["pick"]["photo"]]) < 2 and all(abs(t - a) >= REUSE_GAP_S * 1000 for t in shows[y["pick"]["photo"]])]
+        p = y.get("pick")
+        if not p or p.get("ai") or not (_clean(p) and _tier(p) >= KIND) or of.get(p["photo"]) in near:
+            continue
+        times = groups[of[p["photo"]]][2]
+        if len(times) < 2 and all(abs(t - a) >= REUSE_GAP_S * 1000 for t in times):
+            again.append((p, min(abs(t - a) for t in times)))
     if again:
-        best = max(again, key=lambda p: (float(p.get("score") or 0), min(abs(t - a) for t in shows[p["photo"]]), p["photo"]))
+        best = max(again, key=lambda pd: (_tier(pd[0]), pd[1], pd[0]["photo"]))[0]
         return dict(best, reused=True), "split-reused"
     same = next((rows[j]["pick"] for j in (k, k - 1, k + 1) if 0 <= j < len(rows) and rows[j].get("pick")), None)
     return (dict(same) if same else None), "split-same"

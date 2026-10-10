@@ -62,3 +62,14 @@ PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
    (HIGH), MRTRUTH_JUDGE_PICS (6), MRTRUTH_JUDGE_ENOUGH (2: more pictures are looked at only while fewer pass),
    MRTRUTH_VERDICTS=off, MRTRUTH_VERDICTS_DB (the store's file), MRTRUTH_RUN_ID.
    Store by hand: python verdicts.py stats|export|import|compact ...
+
+PACING, OVERLAYS ON THEIR WORDS, NOTHING OVER 8 S (2026-10-10)
+   Claude's shot list is kept as Claude wrote it (mrtruth/beats.json) and paced every time it is loaded: about 4.2 s a
+   shot, cuts on the narration, punchy whole sentences kept quick, fragments folded into their sentence, at most 4
+   quick shots in a row, nothing over 8 s. Log: "pacing: N planned shots ... -> M shots, ...". MRTRUTH_PACE_AIM (4.2)
+   moves the average without asking Claude again. After the pictures every overlay and typed caption starts on its
+   own words, a chapter on a sentence start; then "shots after sync: ..." - a shot still over 8 s is cut in two on
+   the narration, and its new part shows a runner-up that passed the checks (never a copy of a photo on screen), else
+   a repeat the reuse rule allows, logged with "⚠ ... cut in two". A planned long hold (after 12:00) is the only shot
+   past 8 s. The finish hands the plan's shot starts to the final encode's stall check (also in a prepared farm
+   bundle's manifest.json as "cuts"), so a slow move on a dark photo or a planned hold is never re-muxed as a stall.

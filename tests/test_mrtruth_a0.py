@@ -409,7 +409,8 @@ class Finish(unittest.TestCase):
             def _concat_segments(self, paths, out):
                 test.joined = [Path(p).name for p in paths]
 
-            def _final_mux(self, job, audio, srt, burn, add_qr=False, vignette=False):
+            def _final_mux(self, job, audio, srt, burn, add_qr=False, vignette=False, cuts=None):
+                test.cuts = cuts                 # the saved plan's shot starts go to the stall check (lane B)
                 (job / "video.mp4").write_bytes(b"x")
         self.engine = E()
         boom = mock.Mock(side_effect=AssertionError("planning or a paid call in a finish"))
@@ -436,6 +437,7 @@ class Finish(unittest.TestCase):
         self.assertEqual(json.loads((self.work / "timing.json").read_text()), {"pictures": 1419.0})
         self.assertIn("saved plan", json.loads((self.work / "timing_finish.json").read_text()))
         self.assertEqual(len(json.loads((self.job / "credits.json").read_text())), 3)
+        self.assertEqual(self.cuts, [0.0, 3.0, 6.0])     # a finish hands the saved plan's cuts to the stall check
 
     def test_a_missing_drawn_shot_stops_by_name(self):
         for n in self.names()[1:]:
