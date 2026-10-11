@@ -5034,7 +5034,7 @@ HL_PER_10MIN = max(0.0, float(os.environ.get("MRTRUTH_HIGHLIGHT_PER_10MIN", "3")
 HL_GAP_S = 90.0                          # two pages at least this far apart, start to start
 HL_MIN_S = LIBRARY["highlight-page"][2]  # a page's shot: 5-8 s
 HL_FRAMES_WORD, HL_FRAMES_HOLD = 13, 48  # the renderer's clock: frames a highlighted word, then frames held
-HL_V = 1                                 # what the page step is told: a change asks again
+HL_V = 2                                 # what the page step is told: a change asks again (2: review 2026-10-11)
 HL_ASK_MAX = 40                          # candidate moments one call reads (the strongest)
 HL_EARLY_MS = 300                        # a page opens at most this much before the line it was cut on
 HL_PARA = (90, 150)                      # letters a paragraph Claude is asked for: two lines, as in the reference
@@ -5042,6 +5042,11 @@ HL_LINES = (3, 7)                        # lines a paragraph and a page at most:
 HL_PHRASE_WORDS = 8                      # words a highlighted phrase at most
 HL_BEFORE_MAX = 8                        # highlighted words before the main one at most (3.5 s of them)
 HL_YIELDS = ("photo-pop", "P08", "framed-card")   # templates that give their shot to a page (the source group's own job)
+HL_SPARE = 2                             # pages asked beyond the cap, best first: one refused or untimed is replaced
+HL_FIRST_S = 180                         # the first page inside the first 3 minutes when one fits there (owner V50 note,
+                                         # 2026-09-11: "it came too late ... the first one appears within the first 3 minutes")
+HL_WORDS = 10                            # highlighted words a page at most when its timing allows (the reference: 3 + 4 + 3;
+                                         # the renderer's zoom stops at frame 130 = 10 words, review 2026-10-11)
 HL_GROUP = "source page"
 HL = {}                                  # this film's page step: found, asked, placed, refused, dropped (gate.json, log)
 _HL_CH = (" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
@@ -5094,18 +5099,31 @@ that gives it context. The owner wants it in every film where it fits, and only 
 
 THE CANDIDATE MOMENTS below were found by the system: the shot that cites, the start and length (seconds) of its
 lines, the words spoken there with the second (from that start) each part is heard at, and the lines before and after
-them. The page is cut to fit inside those lines. Choose at most
-{most}: the clearest source-reference moments, spread across the film, never two within {gap:.0f} s of each other.
-Choose at least one when any moment fits. A moment does NOT fit when nothing written or recorded is cited, quoted or
-described there, or no phrase the narrator says there is worth highlighting.
+them. The page is cut to fit inside those lines.
+The film carries at most {most} pages. Write {ask} pages, BEST FIRST: {most} and {spare} spares after them (fewer only when
+fewer moments fit; a spare is used only when a page before it fails the system's checks). The clearest
+source-reference moments, spread across the film, never two within {gap:.0f} s of each other. The first page within the
+first {first} seconds of the film when any moment there fits (the channel owner: the first one must come early). Choose
+at least one when any moment fits.
+Each page a DIFFERENT source and a different main phrase: never highlight words another page highlights - a quote the
+narrator repeats later gets ONE page, at its clearest moment (the system refuses the repeat).
+A moment does NOT fit when nothing written or recorded is cited, quoted or described there, or no phrase the narrator
+says there is worth highlighting.
 
 FOR EACH PAGE
-- "shot": its number. "source": what the page is, in a few words ("the access record's notation").
+- "shot": its number. "source": what the page is, in a few words ("the keeper's ledger entry").
 - "paragraphs": exactly 3, natural prose written the way a page of THAT source would read (an archive record, a letter,
   private notes, a report, a book), each {lo}-{hi} characters, plain text: no quotation marks around a whole paragraph,
   no markdown, no line breaks, no links, no slashes, never "file:" or "data:" (a word then a colon reads as a link).
 - Use ONLY what the script and the film's notes below say: restate or paraphrase them; never invent a name, date,
   number or event they do not state, never contradict them. Where the script quotes the source, use its exact words.
+- Each paragraph says what THAT source itself says or records - never narration about the people of the film ("He
+  reread the phrase ..." is not a page of any source) - and never presents a fact as this source's that the script
+  gives to another one.
+- Each paragraph is grammatical and keeps one tense: write the sentence around the narrator's words so they fit it
+  ("The gate stayed shut until the last guard left the tower", never "The gate stays shut until ... left the tower").
+- Where a paragraph quotes the source's own words, keep the quotation marks around them inside the paragraph (The
+  order reads: "no stranger may pass the river gate"); the phrase is copied without them.
 - "phrases": exactly 3, one per paragraph, each COPIED EXACTLY from its own paragraph (the same letters, case and
   punctuation), 1-5 words (the main one up to 8), a phrase that reads whole.
 - "main": the number (1-3) of the paragraph whose phrase is the MAIN one: the specific phrase, claim, name or finding the
@@ -5129,27 +5147,28 @@ THE CANDIDATE MOMENTS
 {moments}
 
 Return {{"pages": [{{"shot": n, "source": "...", "paragraphs": ["...", "...", "..."], "phrases": ["...", "...", "..."],
-"main": 2, "why": "..."}}], "rejected": [{{"shot": n, "why": "..."}}]}}"""
+"main": 2, "why": "..."}}], "rejected": [{{"shot": n, "why": "..."}}]}} - "pages" best first."""
 
 
 def _hl_cap(rows: list) -> int:
     """Pages a film may carry (owner 2026-10-11: 2-3 per 10 minutes, and one in every film where a moment fits):
-    HL_PER_10MIN a ten minutes of film, rounded half up, at least 1, at most the template's own cap (6); 0 with
-    MRTRUTH_HIGHLIGHT_PER_10MIN=0."""
+    HL_PER_10MIN a ten minutes of film, rounded down (review 2026-10-11: half up gave 5 min 2 pages, 4 per 10 minutes),
+    at least 1, at most the template's own cap (6); 0 with MRTRUTH_HIGHLIGHT_PER_10MIN=0."""
     if HL_PER_10MIN <= 0 or not rows:
         return 0
-    return min(LIBRARY["highlight-page"][4], max(1, int(HL_PER_10MIN * rows[-1]["endMs"] / 600000 + 0.5)))
+    return min(LIBRARY["highlight-page"][4], max(1, int(HL_PER_10MIN * rows[-1]["endMs"] / 600000 + 1e-9)))
 
 
 def _hl_main(dev: dict) -> int:
     """The index of a page's main phrase (the one the narrator is discussing; 0 for a page that does not say)."""
-    m, n = (dev or {}).get("main"), len((dev or {}).get("phrases") or [])
+    phs = (dev or {}).get("phrases")
+    m, n = (dev or {}).get("main"), len(phs) if isinstance(phs, list) else 0
     return m if isinstance(m, int) and not isinstance(m, bool) and 0 <= m < n else 0
 
 
 def _hl_phrase(dev: dict) -> str:
-    phs = (dev or {}).get("phrases") or []
-    return str(phs[_hl_main(dev)]) if phs else ""
+    phs = (dev or {}).get("phrases")
+    return str(phs[_hl_main(dev)]) if isinstance(phs, list) and phs else ""   # anything else Claude wrote: the checks refuse it
 
 
 def _hl_nwords(phrase) -> int:
@@ -5210,6 +5229,18 @@ def _hl_heard_in(phrase: str, text: str) -> bool:
     p = _hl_toks(phrase)
     a = _hl_align(p, _hl_toks(text))
     return bool(a) and _hl_close(a[0], len(p))
+
+
+def _hl_same(a: str, b: str) -> bool:
+    """Two main phrases highlight the same words: one said inside the other (_hl_heard_in), or three words in a row in
+    common, one of them five letters or more ("general doctrinal reference")."""
+    if not a or not b:
+        return False
+    if _hl_heard_in(a, b) or _hl_heard_in(b, a):
+        return True
+    ta, tb = _hl_toks(a), _hl_toks(b)
+    runs = {tuple(tb[k:k + 3]) for k in range(len(tb) - 2)}
+    return any(tuple(ta[k:k + 3]) in runs and max(map(len, ta[k:k + 3])) >= 5 for k in range(len(ta) - 2))
 
 
 def _hl_said_at(dev: dict, heard: list, lo: int, hi: int):
@@ -5299,7 +5330,8 @@ def _hl_good(s: str) -> bool:
 def _hl_resize(par: str, phrase: str, n: int) -> str:
     """`phrase` grown or cut to n words of its own paragraph around where it stands: whole words, no punctuation at its
     edges, at most 64 letters, never ending on a joining word; a run that reads whole (_hl_good) first, then the one
-    sharing most words with it, then the one starting nearest it. '' when none."""
+    sharing most words with it, then the one ending where it ends (its noun: "outer wall", not "the outer"), then the
+    one starting nearest it. '' when none."""
     at = par.find(phrase) if phrase else -1
     if at < 0 or n < 1:
         return ""
@@ -5313,23 +5345,79 @@ def _hl_resize(par: str, phrase: str, n: int) -> str:
         last = (s.split() or [""])[-1].lower().strip("\"'“”‘’()[],.;:!?…—–-")
         if not s or len(s) > 64 or _hl_nwords(s) != n or last in JOINING or last in _PHRASE_NO_END:
             continue
-        k = (not _hl_good(s), -len(set(range(i, i + n)) & set(own)), abs(i - own[0]), i)
+        k = (not _hl_good(s), -len(set(range(i, i + n)) & set(own)), abs(i + n - 1 - own[-1]), abs(i - own[0]), i)
         if key is None or k < key:
             best, key = s, k
     return best
+
+
+def _hl_refind(par: str, ph: str) -> str:
+    """The run of `par`'s own words that `ph` was copied from, when Claude changed the paragraph after copying it: the
+    run with the fewest words changed (one in two at most, _stem_same), then one that reads whole (_hl_good: not "no
+    stranger may pass the"), then one that opens and ends on its words, then the nearest in length; whole words, no
+    punctuation at its edges; '' when none."""
+    spans = [(m.start(), m.end()) for m in re.finditer(r"[^\s—–]+", par)]
+    spans = [(a, b, t) for a, b in spans for t in [re.sub(r"[^a-z0-9']", "", par[a:b].lower().replace("’", "'"))] if t]
+    p, best = _hl_toks(ph), None
+
+    def edits(x, y):
+        prev = list(range(len(y) + 1))
+        for i in range(1, len(x) + 1):
+            cur = [i]
+            for j in range(1, len(y) + 1):
+                cur.append(min(prev[j - 1] + (0 if _stem_same(y[j - 1], x[i - 1]) else 1), prev[j] + 1, cur[j - 1] + 1))
+            prev = cur
+        return prev[-1]
+    for a in range(len(spans)):
+        for b in range(a + max(1, len(p) - 3), min(len(spans), a + len(p) + 3) + 1):
+            e = edits(p, [t for _, _, t in spans[a:b]])
+            run = par[spans[a][0]:spans[b - 1][1]].strip("\"'“”‘’()[],.;:!?…—–- ")
+            ends = (spans[a][2] != p[0]) + (spans[b - 1][2] != p[-1])
+            key = (e, not _hl_good(run), ends, abs(b - a - len(p)), a)
+            if run and e <= max(1, len(p) // 2) and (best is None or key < best[0]):
+                best = (key, run)
+    return best[1] if best else ""
+
+
+def _hl_own(par: str) -> str:
+    """A context phrase for a paragraph Claude left without one: its first run of three or two words inside one clause
+    that opens on a determiner and reads whole (_hl_good: "no further detail"), else its last such run of any opening,
+    else one word; '' when none."""
+    toks = [(m.start(), m.end()) for m in re.finditer(r"\S+", par)]
+    runs = []
+    for n in (3, 2, 1):
+        for i in range(len(toks) - n + 1):
+            s = par[toks[i][0]:toks[i + n - 1][1]]
+            if re.search(r"[,.;:!?—–)]\S|[,.;:!?—–]\s", s.rstrip(",.;:!?")):
+                continue                                  # a run across a clause
+            s = s.strip("\"'“”‘’()[],.;:!?…—–- ")
+            if _hl_nwords(s) == n and _hl_good(s):
+                runs.append((n, i, s))
+    det = [s for n, i, s in runs if n > 1 and s.split()[0].lower() in ("the", "a", "an", "no", "that", "this", "its", "his",
+                                                                       "her", "their", "each", "every")]
+    return det[0] if det else (max(runs, key=lambda x: (x[0] > 1, x[1]))[2] if runs else "")
 
 
 def _hl_tidy(dev: dict) -> dict:
     """Claude's page brought within the page's limits before the checks: "file:" or "data:" (an archive's label, which
     the renderer would refuse as a link) set with a dash; a phrase over HL_PHRASE_WORDS words or 64 letters cut - the
     main one from its end (it still opens on the word the narrator starts it with), another to the five words of its
-    paragraph around it (_hl_resize). A phrase that is not in its paragraph is left for the checks."""
+    paragraph around it (_hl_resize). A phrase that is not in its paragraph is set to the run of the paragraph's own
+    words it was copied from (_hl_refind: review 2026-10-11, Claude added "of awareness" to the paragraph and not to
+    its phrase); a main phrase written in another paragraph makes that paragraph the main one; anything else is left
+    for the checks."""
     phs, pars = dev.get("phrases"), dev.get("paragraphs")
     if not (isinstance(phs, list) and isinstance(pars, list) and len(phs) == len(pars) == 3
             and all(isinstance(x, str) for x in phs + pars)):
         return dev
     colon = lambda s: re.sub(r"\b(file|data):", r"\1 —", s, flags=re.I)   # an archive label, not a link (deviceText)
     phs, pars, m = [colon(x) for x in phs], [colon(x) for x in pars], _hl_main(dev)
+    phs = [ph if ph in par else (_hl_refind(par, ph) or ph) for ph, par in zip(phs, pars)]
+    j = next((j for j in range(3) if phs[m] not in pars[m] and phs[m] in pars[j]), None)
+    if j is not None:                    # the main phrase written in another paragraph (review 2026-10-11): the main
+        phs[j], m = phs[m], j            # one is that paragraph's, and a paragraph left without a phrase of its own
+        phs = [ph if ph in par else (_hl_own(par) if i != m else ph) for i, (ph, par) in enumerate(zip(phs, pars))]
+        dev = dict(dev, main=m)          # gets a short run of its own words
     dev = dict(dev, paragraphs=pars)
     for i, (ph, par) in enumerate(zip(phs, pars)):
         if not isinstance(ph, str) or not isinstance(par, str) or ph not in par or \
@@ -5351,7 +5439,7 @@ def _hl_shorten(dev: dict, frames: int, main: bool = True):
     the main one from its end (it still opens on the same word; at least three words) - the timing of the main
     highlight never moves. None when it cannot be."""
     m, pars, phs = _hl_main(dev), list(dev["paragraphs"]), list(dev["phrases"])
-    new = dict(dev, phrases=phs)
+    new, orig = dict(dev, phrases=phs), list(phs)
     for i in [x for x in (2, 1) if x > m] + ([m] if main else []):
         floor = 1 if i != m else min(3, _hl_nwords(phs[m]))
         while _hl_frames(new) > frames and _hl_nwords(phs[i]) > floor:
@@ -5361,7 +5449,8 @@ def _hl_shorten(dev: dict, frames: int, main: bool = True):
                     ws.pop()
                 cut = " ".join(ws).rstrip(",.;:!?—–- ")
             else:
-                cut = next((s for k in range(_hl_nwords(phs[i]) - 1, 0, -1) for s in [_hl_resize(pars[i], phs[i], k)] if s), "")
+                cut = next((s for k in range(_hl_nwords(phs[i]) - 1, 0, -1) for s in [_hl_resize(pars[i], orig[i], k)]
+                            if s), "")                   # each from the phrase as it came: a cut never drifts off it
             if not cut or cut not in pars[i]:
                 break
             phs[i] = cut
@@ -5377,9 +5466,13 @@ def _hl_before(dev: dict) -> list:
     the most one phrase costs), so a cut is spread over the phrases rather than taken from one."""
     m, pars, phs = _hl_main(dev), dev["paragraphs"], dev["phrases"]
     opts = []
+    # a cut that drops the phrase's last word and stops mid-clause ("a document of uncertain age" -> "document of
+    # uncertain", review 2026-10-11) costs as much as one that does not read whole
+    torn = lambda par, ph, s: (s.split()[-1] != ph.split()[-1] and _hl_nwords(s) < _hl_nwords(ph)
+                               and bool(re.match(r"\s+\w", par[par.find(s) + len(s):])))
     for i in range(m):
         n0 = _hl_nwords(phs[i])
-        o = {n: (s, 0 if s == phs[i] else 1 + abs(n - n0) + 2 * (not _hl_good(s)))
+        o = {n: (s, 0 if s == phs[i] else 1 + abs(n - n0) + 2 * (not _hl_good(s) or torn(pars[i], phs[i], s)))
              for n in range(1, HL_PHRASE_WORDS + 1) for s in [phs[i] if n == n0 else _hl_resize(pars[i], phs[i], n)] if s}
         if not o:
             return []
@@ -5394,18 +5487,24 @@ def _hl_fit(dev: dict, since: int, h: int, until: int):
     """A page timed on its moment (owner 2026-10-11: the main phrase is highlighted while the narrator says it). The
     highlights run one after another from the page's first frame, so the phrases before the main one set when its
     highlight starts: they stay as Claude wrote them when that fits, else they are grown or cut (whole words of their
-    own paragraphs, runs that read whole first: _hl_before) - the fewest changes, then the most words - so the main
-    highlight starts SYNC_LEAD_MS before its first word is heard (h) with the page opening no earlier than `since` (its
-    window's start less HL_EARLY_MS, or where the overlay before it is done), at most HL_BEFORE_MAX words before it.
-    Then it is cut (_hl_shorten) until everything is done by `until` (the next overlay's start) and within SCENE_MAX_S.
+    own paragraphs, runs that read whole first: _hl_before) - HL_WORDS highlighted words or fewer on the page first
+    (review 2026-10-11: 13 kept the main sweep running 1.3 s after the zoom stopped), then the fewest changes, then the
+    most words - so the main highlight starts SYNC_LEAD_MS before its first word is heard (h) with the page opening no
+    earlier than `since` (its window's start less HL_EARLY_MS, or where the overlay before it is done), at most
+    HL_BEFORE_MAX words before it; the phrases after the main one are cut to HL_WORDS too when they can be. Then it is
+    cut (_hl_shorten) until everything is done by `until` (the next overlay's start) and within SCENE_MAX_S.
     (device, opens at ms) or None: the main phrase comes too soon for the highlights before it, or nothing fits."""
     per = HL_FRAMES_WORD * 1000 / FPS
     want = min(HL_BEFORE_MAX, int((h - SYNC_LEAD_MS - since) // per))
     m = _hl_main(dev)
-    fit = sorted(((b, c, p) for b, c, p in _hl_before(dev) if b <= want), key=lambda bcp: (bcp[2], -bcp[0]))
+    nm = _hl_nwords(dev["phrases"][m])
+    fit = sorted(((b, c, p) for b, c, p in _hl_before(dev) if b <= want),
+                 key=lambda bcp: (bcp[0] + nm > HL_WORDS, bcp[2], -bcp[0]))
     for main in (False, True):                   # the main phrase whole first; cut from its end only when nothing else fits
         for b, c, _ in fit:
             new = dict(dev, phrases=c + list(dev["phrases"][m:]))
+            least = HL_FRAMES_WORD * (b + nm + len(new["phrases"]) - m - 1) + HL_FRAMES_HOLD   # one word each after it
+            new = _hl_shorten(new, max(HL_FRAMES_WORD * HL_WORDS + HL_FRAMES_HOLD, least), False) or new
             opens = h - SYNC_LEAD_MS - _hl_pre_ms(new)
             room = min(until - opens, int(SCENE_MAX_S * 1000))
             while new is not None and _hl_need_ms(new) > room:
@@ -5447,7 +5546,17 @@ def _hl_score(text: str) -> int:
             + min(2, len({m.lower().rstrip("s") for m in _HL_SOURCE.findall(text)})))
 
 
-def _hl_candidates(rows: list, cues: list) -> tuple:
+def _hl_pin(rows: list, x: dict, heard: list) -> int:
+    """Where sync will pin an overlay shot (_said_at less _lead_ms, as its crowding step does), so a page is placed
+    clear of it (review 2026-10-11: a caption whose word came late in its own line was pinned 1.5 s before its cut
+    ends and crowded out the page placed after it). The opening, a chapter, or words said nowhere near: its cut."""
+    if heard is None or x is rows[0] or x.get("section_turn"):
+        return x["startMs"]
+    at = _said_at(x, heard, x["startMs"] - 12000, x["endMs"] + 12000, (x["startMs"], x["endMs"]))
+    return x["startMs"] if at is None else max(0, at - _lead_ms(x))
+
+
+def _hl_candidates(rows: list, cues: list, heard: list = None) -> tuple:
     """The moments a page may go on (a cheap look: _hl_score), each with its window of lines (the page is cut inside it
     once its words are known, _hl_take): the citing shot, the one before it when its sentence opens there, the one
     after it when its sentence runs on there (a quote is often said on the next line: "a notation that read, in" /
@@ -5479,8 +5588,8 @@ def _hl_candidates(rows: list, cues: list) -> tuple:
             j += 1
         s0 = rows[i]["startMs"]
         before = next((x for x in reversed(rows[:i]) if _hl_pinned(x)), None)
-        since = max(s0 - HL_EARLY_MS, before["startMs"] + _need_ms(before) if before else 0)
-        until = next((x["startMs"] for x in rows[j + 1:] if _hl_pinned(x)), rows[-1]["endMs"])
+        since = max(s0 - HL_EARLY_MS, _hl_pin(rows, before, heard) + _need_ms(before) if before else 0)
+        until = next((min(x["startMs"], _hl_pin(rows, x, heard)) for x in rows[j + 1:] if _hl_pinned(x)), rows[-1]["endMs"])
         if until - max(s0, since) < HL_MIN_S * 1000 + 300:
             refused.append((r, f"too short ({(until - max(s0, since)) / 1000:.1f}s before the next words on screen; "
                                f"a page needs {HL_MIN_S + 0.3:.1f}s)"))
@@ -5501,19 +5610,36 @@ def _hl_candidates(rows: list, cues: list) -> tuple:
     return out, refused
 
 
-def _hl_take(rows: list, i: int, j: int, dev: dict, opens: int, cues: list) -> dict:
-    """The window's shots i..j re-cut around the page, before the pictures (so nothing is searched twice): the page's
-    shot runs from the subtitle start where it opens (opens, or the line just before it) to the first one after
-    everything is done (_hl_need_ms); what the window says before and after it, a second or more, stays a plain shot
-    of its own with the brief of the shot it came from (its own picture search); a shorter rest joins the page. A
-    template that gave way is remembered (hl_was) for a drop to restore."""
+def _hl_take(rows: list, i: int, j: int, dev: dict, opens: int, cues: list, heard: list = None) -> dict:
+    """The window's shots i..j re-cut around the page, before the pictures (so nothing is searched twice), where sync
+    will put it (review 2026-10-11: a cut 2.5 s before the page left the words between under a borrowed picture): the
+    page's shot opens on the subtitle start within SYNC_TOLERANCE_MS of `opens`, else at `opens` itself, and runs to
+    the first subtitle start after everything is done (_hl_need_ms) when that is within SCENE_MAX_S; else, when the
+    window runs on past SCENE_MAX_S, to the first word heard after it is done (sync caps the page at SCENE_MAX_S, so
+    the next shot starts on that word or at most SYNC_TOLERANCE_MS before it). What the window says before and after
+    it, a second or more, stays a plain shot of its own with the brief of the shot it came from (its own picture
+    search) and the words said under it; a shorter rest joins the page. A template that gave way is remembered
+    (hl_was) for a drop to restore."""
     s, e = rows[i]["startMs"], rows[j]["endMs"]
     starts = sorted({int(a) for a, b, t in cues if s < a < e})
-    a = max((x for x in starts if x <= opens + 250), default=s)
-    b = min((x for x in starts if x >= opens + _hl_need_ms(dev) and x > a), default=e)
+    done, cap = opens + _hl_need_ms(dev), opens + int(SCENE_MAX_S * 1000)
+    near = [x for x in starts if abs(x - opens) <= SYNC_TOLERANCE_MS]
+    a = min(near, key=lambda x: (abs(x - opens), x)) if near else int(opens)
+    b = min((x for x in starts if x >= done and x > a), default=None)
+    b = None if b is not None and b > cap else b
+    if b is None and e - cap > SYNC_TOLERANCE_MS:   # (review 2026-10-11: 'caution' ran under the next sentence's picture)
+        b = min((ms for ms, w in heard or [] if w and done <= ms <= min(cap + SYNC_TOLERANCE_MS, e - SYNC_MIN_SHOT_MS)),
+                default=None)
     a = s if a - s < SYNC_MIN_SHOT_MS else a
-    b = e if e - b < SYNC_MIN_SHOT_MS else b
-    said = lambda lo, hi: " ".join(t for c0, c1, t in cues if lo <= c0 < hi)
+    b = e if b is None or e - b < SYNC_MIN_SHOT_MS else int(b)
+
+    def said(lo, hi):                        # the lines said from lo to hi; a line already under way at lo, from the
+        words = [t for c0, c1, t in cues if lo <= c0 < hi]   # word heard at lo on
+        c = next(((c0, t) for c0, c1, t in cues if c0 < lo < c1), None)
+        if c is not None and heard:
+            n = sum(1 for ms, w in heard if w and c[0] - 50 <= ms < lo)
+            words = [" ".join(c[1].split()[n:])] + words
+        return " ".join(w for w in words if w)
     part = lambda src, lo, hi: dict({k_: v for k_, v in src.items() if k_ not in ("device", "overlay", "hl_was")},
                                     startMs=lo, endMs=hi, device=None, text=said(lo, hi) or src["text"])
     head = part(rows[i], s, a) if a > s else None
@@ -5559,7 +5685,8 @@ def _hl_answer(got) -> tuple:
             main = int(p.get("main") or 1) - 1
         except (TypeError, ValueError):
             continue
-        clean = lambda xs: [re.sub(r"\s+", " ", str(x)).strip() for x in xs] if isinstance(xs, list) else xs
+        clean = lambda xs: [re.sub(r"\s+", " ", str(x)).strip() for x in xs] if isinstance(xs, list) else None   # (review
+        # 2026-10-11: phrases written as an object or a number stopped the film; now "not three and three", refused)
         pages.append({"shot": shot, "source": str(p.get("source") or "")[:80], "why": str(p.get("why") or "")[:120],
                       "dev": {"id": "highlight-page", "paragraphs": clean(p.get("paragraphs")),
                               "phrases": clean(p.get("phrases")), "main": main}})
@@ -5578,22 +5705,25 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
          less those that cannot carry a page (the opening, a chapter, a typed caption, a template that does not give
          way, a year's card, too little room before the next words on screen) - each refusal logged with its reason;
       2. one Claude call (HL_PROMPT, cached in mrtruth/highlights.json under its prompt, so a changed script asks again;
-         an answer that fails, or has a page the checks refuse, is never cached) chooses at most _hl_cap of them, at
-         least HL_GAP_S apart, and writes each page: three paragraphs in the register of the source, grounded in the
-         script and the dossier only, three phrases each an exact substring of its paragraph, the main one the narrator's
-         own words on that shot;
+         a call that fails is never cached, an answer is - a re-run places the same pages) chooses up to _hl_cap +
+         HL_SPARE of them, best first, at least HL_GAP_S apart, each a different source, the first inside HL_FIRST_S,
+         and writes each page: three paragraphs in the register of the source, grounded in the script and the dossier
+         only, three phrases each an exact substring of its paragraph, the main one the narrator's own words on that shot;
       3. the code checks every page (_hl_problem), finds when its main phrase is heard (_hl_said_at) and times it
          (_hl_fit: the main highlight on its words, the page done before the next words on screen, 5-8 s); a page
          that fails drops that moment only, never the film;
-      4. the page's shot is cut inside its window of lines (_hl_take: what is said there before and after it stays a
-         plain shot of its own); spacing (HL_GAP_S), the cap and one page beside another are checked first.
+      4. kept in Claude's order (the best one inside HL_FIRST_S first) while the spacing (HL_GAP_S), the cap, one page
+         beside another and the same highlighted words twice allow; each page's shot is cut inside its window of lines,
+         run on over plain shots until the page is done (_hl_take: what is said before and after it stays a plain shot
+         of its own).
     Writes HL (gate.json reports it) and returns it."""
     HL.clear()
     HL.update(cap=_hl_cap(rows), found=0, candidates=0, placed=[], rejected=[], dropped=[], claude="", answer=[])
     if not HL["cap"] or len(rows) < 3:
         engine.log("  highlighted pages: off" + (" (MRTRUTH_HIGHLIGHT_PER_10MIN=0)" if HL_PER_10MIN <= 0 else ""))
         return HL
-    cands, refused = _hl_candidates(rows, cues)
+    heard = _heard(job, cues)
+    cands, refused = _hl_candidates(rows, cues, heard)
     HL["found"], HL["candidates"] = len(cands) + len(refused), len(cands)
     no = lambda r, why, by="code": HL["rejected"].append({"at_s": round(r["startMs"] / 1000, 1), "line": r["text"][:90],
                                                           "why": why, "by": by})
@@ -5610,15 +5740,16 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
                         + (f", now {c['taking']} - it gives way" if c["taking"] else "") + f"): {c['line']}\n"
                         f"   before: {rows[c['i'] - 1]['text'] if c['i'] else ''}\n"
                         f"   after: {rows[c['j'] + 1]['text'] if c['j'] + 1 < len(rows) else ''}" for c in ask)
-    prompt = HL_PROMPT.format(most=HL["cap"], gap=HL_GAP_S, lo=HL_PARA[0], hi=HL_PARA[1], notes=_hl_notes(dossier),
-                              script=script, moments=moments)
+    HL["asked"] = len(ask)
+    prompt = HL_PROMPT.format(most=HL["cap"], ask=HL["cap"] + HL_SPARE, spare=HL_SPARE, gap=HL_GAP_S, first=HL_FIRST_S,
+                              lo=HL_PARA[0], hi=HL_PARA[1], notes=_hl_notes(dossier), script=script, moments=moments)
     out = job / "mrtruth" / "highlights.json"
     key = _hash([HL_V, prompt])
     got = None if force else _load(out)
     fresh = not (isinstance(got, dict) and got.get("key") == key and isinstance(got.get("answer"), dict))
     if fresh:
         engine.log(f"Mr Truth: highlighted pages - {len(ask)} moment(s) that cite a source, Claude chooses and writes "
-                   f"at most {HL['cap']}...")
+                   f"at most {HL['cap']} (and {HL_SPARE} spares)...")
         try:
             got = {"key": key, "answer": _ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL)}
         except RuntimeError as e:
@@ -5630,9 +5761,8 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
     HL["claude"] = "asked" if fresh else "cached"
     pages, rej = _hl_answer(got["answer"])
     by_k = {c["k"]: c for c in ask}
-    heard = _heard(job, cues)
-    chosen, bad_text = [], False
-    for p in pages:
+    chosen = []
+    for p in pages:                                  # in Claude's order: best first, then the spares
         c = by_k.get(p["shot"])
         if c is None:
             continue
@@ -5645,7 +5775,6 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
         HL["answer"].append({"shot": p["shot"], "seat": c["k"], "at_s": round(c["s0"] / 1000, 1), "source": p["source"],
                              "main": _hl_phrase(p["dev"]), "why": p["why"], "refused": bad})
         if bad:
-            bad_text = True
             no(r, f"Claude's page refused: {bad}", "check")
             continue
         h = _hl_said_at(p["dev"], heard, c["s0"] - 300, rows[c["j"]]["endMs"])
@@ -5657,15 +5786,19 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
         else:
             chosen.append(dict(p, c=c, dev=fit[0], opens=fit[1], h=h))
     kept = []
-    for p in sorted(chosen, key=lambda p: p["opens"]):
+    early = next((p for p in chosen if p["opens"] < HL_FIRST_S * 1000), None)   # the first within 3 minutes, when one
+    for p in ([early] if early else []) + [p for p in chosen if p is not early]:  # fits there; then Claude's order
         r = rows[p["c"]["k"]]
         near = next((q for q in kept if abs(q["opens"] - p["opens"]) < HL_GAP_S * 1000), None)
+        same = next((q for q in kept if _hl_same(_hl_phrase(q["dev"]), _hl_phrase(p["dev"]))), None)
         if near is not None:
             no(r, f"within {HL_GAP_S:.0f}s of the page at {near['opens'] / 1000:.0f}s", "check")
         elif any(not (p["c"]["j"] + 1 < q["c"]["i"] or q["c"]["j"] + 1 < p["c"]["i"]) for q in kept):
             no(r, "beside another page", "check")
+        elif same is not None:                       # review 2026-10-11: two of three pages highlighted one quote
+            no(r, f"the same highlighted words as another page (at {same['opens'] / 1000:.0f}s)", "check")
         elif len(kept) >= HL["cap"]:
-            no(r, f"over the film's {HL['cap']}", "check")
+            no(r, f"a spare (the film's {HL['cap']} are placed)", "check")
         else:
             kept.append(p)
     took = {p["shot"] for p in pages} | {p.get("seat") for p in pages}
@@ -5675,12 +5808,15 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
     for c in ask:
         if c["k"] not in took and not any(k_ == c["k"] for k_, _ in rej):
             no(rows[c["k"]], "not chosen (no reason given)", "claude")
-    if fresh and not bad_text:                       # a page the checks refused is asked again next run
-        _dump(out, got)
-    elif fresh:                                      # kept for the owner to read, never read back
-        _dump(job / "mrtruth" / "highlights_refused.json", dict(got, refused=[a for a in HL["answer"] if a["refused"]]))
-    for p in sorted(kept, key=lambda p: -p["c"]["i"]):       # last first, so the earlier shots keep their numbers
-        r = _hl_take(rows, p["c"]["i"], p["c"]["j"], p["dev"], p["opens"], cues)
+    if fresh:                                        # every answer that came back (review 2026-10-11: one with a page
+        _dump(out, dict(got, refused=[a for a in HL["answer"] if a["refused"]]))   # refused was asked again on every
+    for p in sorted(kept, key=lambda p: -p["c"]["i"]):       # re-run and cut other shots); its refusals are refused
+        i, j = p["c"]["i"], p["c"]["j"]                      # again on read-back. Last first, so the earlier shots
+        done = p["opens"] + _hl_need_ms(p["dev"])            # keep their numbers; the window runs on over plain shots
+        while (rows[j]["endMs"] < done and j + 1 < len(rows) and _hl_free(rows[j + 1]) and not _hl_pinned(rows[j + 1])
+               and not _year_in(rows[j + 1]["text"])):       # until the page is done (review 2026-10-11: it ended
+            j += 1                                           # 1.8 s early and left a 1 s shot on the wrong words)
+        r = _hl_take(rows, i, j, p["dev"], p["opens"], cues, heard)
         HL["placed"].append({"at_s": round(p["opens"] / 1000, 1), "line_at_s": round(r["startMs"] / 1000, 1),
                              "shot_s": round((r["endMs"] - r["startMs"]) / 1000, 1), "source": p["source"],
                              "main": _hl_phrase(p["dev"]), "main_heard_s": round(p["h"] / 1000, 2),
@@ -5691,9 +5827,27 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
                    f"'{_hl_phrase(p['dev'])}' highlighted as it is said ({p['h'] / 1000:.1f}s)"
                    + (f" - {r['hl_was']} gives way" if r.get("hl_was") else ""))
     HL["placed"].sort(key=lambda x: x["at_s"])
+    late = kept and min(p["opens"] for p in kept) >= HL_FIRST_S * 1000
     engine.log(f"  highlighted pages: {len(kept)} placed of at most {HL['cap']} ({HL['found']} moment(s) cite a source, "
-               f"{len(ask)} asked, Claude {HL['claude']}; {len(HL['rejected'])} refused: {_hl_reasons(HL['rejected'])})")
+               f"{len(ask)} asked, Claude {HL['claude']}; {len(HL['rejected'])} refused: {_hl_reasons(HL['rejected'])})"
+               + (f" - the first at {min(p['opens'] for p in kept) / 1000:.0f}s: none fitted in the first "
+                  f"{HL_FIRST_S // 60} minutes" if late else ""))
     return HL
+
+
+def _hl_safe(engine, job: Path, rows: list, script: str, dossier: dict, cues: list, force: bool = False) -> dict:
+    """highlight_pages, which never stops the film (review 2026-10-11: an answer with its phrases written as an object
+    raised and stopped it): anything it raises leaves the rows as they were, with no page, and is logged."""
+    keep = copy.deepcopy(rows)
+    try:
+        return highlight_pages(engine, job, rows, script, dossier, cues, force)
+    except PlanningStopped:
+        raise
+    except Exception as e:                                           # noqa: BLE001 - the film goes on without pages
+        rows[:] = keep
+        HL.update(placed=[], claude=f"failed ({type(e).__name__})")
+        engine.log(f"  highlighted pages: none this run ({type(e).__name__}: {str(e)[:120]}) - the film goes on without them")
+        return HL
 
 
 def _hl_report(rows: list, heard: list) -> dict:
@@ -5709,7 +5863,8 @@ def _hl_report(rows: list, heard: list) -> dict:
                       "main": _hl_phrase(dev), "frames": _hl_frames(dev),
                       "offset_s": None if h is None else round((r["startMs"] + _hl_pre_ms(dev) - h + SYNC_LEAD_MS) / 1000, 2),
                       "paragraphs": dev.get("paragraphs"), "phrases": dev.get("phrases"), "main_n": _hl_main(dev) + 1})
-    return {"on_screen": len(pages), "cap": _hl_cap(rows), "found": HL.get("found", 0), "asked": HL.get("candidates", 0),
+    return {"on_screen": len(pages), "cap": _hl_cap(rows), "found": HL.get("found", 0),
+            "candidates": HL.get("candidates", 0), "asked": HL.get("asked", 0),
             "claude": HL.get("claude", ""), "pages": pages, "placed": HL.get("placed", []),
             "rejected": HL.get("rejected", []), "dropped": HL.get("dropped", [])}
 
@@ -5722,6 +5877,8 @@ def _hl_reasons(rejected: list, most: int = 5) -> str:
             return "not chosen by Claude"
         if w.startswith("Claude's page refused"):
             return "Claude's page refused by the checks"
+        if w.startswith("within "):                  # (review 2026-10-11: it read 'N within')
+            return f"within {HL_GAP_S:.0f}s of another page"
         return re.sub(r"\s*\(.*$|\s+\d.*$|:.*$", "", re.sub(r"^\S+ sits there", "a template sits there", w)) or "?"
     n = Counter(kind(x) for x in rejected)
     return ", ".join(f"{v} {k}" for k, v in n.most_common(most)) + (", ..." if len(n) > most else "") if n else "none"
@@ -5948,9 +6105,9 @@ def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
             _chapter_to(rows, j, back)
             engine.log(f"      chapter at {x['startMs'] / 1000:.1f}s steps back a sentence, to {rows[back]['startMs'] / 1000:.1f}s, "
                        f"so a typed caption keeps its words")
-        if x is None or x.get("typedCaption") or x.get("section_turn") or x.get("hold") \
+        if x is None or x.get("typedCaption") or x.get("section_turn") or x.get("hold") or _covered(x) \
                 or tid(x) and _SYNC_RANK.get(tid(x), 1) >= _SYNC_RANK.get(t, 1):
-            continue
+            continue                 # never onto a page (review 2026-10-11: it went with no record): crowding settles it
         lesser = {key: x.pop(key) for key in keys if key in x}       # gives way, unless the move is refused
         x["device"] = None
         if r.get("typedCaption"):
@@ -6972,6 +7129,9 @@ def transitions(rows: list) -> None:
             r["tin"] = {"type": "dipToBlack", "durationFrames": DIP_FRAMES}
             run = 0
             continue
+        if dev == "highlight-page":                  # a hard cut into the page, as the reference opens (review 2026-10-11:
+            run = 0                                  # a burn or a flash would hide its first highlight)
+            continue
         minute = int(t // 60)
         if (u < BURN_SHARE and t - last_burn >= BURN_GAP_S and burns_by_min.get(minute, 0) < BURN_PER_MIN
                 and run < BURN_MAX_RUN and (r["endMs"] - r["startMs"]) / 1000 * FPS > BURN_IN + 2
@@ -7419,7 +7579,7 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     took("more overlays")
     typed_captions(engine, job, rows, script, force)
     took("typed captions")
-    highlight_pages(engine, job, rows, script, dossier, _cues(engine, srt), force)   # owner 2026-10-11
+    _hl_safe(engine, job, rows, script, dossier, _cues(engine, srt), force)   # owner 2026-10-11
     took("highlighted pages")
     cap0 = getattr(engine, "AI_IMAGE_CAP", None)
     try:                                             # the film's AI budget lasts until its last picture decision (C2)

@@ -174,6 +174,26 @@ class Checks(unittest.TestCase):
         self.assertLessEqual(M._hl_nwords(t["phrases"][1]), M.HL_PHRASE_WORDS)
         self.assertEqual(M._hl_problem(t), "")
 
+    def test_a_phrase_copied_before_its_paragraph_changed_is_found_again(self):
+        par = "The passage states that the text then specified when the interval of awareness ended, in no hours at all."
+        self.assertEqual(M._hl_refind(par, "specified when the interval ended"), "specified when the interval")
+        self.assertEqual(M._hl_refind(par, "a lamp burned in the window"), "")
+        p = dict(page(), phrases=["the outer wall", "no stranger may pass the gate", "the council"])
+        self.assertEqual(M._hl_tidy(p)["phrases"][1], "no stranger may pass the river gate")   # review 2026-10-11
+        self.assertEqual(M._hl_problem(M._hl_tidy(p)), "")
+        moved = dict(page(), main=2, phrases=["the outer wall", "the council", "no stranger may pass the river gate tonight"])
+        t = M._hl_tidy(moved)                                             # the main phrase written in paragraph 2, not 3
+        self.assertEqual((t["main"], t["phrases"][1]), (1, "no stranger may pass the river gate tonight"))
+        self.assertIn(t["phrases"][2], PARS[2])
+        self.assertTrue(M._hl_good(t["phrases"][2]), t["phrases"][2])
+        self.assertEqual(M._hl_problem(t), "")
+        self.assertEqual(M._hl_own("It offers no further detail, leaving the colleague to judge it alone."), "no further detail")
+        par3 = "The text itself remains accessible to approved researchers, though the notation closed its path."
+        cut = M._hl_shorten(dict(page(main=0), paragraphs=[PARS[1], PARS[0], par3],
+                                 phrases=[page()["phrases"][1], "the outer wall", "remains accessible to approved researchers"]),
+                            13 * 10 + 48, False)
+        self.assertEqual(cut["phrases"][2], "researchers")                # cut from the phrase as it came, never drifting
+
     def test_frames_and_lengths(self):
         p = dict(page(), phrases=["the outer wall", "no stranger may pass", "the council"])
         self.assertEqual(M._hl_frames(p), 13 * 9 + 48)
@@ -191,7 +211,8 @@ class Checks(unittest.TestCase):
 class Cap(unittest.TestCase):
     def test_two_or_three_per_ten_minutes_at_least_one_at_most_six(self):
         cap = lambda mins: M._hl_cap([{"endMs": int(mins * 60000)}])
-        self.assertEqual([cap(m) for m in (1, 2, 3, 5, 11, 15, 20, 30)], [1, 1, 1, 2, 3, 5, 6, 6])
+        # rounded down (review 2026-10-11: half up gave 5 min 2 pages and 15 min 5, over 3 per 10 minutes)
+        self.assertEqual([cap(m) for m in (1, 2, 3, 5, 6.7, 8.4, 10, 11, 15, 20, 30)], [1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 6])
         with mock.patch.object(M, "HL_PER_10MIN", 0.0):
             self.assertEqual(cap(11), 0)
         with mock.patch.object(M, "HL_PER_10MIN", 2.0):
@@ -216,10 +237,15 @@ class Timing(unittest.TestCase):
 
     def test_the_phrases_before_set_when_the_main_highlight_starts(self):
         h, since = 12500, 9700                                            # said 2.8 s after the page may open
-        dev, opens = M._hl_fit(page(), since, h, 30000)
+        nine = dict(page(), phrases=["the outer wall", "no stranger may pass", "the council"])
+        dev, opens = M._hl_fit(nine, since, h, 30000)
         self.assertEqual(opens + M._hl_pre_ms(dev), h - M.SYNC_LEAD_MS)    # the main highlight starts on its words
         self.assertGreaterEqual(opens, since)
-        self.assertEqual(dev["phrases"], page()["phrases"])               # Claude's own phrases when they fit
+        self.assertEqual(dev["phrases"], nine["phrases"])                 # Claude's own phrases when they fit
+        dev, opens = M._hl_fit(page(), since, h, 30000)                    # 3 + 8 + 2 words: HL_WORDS first (review
+        self.assertEqual(opens + M._hl_pre_ms(dev), h - M.SYNC_LEAD_MS)    # 2026-10-11: 13 ran past the zoom's stop)
+        self.assertEqual(dev["phrases"], ["outer wall", page()["phrases"][1], "council"])   # its noun kept, not "the outer"
+        self.assertLessEqual(sum(M._hl_nwords(x) for x in dev["phrases"][:2]), M.HL_WORDS)
         dev, opens = M._hl_fit(page(), since, 10800, 30000)                # said 1.1 s in: two words at most before it
         self.assertEqual(opens + M._hl_pre_ms(dev), 10800 - M.SYNC_LEAD_MS)
         self.assertGreaterEqual(opens, since)
@@ -269,6 +295,25 @@ def answer_for(*pages_):
         "rejected": []}
 
 
+def own_quote(k):
+    """A quote of its own for shot k (made-up words): no two pages highlight the same words."""
+    return f'The ledger read, "no {G.word(k, 0)} may pass the {G.word(k, 1)} gate tonight."'
+
+
+def own_page(k, main=1):
+    main_words = f"no {G.word(k, 0)} may pass the {G.word(k, 1)} gate tonight"
+    p = page(main_words=main_words, main=main)
+    p["paragraphs"][main] = p["paragraphs"][main].replace("no stranger may pass the river gate tonight", main_words)
+    return p
+
+
+def own_quotes(n, at):
+    rows = plain_film(n)
+    for k in at:
+        rows[k]["text"] = own_quote(k)
+    return rows
+
+
 def quote_film(n=40, at=(10,)):
     """A plain film with the ledger's quote said on the shots `at`."""
     rows = plain_film(n)
@@ -312,15 +357,17 @@ class Step(Tmp):
         self.assertIn("previous review", rows[k - 1]["text"])               # its own words, its own picture search
 
     def test_spacing_and_the_cap(self):
-        rows = quote_film(n=165, at=(10, 20, 60, 100))               # 11 minutes: at most 3
-        hl = self.run_step(rows, Claude(answer_for((10, page()), (20, page()), (60, page()), (100, page()))))
+        rows = own_quotes(n=165, at=(10, 20, 60, 100))               # 11 minutes: at most 3
+        hl = self.run_step(rows, Claude(answer_for(*[(k, own_page(k)) for k in (10, 20, 60, 100)])))
         self.assertEqual([p["line_at_s"] for p in hl["placed"]], [40.0, 240.0, 400.0])   # 80 s is too close
         why = {x["at_s"]: x["why"] for x in hl["rejected"] if x["by"] == "check"}
         self.assertTrue(why[80.0].startswith("within 90s of the page at 40s"), why)
-        rows = quote_film(n=165, at=(10, 40, 70, 100, 130))
-        hl = self.run_step(rows, Claude(answer_for(*[(k, page()) for k in (10, 40, 70, 100, 130)])))
+        self.assertIn("1 within 90s of another page", M._hl_reasons(hl["rejected"]))   # (it read '1 within')
+        rows = own_quotes(n=165, at=(10, 40, 70, 100, 130))
+        hl = self.run_step(rows, Claude(answer_for(*[(k, own_page(k)) for k in (10, 40, 70, 100, 130)])))
         self.assertEqual(len(hl["placed"]), 3)
-        self.assertEqual(sorted(x["why"] for x in hl["rejected"] if x["by"] == "check"), ["over the film's 3"] * 2)
+        self.assertEqual(sorted(x["why"] for x in hl["rejected"] if x["by"] == "check"),
+                         ["a spare (the film's 3 are placed)"] * 2)
 
     def test_a_failed_call_drops_the_moments_never_the_film_and_is_not_cached(self):
         rows = quote_film()
@@ -335,18 +382,20 @@ class Step(Tmp):
         hl = self.run_step(rows, eng2)
         self.assertEqual(hl["placed"], [])
 
-    def test_a_page_the_checks_refuse_drops_that_moment_only_and_is_never_cached(self):
+    def test_a_page_the_checks_refuse_drops_that_moment_only_and_a_re_run_places_the_same(self):
         rows = quote_film(n=165, at=(10, 60))
-        broken = dict(page(), phrases=["the outer wall", "no stranger may pass the gate", "the council"])   # not in it
+        broken = dict(page(), phrases=["the outer wall", "a lamp burned in the window", "the council"])   # not in it
         eng = Claude(answer_for((10, broken), (60, page())))
         hl = self.run_step(rows, eng)
         self.assertEqual([round(p["at_s"]) // 10 for p in hl["placed"]], [24])
         self.assertIn("is not in its paragraph", next(x["why"] for x in hl["rejected"] if x["at_s"] == 40.0))
-        self.assertFalse((self.job / "mrtruth" / "highlights.json").exists())
-        refused = json.loads((self.job / "mrtruth" / "highlights_refused.json").read_text())
-        self.assertEqual(refused["refused"][0]["shot"], 10)
-        hl = self.run_step(quote_film(n=165, at=(10, 60)), eng)      # asked again next run
-        self.assertEqual(len(eng.calls), 2)
+        saved = json.loads((self.job / "mrtruth" / "highlights.json").read_text())   # review 2026-10-11: cached, so a
+        self.assertEqual(saved["refused"][0]["shot"], 10)                 # re-run neither asks nor cuts other shots
+        again = quote_film(n=165, at=(10, 60))
+        hl2 = self.run_step(again, eng)
+        self.assertEqual((len(eng.calls), hl2["claude"]), (1, "cached"))
+        self.assertEqual([p["at_s"] for p in hl2["placed"]], [p["at_s"] for p in hl["placed"]])
+        self.assertEqual([(r["startMs"], r["endMs"]) for r in again], [(r["startMs"], r["endMs"]) for r in rows])
 
     def test_a_good_answer_is_cached_and_a_changed_script_asks_again(self):
         rows = quote_film()
@@ -528,12 +577,168 @@ class Gate(G.Base):
                 M._gate_scenes(G.Eng(), self.job, rows, sc)
 
 
+# ── the review of 2026-10-11 ──────────────────────────────────────────────────────────────────────────────────────
+def picks(rows):
+    for r in rows:
+        r.setdefault("pick", G.pic(f"r{r['startMs']}"))
+
+
+class Review(Tmp):
+    def test_a_malformed_answer_is_refused_never_raised(self):
+        for bad in ({"1": "a", "2": "b", "3": "c"}, 7):             # phrases as an object or a number stopped the film
+            rows = quote_film()
+            ans = answer_for((10, page()))
+            ans["pages"][0]["phrases"] = bad
+            hl = self.run_step(rows, Claude(ans))
+            self.assertEqual(hl["placed"], [])
+            self.assertIn("not three paragraphs and three phrases",
+                          next(x["why"] for x in hl["rejected"] if x["by"] == "check"))
+        rows, eng = quote_film(), Claude()
+        before = copy.deepcopy(rows)
+
+        def boom(engine, job, rs, *a):
+            rs[3]["device"] = page()                                      # half done, then it raises
+            raise KeyError(1)
+        with mock.patch.object(M, "highlight_pages", boom):
+            M._hl_safe(eng, self.job, rows, "s", G.DOSSIER, G.cues_of(rows))
+        self.assertEqual(rows, before)                                     # the film goes on, untouched
+        self.assertTrue(any("highlighted pages: none this run (KeyError" in l for l in eng.lines), eng.lines)
+
+    def test_a_caption_never_takes_a_pages_shot_unrecorded(self):
+        rows = quote_film(n=40)
+        self.run_step(rows, Claude(answer_for((10, page()))))
+        k = next(k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") == "highlight-page")
+        rows[k + 2]["typedCaption"] = {"lines": ["The Ledger", "River Gate"], "startFrame": 8}   # said on the page's line
+        picks(rows)
+        eng = Claude()
+        M.sync_overlays(eng, self.job, rows, G.cues_of(rows))
+        self.assertFalse([l for l in eng.lines if "highlight-page there gives way" in l], eng.lines)
+        self.assertEqual([x["main"] for x in M.HL["dropped"]], [page()["phrases"][1]])   # it went, and gate.json says why
+        self.assertTrue(M.HL["dropped"][0]["why"].startswith("sync: "))
+
+    def test_a_page_is_placed_clear_of_where_sync_pins_its_neighbours(self):
+        rows = plain_film(40)                                             # a caption whose words come late in its own
+        rows[8]["text"] = "The keeper walked on and on and on until the stone tower"   # line types in on them, after
+        rows[8]["typedCaption"] = {"lines": ["The Stone Tower", "And Its Long Shadow"], "startFrame": 8}   # its cut
+        rows[9]["text"] = QUOTE
+        hl = self.run_step(rows, Claude(answer_for((9, page(main=0)))))
+        self.assertEqual(hl["placed"], [])                                # not placed, then crowded out by sync
+        self.assertIn("no timing puts", next(x["why"] for x in hl["rejected"] if x["by"] == "check"))
+        rows = quote_film(n=40)                                           # a caption after it whose words are said in
+        rows[12]["typedCaption"] = {"lines": ["The Ledger", "River Gate"], "startFrame": 8}   # the window: pinned there
+        eng = Claude(answer_for((10, page())))
+        hl = self.run_step(rows, eng)
+        self.assertEqual((eng.calls, hl["placed"]), ([], []))
+        self.assertTrue(any(x["why"].startswith("too short") for x in hl["rejected"]))
+
+    def test_the_page_shot_is_cut_where_sync_opens_it_and_runs_on_until_it_is_done(self):
+        rows = plain_film(40)                                             # full7 2:20: the quote's line starts after the
+        lay = [(40000, 44000, "Years later a previous review had produced a notation that read, in"),   # page opens,
+               (44000, 47000, 'translation, "no stranger may pass the river gate tonight."'),       # the line after it
+               (47000, 49500, "That phrase did not mean the gate was shut.")]                       # ends before it is done
+        for k, (a, b, t) in enumerate(lay, 10):
+            rows[k].update(startMs=a, endMs=b, text=t)
+        for k in range(13, 40):
+            rows[k]["startMs"] = rows[k - 1]["endMs"]
+            rows[k]["endMs"] = rows[k]["startMs"] + (3500 if k == 13 else 4000)
+        self.run_step(rows, Claude(answer_for((10, page()))))
+        k = next(k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") == "highlight-page")
+        dev = rows[k]["device"]
+        opens = M._hl_said_at(dev, self.heard(rows), 40000, 50000) - M.SYNC_LEAD_MS - M._hl_pre_ms(dev)
+        self.assertEqual(rows[k]["startMs"], opens)                       # where sync opens it, not 3 s before
+        self.assertEqual((rows[k - 1]["startMs"], rows[k - 1]["endMs"]), (40000, rows[k]["startMs"]))
+        self.assertIn("previous review", rows[k - 1]["text"])
+        self.assertGreaterEqual(rows[k]["endMs"], opens + M._hl_need_ms(rows[k]["device"]))   # ran on over the next line
+        self.assertIn("did not mean the gate", rows[k]["text"])
+        picks(rows)
+        M.sync_overlays(Claude(), self.job, rows, G.cues_of(rows))
+        k = next(k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") == "highlight-page")
+        self.assertEqual(rows[k]["startMs"], opens)
+        self.assertGreaterEqual(min(rows[k - 1]["endMs"] - rows[k - 1]["startMs"], rows[k + 1]["endMs"] - rows[k + 1]["startMs"]),
+                                2000)                                     # no 1 s shot left beside it
+        heard = json.loads((self.job / "words_heard.json").read_text())
+        self.assertFalse([w for w, a, b in heard if a * 1000 + 40 < rows[k]["endMs"] < b * 1000 - 40])   # not mid-word
+
+    def test_a_window_past_eight_seconds_leaves_a_tail_from_a_word(self):
+        rows = plain_film(40)
+        lay = [(40000, 44000, "Years later a previous review had produced a notation that read, in"),
+               (44000, 53000, 'translation, "no stranger may pass the river gate tonight," and the keeper went home '
+                              'to his bed and slept until the morning.')]
+        for k, (a, b, t) in enumerate(lay, 10):
+            rows[k].update(startMs=a, endMs=b, text=t)
+        for k in range(12, 40):
+            rows[k]["startMs"] = rows[k - 1]["endMs"]
+            rows[k]["endMs"] = rows[k]["startMs"] + 4000
+        self.run_step(rows, Claude(answer_for((10, page()))))
+        k = next(k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") == "highlight-page")
+        dev = rows[k]["device"]
+        opens = M._hl_said_at(dev, self.heard(rows), 40000, 53000) - M.SYNC_LEAD_MS - M._hl_pre_ms(dev)
+        heard = [round(a * 1000) for w, a, b in json.loads((self.job / "words_heard.json").read_text())]
+        tail = rows[k + 1]
+        self.assertEqual(tail["startMs"], rows[k]["endMs"])
+        self.assertIn(tail["startMs"], heard)                             # on a word, within SCENE_MAX_S of the opening
+        self.assertLessEqual(tail["startMs"], opens + M.SCENE_MAX_S * 1000 + M.SYNC_TOLERANCE_MS)
+        self.assertEqual((tail["endMs"], tail["device"]), (53000, None))
+        self.assertTrue(tail["text"].endswith("until the morning."), tail["text"])   # the words said under it
+        picks(rows)
+        M.sync_overlays(Claude(), self.job, rows, G.cues_of(rows))
+        k = next(k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") == "highlight-page")
+        self.assertLessEqual(rows[k]["endMs"] - rows[k]["startMs"], 8000)
+        self.assertEqual(rows[k + 1]["endMs"], 53000)
+
+    def test_a_page_opens_on_a_hard_cut(self):
+        rows = gate_film()
+        with mock.patch.object(M, "_content_draw", lambda text: 0.0):  # every draw a film burn or a flash
+            M.transitions(rows)
+        self.assertEqual(rows[26]["tin"], {"type": "cut", "durationFrames": 0})
+        self.assertIn(rows[20]["tin"]["type"], ("filmBurn", "flash"))
+
+    def test_spares_in_claudes_order_and_the_first_page_early(self):
+        rows = own_quotes(n=165, at=(10, 100, 125, 150))              # 11 minutes: 3, the 4th a spare
+        hl = self.run_step(rows, Claude(answer_for(*[(k, own_page(k)) for k in (100, 125, 150, 10)])))
+        self.assertEqual([p["line_at_s"] for p in hl["placed"]], [40.0, 400.0, 500.0])   # 40 s: inside 3 minutes, first
+        self.assertIn("a spare", next(x["why"] for x in hl["rejected"] if x["at_s"] == 600.0))
+        rows = own_quotes(n=165, at=(10, 100, 125, 150))
+        broken = dict(own_page(125), phrases=["the outer wall", "no such words", "the council"])
+        hl = self.run_step(rows, Claude(answer_for(*[(k, own_page(k) if k != 125 else broken) for k in (100, 125, 150, 10)])),
+                           script="another")
+        self.assertEqual([p["line_at_s"] for p in hl["placed"]], [40.0, 400.0, 600.0])   # the spare takes its place
+
+    def test_the_same_highlighted_words_twice_are_refused(self):
+        self.assertTrue(M._hl_same("not suitable for general doctrinal reference",
+                                   "material not suitable for general doctrinal reference"))
+        self.assertTrue(M._hl_same("its general doctrinal reference", "the general doctrinal reference of it"))
+        self.assertFalse(M._hl_same("the last person physically present", "a difficult institutional position"))
+        rows = quote_film(n=165, at=(10, 60))
+        hl = self.run_step(rows, Claude(answer_for((10, page()), (60, page()))))
+        self.assertEqual(len(hl["placed"]), 1)
+        self.assertTrue(next(x["why"] for x in hl["rejected"] if x["at_s"] == 240.0).startswith(
+            "the same highlighted words as another page"))
+
+    def test_the_report_says_how_many_were_asked(self):
+        rows = own_quotes(n=40, at=(10, 30))
+        with mock.patch.object(M, "HL_ASK_MAX", 1):
+            self.run_step(rows, Claude(answer_for((10, own_page(10)))))
+        rep = M._hl_report(rows, self.heard(rows))
+        self.assertEqual((rep["candidates"], rep["asked"]), (2, 1))
+
+    def test_the_prompt_asks_for_spares_one_source_a_page_and_an_early_first(self):
+        eng = Claude(answer_for((10, page())))
+        self.run_step(quote_film(n=165), eng)
+        ask = eng.calls[0]
+        self.assertIn("at most 3 pages. Write 5 pages, BEST FIRST: 3 and 2 spares", ask)
+        self.assertIn("first 180 seconds of the film", ask)
+        self.assertIn("Each page a DIFFERENT source", ask)
+        self.assertIn("keeps one tense", ask)
+        self.assertIn("keep the quotation marks", ask)
+
+
 class Wiring(unittest.TestCase):
     def test_the_step_runs_after_the_captions_before_the_pictures(self):
         src = (HERE / "mrtruth.py").read_text(encoding="utf-8")
         plan = src[src.index("def plan_film("):src.index("def _saved_plan(")]
-        self.assertLess(plan.index("typed_captions(engine"), plan.index("highlight_pages(engine"))
-        self.assertLess(plan.index("highlight_pages(engine"), plan.index("_pictures_and_cut(engine"))
+        self.assertLess(plan.index("typed_captions(engine"), plan.index("_hl_safe(engine"))   # highlight_pages, guarded
+        self.assertLess(plan.index("_hl_safe(engine"), plan.index("_pictures_and_cut(engine"))
         self.assertIn("page", M.GATE_RULES)
         self.assertEqual(M._SYNC_RANK["highlight-page"], 6)
 
