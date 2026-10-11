@@ -186,6 +186,54 @@ class Paced(unittest.TestCase):
             self.assertTrue(any(r["text"] == w for r in out), w)
 
 
+class LongSentences(unittest.TestCase):
+    """Owner 2026-10-11: PROTECT LONG SENTENCES - a long sentence about one thing stays one shot up to 8 s; a stretch's
+    shot count never cuts inside a sentence (it may land slower), only the first 30 s may for their 7-8 shots."""
+
+    @staticmethod
+    def film(opening_sentence_s, rest_sentence_s, minutes=5):
+        """Sentences said over two subtitle lines (a cut between them is inside the sentence), one row per sentence."""
+        cues, t, k = [], 0, 0
+        while t < minutes * 60000:
+            d = opening_sentence_s * 1000 if t < 30000 else rest_sentence_s * 1000
+            half = d // 2
+            cues += [(t, t + half - 80, f"s{k} first half of it"), (t + half, t + d - 80, f"and its end {k}.")]
+            t, k = t + d, k + 1
+        return cues, rows_on(cues, list(range(0, len(cues), 2)))
+
+    def test_a_stretch_of_long_sentences_is_never_cut_inside_one(self):
+        cues, raw = self.film(3.6, 6.4)                       # after 30 s: one 6.4 s sentence a row, far over the aim
+        out = copy.deepcopy(raw)
+        info = M._pace(out, cues)
+        inside = [(c, why) for c, kind, why in info["made"] if kind < 2]
+        self.assertFalse([c for c, why in inside if why != "opening"], inside)
+        self.assertEqual([r["startMs"] for r in out if r["startMs"] >= 30000],
+                         [r["startMs"] for r in raw if r["startMs"] >= 30000])   # every sentence still one shot
+        self.assertGreater(sections_of(out)["second half"]["avg"], 6.0)         # slower than the aim: accepted
+
+    def test_the_opening_may_cut_inside_a_sentence_for_its_seven_shots(self):
+        cues, raw = self.film(7.5, 4.0)                       # four 7.5 s sentences make the first 30 s
+        out = copy.deepcopy(raw)
+        info = M._pace(out, cues)
+        opening = [r for r in out if r["startMs"] < 30000]
+        self.assertTrue(M.PACE_OPEN_N[0] <= len(opening) <= M.PACE_OPEN_N[1], durs(opening))
+        self.assertLessEqual(sum(r["endMs"] - r["startMs"] > 6000 for r in opening), 1)
+        self.assertTrue(all(why == "opening" for c, kind, why in info["made"] if kind < 2), info["made"])
+        self.assertTrue(any(kind < 2 for c, kind, why in info["made"]))
+
+    def test_sentence_ends_still_split_a_merged_row(self):
+        cues, t = [], 0
+        while t < 300000:                                     # rows of three short whole sentences (6.6 s)
+            for k in range(3):
+                cues.append((t, t + 2120, f"w{t} said {k}."))
+                t += 2200
+        raw = rows_on(cues, list(range(0, len(cues), 3)))
+        out = copy.deepcopy(raw)
+        info = M._pace(out, cues)
+        self.assertGreater(len(out), len(raw))
+        self.assertTrue(all(kind == 2 for c, kind, why in info["made"]), info["made"])
+
+
 class Prompt(unittest.TestCase):
     def test_the_brief_and_each_range_carry_the_pace(self):
         brief = M._pacing(M._prompts()["segmentation"].replace("{TARGET_SECONDS}", f"{M.TARGET_SCENE_S:.1f}"))
@@ -215,6 +263,18 @@ class Downstream(G.Base):
         self.assertTrue(any(x["rule"] == "pace" and "cut on the narration" in x["fix"] for x in rec["repairs"]))
         self.assertTrue(all(r.get("pick") for r in rows))
         self.assertTrue(all(a["endMs"] == b["startMs"] for a, b in zip(rows, rows[1:])))
+
+    def test_the_gate_never_cuts_inside_a_sentence_after_the_opening(self):
+        rows = G.film(n=60, ms=6400, texts=False)             # one 6.4 s sentence a shot, each said in two halves
+        cues = G.cues_of(rows, halves=True)
+        G.write_job(self.job, rows)
+        before = [r["startMs"] for r in rows]
+        self.assertEqual(M._pace_fix(G.Eng(), self.job, rows, cues, {}, "second half"), "")
+        self.assertEqual(M._pace_fix(G.Eng(), self.job, rows, cues, {}, "first half"), "")
+        self.assertEqual([r["startMs"] for r in rows], before)
+        how = M._pace_fix(G.Eng(), self.job, rows, cues, {}, "0-30s")     # the opening may, for 7-8 / one over 6 s
+        self.assertIn("cut on the narration", how)
+        self.assertLessEqual(len(M._open_long(rows)), 1)
 
     def test_a_filler_in_the_opening_only_on_a_shot_it_fits(self):
         r = {"startMs": 23700, "endMs": 30420}

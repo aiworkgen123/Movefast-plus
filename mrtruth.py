@@ -675,7 +675,7 @@ QUICK_MAX = round(QUICK_SHARE + 0.05, 2)       # over 40% quick cuts the joins a
 QUICK_MIN = round(QUICK_SHARE - 0.07, 2)       # under 28% they are kept, longer neighbours joined (content decides)
 PUNCHY_WORDS = 7                     # a whole sentence this short, said in under 3 s, keeps its own quick shot
 LONG_JOIN_S = 6.5                    # a join past this length is a last resort (the long shots are about a quarter)
-GROW_PART_S = 2.5                    # the shortest part a slow stretch's sentence is split into, as a last resort
+GROW_PART_S = 2.5                    # the shortest part the opening may cut a sentence into, as a last resort
 _SENT_END = re.compile(r"[.?!…][\"'”’)\]]*$")
 _CLAUSE_END = re.compile(r"[,;:—–-][\"'”’)\]]*$")
 _PLAIN = JOINING | {"his", "her", "its", "was", "were", "is", "are", "be", "that", "this", "it", "he", "she", "they",
@@ -941,15 +941,17 @@ def _pace(rows: list, cues: list, leads: tuple = None) -> dict:
     SCENE_MAX_S (split at its best subtitle start); in the first 30 s 7-8 shots, at most one over 6 s (the others
     split, no join makes a second); every stretch of the film (_pace_bins: the owner's sections, and two-minute steps
     between) at the shot count the curve pace_target() less `leads` (PACE_LEAD_S) puts there - joined down to it, and
-    split back up to it where a stretch runs PACE_CEIL_UP_S slower; quick cuts about a third (a soft target), at
-    most SHORT_RUN_MAX in a row. The joins taken first are the ones a picture editor would make: mid-sentence before a
+    split back up to it where a stretch runs PACE_CEIL_UP_S slower, but only between sentences (a long sentence about
+    one thing stays one shot up to 8 s; only the first 30 s may cut inside one for their 7-8 shots); quick cuts about
+    a third (a soft target), at most SHORT_RUN_MAX in a row. The joins taken first are the ones a picture editor would make: mid-sentence before a
     clause before a sentence end, neighbours about the same thing, a quick fragment into its sentence; a punchy whole
     sentence keeps its own quick shot; an overlay never starts earlier than planned. Rows are only joined or split, so
     every cut stays on a subtitle start. In place, deterministic and idempotent."""
     if not rows:
-        return {"splits": 0, "grown": 0, "joins": [0, 0, 0]}
+        return {"splits": 0, "grown": 0, "joins": [0, 0, 0], "made": []}
     ms = lambda r: r["endMs"] - r["startMs"]
     quick = lambda r: ms(r) < SHORT_S * 1000
+    planned = [{"startMs": r["startMs"], "endMs": r["endMs"]} for r in rows]
     t0 = rows[0]["startMs"]
     total = rows[-1]["endMs"] - t0
     bins = _pace_bins(int(total), tuple(round(float(x), 3) for x in (leads or PACE_LEAD_S)))
@@ -1044,14 +1046,20 @@ def _pace(rows: list, cues: list, leads: tuple = None) -> dict:
             k = best[2]
             joins[_cut_kind(rows[k]["text"])] += 1
             _join(rows, k, cues)
-        # 3. a stretch PACE_CEIL_UP_S slower than its aim (Claude wrote whole sentences there, or breaking up quick
-        # runs took its count under it): its longest rows split, first into parts of at least SHORT_S, then at a
-        # sentence end (a short whole sentence is a quick shot the owner wants), then into parts of at least
-        # GROW_PART_S anywhere (the last film's minutes 1-3: one sentence of 5-6.5 s a row, no other cut), never into a
-        # new run of quick shots, up to the aimed count (never past it, so no join undoes it)
+        # 3. a stretch PACE_CEIL_UP_S slower than its aim (Claude merged whole sentences there, or breaking up quick
+        # runs took its count under it): its longest rows split ONLY BETWEEN SENTENCES (owner 2026-10-11, protect long
+        # sentences: a long sentence about one thing stays one shot up to 8 s; a stretch of them may land slower,
+        # the gate warns), first into parts of at least SHORT_S, then down to a short whole sentence (a quick shot the
+        # owner wants). The first 30 s alone may cut inside a sentence to reach their 7-8 shots (any subtitle start,
+        # parts of SHORT_S, then GROW_PART_S). Never into a new run of quick shots, up to the aimed count (never past
+        # it, so no join undoes it)
         n0, start = len(rows), counts()
-        for part_ms, kind in ((int(SHORT_S * 1000), 0), (1000, 2), (int(GROW_PART_S * 1000), 0)):
+        opening_bin = lambda j: bins[j][0] == 0 and bins[j][1] == int(open_ms) and total >= 2 * open_ms
+        for part_ms, kind, inner in ((int(SHORT_S * 1000), 2, False), (1000, 2, False), (int(SHORT_S * 1000), 0, True),
+                                     (int(GROW_PART_S * 1000), 0, True)):
             for j, (a_ms, b_ms, quota, floor, absorb_to) in enumerate(bins):
+                if inner and not opening_bin(j):
+                    continue                        # inside a sentence: the opening's 7-8 shots only
                 while start[j] < floor and counts()[j] < quota:
                     order = sorted((i for i in range(len(rows)) if bin_of(rows[i]) == j), key=lambda i: (-ms(rows[i]), i))
                     if not any(ms(rows[i]) >= 2 * part_ms and grow_at(i, j, part_ms, kind) for i in order):
@@ -1060,8 +1068,20 @@ def _pace(rows: list, cues: list, leads: tuple = None) -> dict:
             break
         grown += len(rows) - n0
     n = counts()
+    # the cuts the code made (Claude's own are kept or joined away): where, how the words before them end, and why -
+    # over 8 s, the opening's 7-8 shots and one long, or a stretch's count (between sentences only)
+    own = {r["startMs"] for r in planned}
+    made = []
+    for k in range(1, len(rows)):
+        c = rows[k]["startMs"]
+        if c in own:
+            continue
+        src = next((r for r in planned if r["startMs"] < c < r["endMs"]), None)
+        why = ("over 8 s" if src and src["endMs"] - src["startMs"] > SCENE_MAX_S * 1000 else
+               "opening" if (src["startMs"] if src else c) - t0 < open_ms else "count")
+        made.append((c, _cut_kind(rows[k - 1]["text"]), why))
     return {"splits": splits, "grown": grown, "joins": joins, "want": sum(b[2] for b in bins),
-            "floor": sum(b[3] for b in bins),
+            "floor": sum(b[3] for b in bins), "made": made,
             "bins": [[a / 1000, b / 1000, q, n[j]] for j, (a, b, q, f, g) in enumerate(bins)]}
 
 
@@ -1097,6 +1117,10 @@ def _paced(engine, rows: list, cues: list) -> list:
                + (f", {calm} more to calm a run of quick cuts)" if calm else ")"))
     engine.log(f"  pacing by position (aimed {'/'.join(f'{x:.2f}' for x in PACE_LEAD_S)}s a shot under the owner's targets "
                f"in the first minute/first half/second half): {_pace_line(rows)}")
+    inner = [(c, why) for c, kind, why in info["made"] if kind < 2]
+    if inner:                                        # cuts inside a sentence the code made (Claude's are its own)
+        engine.log(f"  pacing: {len(inner)} cut(s) inside a sentence: " + ", ".join(
+            f"{c // 60000}:{c // 1000 % 60:02d} ({why})" for c, why in inner))
     over = [x for x in d if x > SCENE_MAX_S]
     if over:
         engine.log(f"  ⚠ {len(over)} shot(s) still over {SCENE_MAX_S:.0f} s (longest {max(over):.1f}s): one subtitle "
@@ -8138,9 +8162,12 @@ def _gate_find(rows: list, ctx: dict) -> list:
     avg = sum(d) / len(d)
     # the pace by position (owner 2026-10-11): each section within its band (PACE_TOL), the first 30 s at 7-8 shots
     # with at most one over 6 s. Pacing never stops a film: a break goes to the repairs (_gate_fix), and one no repair
-    # could mend (ctx["pace_soft"]) is a warning - as a section off its band is in a read-back (the whole film's
+    # could mend (ctx["pace_soft"]: tried on this very cut, nothing left to join or cut) is a warning - as a section
+    # off its band is in a read-back (the whole film's
     # average stays a FAIL line there, as before)
-    soft = ctx.setdefault("pace_soft", set()) | {k[7:] for k in ctx.get("soft") or {} if str(k).startswith("pacing ")}
+    sig = _pace_sig(rows)
+    soft = {k for k, v in ctx.setdefault("pace_soft", {}).items() if v == sig} | \
+        {k[7:] for k in ctx.get("soft") or {} if str(k).startswith("pacing ")}
     pace = pace_sections([((r["startMs"] - rows[0]["startMs"]) / 1000, d[k]) for k, r in enumerate(rows)])
     ctx["pacing"] = pace
     if not GATE_AVG_S[0] <= avg <= GATE_AVG_S[1]:
@@ -8520,26 +8547,28 @@ def _punchy(r: dict) -> bool:
     return len(str(r.get("text") or "").split()) <= PUNCHY_WORDS and _cut_kind(r.get("text") or "") == 2
 
 
-def _split_point(rows: list, k: int, cues: list, part_ms: int = None):
+def _split_point(rows: list, k: int, cues: list, part_ms: int = None, whole: bool = False):
     """Where _split_plain cuts plain shot k: the subtitle start nearest its middle (a sentence's start first), both
-    parts at least SHORT_S (part_ms); None when there is none or the shot carries words."""
+    parts at least SHORT_S (part_ms); with `whole`, a sentence's start only. None when there is none or the shot
+    carries words."""
     x = rows[k]
     s, e = x["startMs"], x["endMs"]
     part_ms = int(SHORT_S * 1000) if part_ms is None else part_ms
-    cand = [a for a, _, _ in cues if s + part_ms <= a <= e - part_ms]
+    sentences = set(_sentence_starts(cues))
+    cand = [a for a, _, _ in cues if s + part_ms <= a <= e - part_ms and (a in sentences or not whole)]
     if not cand or not _bare(x):
         return None
-    sentences = set(_sentence_starts(cues))
     return min(cand, key=lambda a: (a not in sentences, abs(a - (s + e) / 2), a))
 
 
-def _split_plain(engine, job: Path, rows: list, k: int, cues: list, dossier: dict, part_ms: int = None) -> bool:
-    """A long plain shot k cut in two at the subtitle start nearest its middle (a sentence's start first), both parts
-    at least SHORT_S (part_ms); the new part gets an unused runner-up of its line, a stand-in or a repeat within the
-    cap, else nothing is cut."""
+def _split_plain(engine, job: Path, rows: list, k: int, cues: list, dossier: dict, part_ms: int = None,
+                 whole: bool = False) -> bool:
+    """A long plain shot k cut in two at the subtitle start nearest its middle (a sentence's start first; with
+    `whole` a sentence's start only), both parts at least SHORT_S (part_ms); the new part gets an unused runner-up of
+    its line, a stand-in or a repeat within the cap, else nothing is cut."""
     x = rows[k]
     s, e = x["startMs"], x["endMs"]
-    c = _split_point(rows, k, cues, part_ms)
+    c = _split_point(rows, k, cues, part_ms, whole)
     if c is None:
         return False
     pool = _part_pool(rows, k, c, e)
@@ -8563,13 +8592,20 @@ def _split_plain(engine, job: Path, rows: list, k: int, cues: list, dossier: dic
     return True
 
 
+def _pace_sig(rows: list) -> str:
+    """The cut as the pace repairs see it (times, and which shots are plain): a section they could not mend is a warning
+    while this stays the same, and is looked at again once another repair changed it."""
+    return _hash([(r["startMs"], r["endMs"], _bare(r), bool(r.get("pick"))) for r in rows])
+
+
 def _pace_fix(engine, job: Path, rows: list, cues: list, dossier: dict, name: str) -> str:
     """The gate's repair for a section off the owner's pace (2026-10-11), with plain shots only (no words on screen
     move): the first 30 s - over eight shots, plain neighbours joined (or a quick plain shot folded into the shot with
     words before it), never a second shot over 6 s; two or more over 6 s, the long plain ones cut at a subtitle start
     (parts of 2 s or more); under seven, the longest plain one cut. Another section: too quick, plain neighbours that
     start in it joined (quick ones and fragments first, a punchy whole sentence last); too slow, its longest plain
-    shots cut on the narration (each new part a picture of its own, _split_plain). A join or a cut that would take
+    shots cut between two sentences (never inside one: owner 2026-10-11; each new part a picture of its own,
+    _split_plain). A join or a cut that would take
     another section out of its band is not made (each is measured first), so two sections never undo each other and a
     second gate finds nothing more to do. What it did, or ""."""
     film = (rows[-1]["endMs"] - rows[0]["startMs"]) / 1000
@@ -8583,9 +8619,12 @@ def _pace_fix(engine, job: Path, rows: list, cues: list, dossier: dict, name: st
     was_ok = {k for k, x in pace_sections(cut_of(rows), film).items() if x["ok"]}
     joins, cuts, tried = 0, 0, set()
 
-    def harmless(shots):                         # no section in its band leaves it
+    avg_ok = lambda shots: GATE_AVG_S[0] <= sum(d for _, d in shots) / len(shots) <= GATE_AVG_S[1]
+    was_avg_ok = avg_ok(cut_of(rows))
+
+    def harmless(shots):                         # no section in its band leaves it, nor the whole film's average
         now = pace_sections(shots, film)
-        return all(now[k]["ok"] for k in was_ok if k in now and k != name)
+        return all(now[k]["ok"] for k in was_ok if k in now and k != name) and (avg_ok(shots) or not was_avg_ok)
 
     def joined(k):                               # the cut with rows[k] and rows[k + 1] as one shot
         shots = cut_of(rows)
@@ -8607,17 +8646,20 @@ def _pace_fix(engine, job: Path, rows: list, cues: list, dossier: dict, name: st
                 return True
         return False
 
+    whole = name != "0-30s"                      # a long sentence stays one shot (owner 2026-10-11): only the first
+                                                 # 30 s may be cut inside a sentence
+
     def cut_one(cands, part_ms=None):
         nonlocal cuts
         for k in sorted(cands, key=lambda k: (-(rows[k]["endMs"] - rows[k]["startMs"]), k)):
             tried.add(id(rows[k]))
-            c = _split_point(rows, k, cues, part_ms)
+            c = _split_point(rows, k, cues, part_ms, whole)
             if c is None:
                 continue
             shots = cut_of(rows)
             s0, d0 = shots[k]
             shots[k:k + 1] = [(s0, (c - rows[k]["startMs"]) / 1000), ((c - t0) / 1000, (rows[k]["endMs"] - c) / 1000)]
-            if harmless(shots) and _split_plain(engine, job, rows, k, cues, dossier, part_ms):
+            if harmless(shots) and _split_plain(engine, job, rows, k, cues, dossier, part_ms, whole):
                 cuts += 1
                 return True
         return False
@@ -8883,23 +8925,29 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
                                           rows[k + 1]["endMs"] - rows[k]["startMs"], k))
             _merge(rows, k)
             n += 1
-        while avg() > hi:                            # too slow: the longest plain shots cut on the narration
-            cands = [k for k, r in enumerate(rows) if _bare(r) and id(r) not in tried
-                     and r["endMs"] - r["startMs"] >= 2 * SHORT_S * 1000]
+        film_s = (rows[-1]["endMs"] - rows[0]["startMs"]) / 1000
+        while avg() > hi:                            # too slow: the longest plain shots cut on the narration, in the
+            cands = [k for k, r in enumerate(rows) if _bare(r) and id(r) not in tried   # half furthest over its pace
+                     and r["endMs"] - r["startMs"] >= 2 * SHORT_S * 1000]                # first (owner 2026-10-11)
             if not cands:
                 break
-            k = max(cands, key=lambda k: (rows[k]["endMs"] - rows[k]["startMs"], -k))
+            sec = pace_sections([((r["startMs"] - rows[0]["startMs"]) / 1000, (r["endMs"] - r["startMs"]) / 1000)
+                                 for r in rows], film_s)
+            over = lambda k: next(((x["avg"] or 0) - x["target"] for name, x in sec.items() if name.endswith("half")
+                                   and (name == "first half") == ((rows[k]["startMs"] - rows[0]["startMs"]) / 1000 < film_s / 2)),
+                                  0.0)
+            k = max(cands, key=lambda k: (round(over(k), 2), rows[k]["endMs"] - rows[k]["startMs"], -k))
             tried.add(id(rows[k]))
             n += _split_plain(engine, job, rows, k, cues, dossier)
         what = "joins of plain shots" if x["avg"] < lo else "cuts on the narration"
         if lo <= avg() <= hi:
             did(x, f"{n} {what}: {avg():.2f}s")
             _recut(engine, job, rows, cues, dossier, sync=False)
-        else:                                        # pacing never stops a film (owner 2026-10-11): a warning
-            ctx["pace_soft"].add("average")
-            if n:
-                did(x, f"{n} {what} brought it to {avg():.2f}s (still outside the band: a warning)")
-                _recut(engine, job, rows, cues, dossier, sync=False)
+        elif n:                                      # progress: looked at again next round
+            did(x, f"{n} {what} brought it to {avg():.2f}s (still outside the band)")
+            _recut(engine, job, rows, cues, dossier, sync=False)
+        else:                                        # pacing never stops a film (owner 2026-10-11): a warning while
+            ctx["pace_soft"]["average"] = _pace_sig(rows)   # the cut stays as it is
     for x in by.get("pace", []):                     # the pace by position: each section back in its band, as far
         how = _pace_fix(engine, job, rows, cues, dossier, x["section"])     # as plain shots allow (every round)
         if how:
@@ -8908,8 +8956,10 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
                              for r in rows]).get(x["section"]) or {"ok": True}
         if now["ok"]:
             did(x, how or "in its band after the other repairs")
-        elif not how:                                # nothing left to join or cut: a warning, never a stop
-            ctx["pace_soft"].add(x["section"])
+        elif how:                                    # progress: looked at again next round
+            did(x, f"{how} (still outside its band)")
+        else:                                        # nothing left to join or cut on this cut: a warning, never a
+            ctx["pace_soft"][x["section"]] = _pace_sig(rows)   # stop (tried again once anything else moves)
     for x in by.get("era", []) + by.get("ai", []):
         ks = [at(x["id"])] if x["rule"] == "era" else \
             sorted((k for k, r in enumerate(rows) if (r.get("pick") or {}).get("ai")), key=lambda k: -rows[k]["startMs"])
@@ -8993,9 +9043,12 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
         _gate_fix(engine, job, rows, dossier, cues, build, ctx, found)
     for x in [x for x in found if x["rule"] in ("average", "pace")]:   # pacing never stops a film (owner 2026-10-11)
         ctx["warnings"].append(f"pacing: {x['what']}")
-        ctx["pace_soft"].add(x.get("section") or "average")
         found.remove(x)
-    for name in sorted(ctx.get("pace_soft") or ()):  # kept in gate.json: a read-back warns, never fails, on them
+    off = [k for k, v in pace_sections([((r["startMs"] - rows[0]["startMs"]) / 1000, (r["endMs"] - r["startMs"]) / 1000)
+                                        for r in rows]).items() if not v["ok"]]
+    if not GATE_AVG_S[0] <= rows[-1]["endMs"] / 1000 / len(rows) <= GATE_AVG_S[1]:
+        off.append("average")
+    for name in off:                                 # kept in gate.json: a read-back warns, never fails, on them
         ctx.setdefault("soft", {})[f"pacing {name}"] = "outside its band after every repair plain shots allow (a warning)"
     m = ctx["measure"]
     rec = {"version": 1, "result": "STOPPED" if found else "REPAIRED" if ctx["fixed"] else "PASS",

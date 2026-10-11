@@ -116,17 +116,12 @@ def test_long_rows_split_at_a_sentence_end():
             (12000, 14900, "next line here.")]
     raw = rows_on(cues, [0, 3])
     raw[0]["overlay"] = {"text": "x", "kind": "name", "style": "fullFrame", "atMs": 8500}
-    out = copy.deepcopy(raw)                       # aimed a second a shot slower: only the 8 s rule cuts (2026-10-11:
-    m._pace(out, cues, leads=(-1.0, -1.0, -1.0))   # at the owner's own aim this 15 s film is cut in four)
+    out = paced(raw, cues)
     assert [r["startMs"] for r in out] == [0, 4000, 12000], [r["startMs"] for r in out]
     assert out[1]["split"] and out[1]["queries"] == ["concept 0", "literal 0", "mood"]
     assert out[0]["text"] == "one two three four." and out[1]["text"] == "five six seven eight nine ten."
     assert out[1]["overlay"]["atMs"] == 8500 and not out[0].get("overlay")       # the part that says it
     check_invariants(out, cues, raw)
-    at_aim = paced(raw, cues)                      # at the aim: four shots, the overlay still on the part that says it
-    assert [r["startMs"] for r in at_aim] == [0, 4000, 8000, 12000], [r["startMs"] for r in at_aim]
-    assert at_aim[2]["overlay"]["atMs"] == 8500 and not any(r.get("overlay") for r in at_aim[:2])
-    check_invariants(at_aim, cues, raw)
 
 
 def test_a_line_too_long_to_cut_is_kept_and_reported():
