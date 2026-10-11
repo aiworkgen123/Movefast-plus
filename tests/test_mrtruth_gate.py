@@ -463,6 +463,58 @@ class Words(Base):
         self.assertFalse(M._gaps(rows))
         self.assertTrue(any(r.get("filler") for r in rows))
 
+    def test_a_filler_the_fit_step_takes_back_gives_way_to_the_next_free_shot_in_the_same_round(self):
+        # impl-z (2026-10-11): on the -long film the one filler of a 32 s stretch (a P05 naming a person over a picture
+        # with none) was set and taken back in every round, the repair said done, and the film stopped after five
+        rows = film()
+        rows[29].pop("typedCaption", None)                            # 103-142 s: one filler's worth of quiet
+        found, _ = self.find(rows)
+        self.assertTrue(any(x["rule"] == "quiet" for x in found))
+        real_fit, said_no, bad = M._fit_devices, [], []
+
+        def fit(rows_, only=None, **kw):                              # the first shot it fills never takes a filler
+            for k, r in enumerate(rows_):
+                if only and id(r) in only and r.get("filler") and (not bad or bad[0] is r):
+                    bad[:1] = [r]
+                    said_no.append((id(r), r["device"]["id"]))
+                    M._fall_back(rows_, k, r["device"]["id"], "names a person over a picture with no person in it")
+            return real_fit(rows_, only=only, **kw)
+        with mock.patch.object(M, "_fit_devices", fit):
+            rec, _ = self.gate(rows)
+        self.assertTrue(said_no)
+        self.assertEqual(len(said_no), len(set(said_no)), said_no)    # never the same line on the same shot twice
+        self.assertEqual(rec["result"], "REPAIRED")
+        self.assertFalse(M._gaps(rows))
+        self.assertEqual(sum(1 for x in rec["repairs"] if x["rule"] == "quiet"), 1)       # one round did it
+
+    def test_a_quiet_stretch_with_every_filler_at_its_cap_takes_a_line_from_a_dense_stretch(self):
+        # impl-z (2026-10-11): spoken lines, P05s, running titles and P02s all at their caps, a 32 s stretch nothing
+        # could fill: a line where the film is dense gives way (no group over its cap, no new stretch over 30 s)
+        rows = film()
+        dev = lambda tid, k: dict({"id": tid, FIELD[tid]: first(k, 2)},
+                                  **{"top-title": {"line2": ""}, "P02": {"label": ""},
+                                     "P05": {"eyebrow": "", "supportLine": "", "imageLabel": ""}}.get(tid, {}))
+        for k, tid in ((2, "shadow-up"), (3, "top-title"), (4, "top-title"), (6, "P02"), (7, "top-title"),
+                       (8, "P02"), (9, "shadow-up"), (11, "P05"), (12, "P05"), (13, "P05")):
+            rows[k]["device"] = dev(tid, k)
+        rows[29].pop("typedCaption", None)                            # 103-142 s
+        for tid in ("shadow-up", "top-title", "P02", "P05"):                    # its group or its own cap is full
+            cap = M.LIBRARY[tid][4]
+            self.assertTrue(M._group_room(rows, tid) < 1 or (cap is not None and sum(
+                1 for r in rows if (r.get("device") or {}).get("id") == tid) >= cap), tid)
+        before = {g: sum(1 for r in rows if (r.get("device") or {}).get("id") in ts) for g, (ts, _, _) in M.OVERLAY_GROUPS.items()}
+        heard = copy.deepcopy(rows)                                   # the voice: the words where the film says them
+        rec, _ = self.gate(rows, words_from=heard)
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        self.assertFalse(M._gaps(rows))
+        moved = [x for x in rec["repairs"] if x["rule"] == "quiet" and "moved into the stretch" in x["fix"]]
+        self.assertEqual(len(moved), 1, rec["repairs"])
+        after = {g: sum(1 for r in rows if (r.get("device") or {}).get("id") in ts) for g, (ts, _, _) in M.OVERLAY_GROUPS.items()}
+        self.assertTrue(all(after[g] <= M._group_cap(rows, g) for g in after), after)
+        self.assertLessEqual(sum(after.values()), sum(before.values()))   # a line moved, none added
+        again, _ = self.gate(rows, words_from=heard)                  # a second gate changes nothing
+        self.assertEqual(again["result"], "PASS")
+
     def test_a_template_too_short_for_its_animation_takes_time_from_the_next_plain_shot(self):
         rows = film()
         rows[24]["endMs"] -= 1500                                     # P05 on 2.8 s: it needs 4 s

@@ -8220,13 +8220,15 @@ def _filler_order(rows: list) -> list:
     return [tl for tl in sorted(_FILLERS, key=key) if _group_room(rows, tl[0]) >= 1]
 
 
-def fill_gaps_plain(engine, rows: list, build) -> set:
+def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = None) -> set:
     """The guarantee under fill_gaps: any stretch still longer than OVERLAY_MAX_GAP_S gets a line of the narration
     of a free shot in its middle - words that are said there by definition, a phrase that reads whole (_spoken_phrase),
     in the text template whose group has the most room (spoken line, running title, editorial card; never one over its
-    cap). Such a shot is marked row["filler"]: the first to go when the gate finds too much text."""
-    added = set()
-    for a, b in _gaps(rows):
+    cap). Such a shot is marked row["filler"]: the first to go when the gate finds too much text. `skip`: (id(row),
+    template) pairs the fit step took back before (the gate's quiet repair), never tried again; `gaps`: only these
+    stretches (default: every one)."""
+    added, skip = set(), skip or set()
+    for a, b in (_gaps(rows) if gaps is None else gaps):
         need = max(1, int((b - a) / 1000 // GAP_SPACING_S))
         free = [k for k, r in enumerate(rows) if a + 4000 <= r["startMs"] < b - 4000 and k > 0
                 and not (r.get("device") or r.get("typedCaption") or r.get("section_turn"))]
@@ -8237,6 +8239,8 @@ def fill_gaps_plain(engine, rows: list, build) -> set:
                 if r.get("device") or any(id(x) in added and abs(x["startMs"] - r["startMs"]) < 8000 for x in rows):
                     continue
                 for tid, lim in _filler_order(rows):
+                    if (id(r), tid) in skip:
+                        continue
                     phrase = _spoken_phrase(r["text"], lim, rows[k - 1]["text"] if k else "",
                                             rows[k + 1]["text"] if k + 1 < len(rows) else "")
                     if not phrase or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid):
@@ -8975,6 +8979,7 @@ def _report(engine, sc_list: list) -> None:
 # reason. Nothing is checked after render: the after-render check() call and make_video's Gemini look are gone from
 # this channel, and `python mrtruth.py check <job>` reads gate.json and the code rules back off plan.json, read-only ──
 GATE_ROUNDS = 5                         # check -> repair rounds; what is still broken after them stops the run
+GATE_FILL_TRIES = 4                     # a quiet stretch: free shots tried in one round when the fit step takes one back
 GATE_AVG_S = (4.0, 4.6)                 # the film's average shot (the reference films 4.1-4.6 s; the aim 4.3)
 GATE_SAME_S, GATE_SAME_SHARE = 60.0, 0.6    # the same words on screen twice within 60 s (shots 180/184 of the pod film)
 # the card check (owner 2026-10-08: a stand-in may carry a label, only the wrong thing is refused - each label is checked
@@ -9934,6 +9939,84 @@ def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
     return ""
 
 
+def _gap_room(rows: list, build, refused: set) -> list:
+    """A quiet stretch no filler can take because every filler template is at its cap (impl-z, 2026-10-11: on the -long
+    film the merged cut's 379-411 s had one free shot whose P05 named a person over a picture without one, and the
+    spoken lines, P05s, running titles and P02s were all at their caps): a line of a full filler group gives way where
+    the film is dense - fillers first, then the one whose neighbours' words are closest, never one whose going opens a
+    stretch over OVERLAY_MAX_GAP_S - and the stretch takes a line of its own narration in its place (fill_gaps_plain),
+    so no group goes over its cap. Tried for at most GATE_FILL_TRIES donors; a donor whose move places nothing is put
+    back as it was. [(id of the row that took the line, what moved)]."""
+    out = []
+    for a, b in _gaps(rows):
+        full = [tid for tid, _ in _FILLERS if _group_room(rows, tid) < 1 or not _can_count(rows, tid)]
+        if len(full) < len(_FILLERS) - sum(1 for tid, _ in _FILLERS if not LIBRARY[tid][0]):
+            continue                                 # a template with room was refused for another reason: not this
+        base = {g for g in _gaps(rows) if g != (a, b)}
+
+        def opens(k):                                # would taking shot k's words away open a new long stretch?
+            dev = rows[k]["device"]
+            rows[k]["device"] = None
+            try:
+                return not {g for g in _gaps(rows) if g != (a, b)} <= base
+            finally:
+                rows[k]["device"] = dev
+        marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
+        room = lambda k: min((y for y in marks if y > _on_screen_ms(rows[k])), default=marks[-1]) - \
+            max((y for y in marks if y < _on_screen_ms(rows[k])), default=0)
+        donors = sorted((k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") in full and _overlay_words(r)
+                         and not a <= _on_screen_ms(r) <= b and not opens(k)),
+                        key=lambda k: (not rows[k].get("filler"), room(k), k))
+        for k in donors[:GATE_FILL_TRIES]:
+            keep, n = copy.deepcopy(rows[k]), len(DEV_DROPS)
+            tid, words = keep["device"]["id"], _shown(keep)
+            _drop_words(rows, k, "device", "made room for words in a quiet stretch")
+            added = fill_gaps_plain(_QUIET, rows, build, skip=refused, gaps=[(a, b)])
+            if added:
+                tids, m = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}, len(DEV_DROPS)
+                _fit_devices(rows, only=added)
+                del DEV_DROPS[m:]
+                back = {id(r) for r in rows if id(r) in added and not r.get("device")}
+                refused |= {(i, tids[i]) for i in back if i in tids}
+                added -= back
+            if added:
+                r = next(r for r in rows if id(r) in added)
+                out.append((id(r), f"{tid} '{words}' at {keep['startMs'] / 1000:.0f}s gave way to "
+                                   f"{r['device']['id']} '{_shown(r)}' at {r['startMs'] / 1000:.0f}s"))
+                del DEV_DROPS[n:]
+                break
+            for r in rows:                           # nothing placed: the donor as it was, the stretch as it was
+                if r.get("filler") and not r.get("device"):
+                    r.pop("filler", None)
+            rows[k].clear()
+            rows[k].update(keep)
+            del DEV_DROPS[n:]
+    return out
+
+
+def _shown(r: dict) -> str:
+    """The words a text template shows, as set (for the gate's record)."""
+    dev = r.get("device") or {}
+    return str(next((dev[f] for f in ("line", "line1", "headline", "label", "mainLine") if dev.get(f)),
+                    " ".join(_overlay_words(r))))[:40]
+
+
+class _Quiet:
+    """fill_gaps_plain's engine inside _gap_room: its count line is said by the gate's own record."""
+    @staticmethod
+    def log(s):
+        pass
+
+
+_QUIET = _Quiet()
+
+
+def _can_count(rows: list, tid: str) -> bool:
+    """Template `tid` under its own per-film cap (LIBRARY), as _can counts it."""
+    cap = LIBRARY[tid][4]
+    return cap is None or sum(1 for r in rows if (r.get("device") or {}).get("id") == tid) < cap
+
+
 def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, ctx: dict, found: list) -> None:
     """One round of repairs, picture-free ones first (critique 2026-10-10: the scarce pictures last): the opening, broken
     words, two blocks in a frame, the same words twice, labels the card check refused, the groups, words off their
@@ -10110,17 +10193,37 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
     if moved or len(ctx["fixed"]) > n_fixed:         # the words changed: the film is re-cut around them, and the
         _recut(engine, job, rows, cues, dossier)     # steps below work on the new cut
     if by.get("quiet") and _gaps(rows):
-        added = fill_gaps_plain(engine, rows, build) if build else set()
-        if added:
+        # the fit step may take a filler back (a name over a picture with no person in it, a strip too bright): the
+        # next free shot of the stretch is tried in the same round, and the one taken back is never tried again (impl-z,
+        # 2026-10-11: the same refused P05 was set and taken back in every round, the repair said done, and the film
+        # stopped on a 32 s stretch after five rounds)
+        refused, kept = ctx.setdefault("fill_refused", set()), set()
+        for _ in range(GATE_FILL_TRIES):
+            added = fill_gaps_plain(engine, rows, build, skip=refused) if build else set()
+            if not added:
+                break
+            tids = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}
             n = len(DEV_DROPS)
             _fit_devices(rows, only=added)
             del DEV_DROPS[n:]
+            back = {id(r) for r in rows if id(r) in added and not r.get("device")}
+            for r in rows:
+                if id(r) in back:
+                    r.pop("filler", None)
+            refused |= {(i, tids[i]) for i in back if i in tids}
+            kept |= added - back
+            if not back or not _gaps(rows):
+                break
+        moved_in = _gap_room(rows, build, refused) if build and _gaps(rows) else []
+        if kept or moved_in:
             _recut(engine, job, rows, cues, dossier)
-            for x in by["quiet"]:
+        for x in by["quiet"]:
+            if kept:
                 did(x, "a line of the narration set in the stretch")
-        else:
-            for x in by["quiet"]:
-                stuck(x, "no free shot in the stretch has a phrase that reads whole")
+            if moved_in:
+                did(x, "a line moved into the stretch (every filler at its cap): " + "; ".join(w for _, w in moved_in))
+            if not kept and not moved_in:
+                stuck(x, "no free shot in the stretch has a phrase that reads whole and fits its picture")
     if by.get("long") or by.get("quick run"):
         for r in rows:
             if r.get("hold") and not _hold_ok(rows, r):
