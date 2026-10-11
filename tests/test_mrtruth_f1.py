@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -347,3 +348,12 @@ class Chapters(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CreditGone(unittest.TestCase):
+    def test_a_402_stops_at_once(self):
+        e = types.SimpleNamespace(GEMINI_PICKS={"calls": 50, "fallback": 1, "why": {"HTTP 402": 1}}, lines=[])
+        e.log = e.lines.append
+        with self.assertRaises(M.PlanningStopped) as c:
+            M._judge_guard(e, before=True)
+        self.assertIn("prepaid credit", str(c.exception))

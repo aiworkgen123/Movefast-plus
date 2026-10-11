@@ -891,6 +891,9 @@ def _judge_guard(engine, before: bool = False) -> None:
         _stop(engine, f"Mr Truth stopped: the picture judge gave no answer {failed} times in {asks} calls")
     # a short Gemini spell early in a film is tolerated (2026-10-11: 10 in a minute stopped a film 9 minutes in, then
     # Gemini answered again): 20 Claude looks (about $0.60) or 10% of the checks, whichever is more
+    if (g.get("why") or {}).get("HTTP 402"):     # prepaid credit gone (2026-10-11): no wait or Claude look helps
+        _stop(engine, "Mr Truth stopped: Gemini's prepaid credit is used up (HTTP 402) - top it up in AI Studio "
+                      "(https://ai.studio/projects) and run again; the picture checks made so far are saved")
     if claude > max(20, 0.10 * max(1, int(g.get("calls", 0)))):
         why = ", ".join(f"{k} {v}" for k, v in sorted((g.get("why") or {}).items(), key=lambda kv: -kv[1]))
         _stop(engine, f"Mr Truth stopped: Gemini failed {claude} times and the pictures went to Claude instead "
