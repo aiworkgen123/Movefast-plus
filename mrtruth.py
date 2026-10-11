@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 import unicodedata
-from collections import deque
+from collections import Counter, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from html.parser import HTMLParser
 from pathlib import Path
@@ -1274,6 +1274,7 @@ OVERLAY_GROUPS = {                      # group: (templates, minimum a film, max
     "editorial card": (["P02"], 0, 2),
     "year": (["P12", "P14"], 0, 3),
     "multi-picture": (["P22", "P19", "gallery-strip"], 0, 2),
+    "source page": (["highlight-page"], 0, 1),      # its own step (highlight_pages), capped by _hl_cap (owner 2026-10-11)
 }
 TEMPLATE_SPECS = """- corner-label: a place or institution label, top right. headline = the name (<= 18 chars), kicker = where/when (<= 14).
 - P04: a lower-left label naming who or what is on screen. headline = the name (<= 19), kicker = role or detail (<= 35).
@@ -1345,7 +1346,8 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
     placed_now = sum(1 for r in rows if r.get("device") and r["device"]["id"] != "photo-pop")
     extra = max(0, want_total - placed_now)
     short = [f"   - {g}: {', '.join(ts)} (has {count(g)}, wants at least {lo}, at most {hi})"
-             for g, (ts, lo, hi) in OVERLAY_GROUPS.items() if count(g) < hi and any(LIBRARY[t][0] for t in ts)]
+             for g, (ts, lo, hi) in OVERLAY_GROUPS.items() if count(g) < hi and any(LIBRARY[t][0] for t in ts)
+             and g != HL_GROUP]                                   # the highlighted page is placed by its own step
     taken = lambda r: r.get("device") is not None
     shots = "\n".join(f"{i}\t{r['startMs'] / 1000:.1f}\t" + ("[TAKEN] " if taken(r) else "") + r["text"]
                        for i, r in enumerate(rows))
@@ -3742,6 +3744,9 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
 
     def first_rounds(i):
         r, home, sp = rows[i], home_of(rows[i]), plan[i]
+        if _covered(r):                              # a page covers the frame: nothing searched, nothing judged, not saved
+            return {"v": PICK_V, "film": film_key, "text": r["text"], "cands": [], "round": None, "tried": [],
+                    "stand_in": "", "stand_look": "", "first": "covered", "r2": False, "complete": True, "covered": True}
         state = None if force else _load(home / "pick.json")
         if (state and state.get("text") == r["text"] and state.get("v") == PICK_V and state.get("film") == film_key
                 and state.get("complete", True) and all(Path(c["photo"]).exists() for c in state["cands"])):
@@ -3866,7 +3871,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             list(ex.map(recrop, want))
 
     # round 3: a different anchor for every shot still without a photo (one Claude call for all of them)
-    failing = [i for i, st in enumerate(states) if not st.get("round")
+    failing = [i for i, st in enumerate(states) if not st.get("round") and not _covered(rows[i])
                and (_names_thing(rows[i]) or not _contextual(rows[i], st["cands"]))]
     if failing:
         cache = job / "mrtruth" / "anchors.json"
@@ -3928,7 +3933,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     # skipped this put a wrong person or an off-topic picture on 23 of 55 shots, audit 2026-10-08)
     def borrow(i):
         r, home, st = rows[i], home_of(rows[i]), states[i]
-        if passes(r, st["cands"]) or _contextual(r, st["cands"]):
+        if _covered(r) or passes(r, st["cands"]) or _contextual(r, st["cands"]):
             return []
         pool, have = [], {c["photo"] for c in st["cands"]}
         for k in (i - 1, i + 1, i - 2, i + 2):
@@ -5013,6 +5018,715 @@ def typed_captions(engine, job: Path, rows: list, script: str, force: bool = Fal
                    f"{' / '.join(lines)}")
 
 
+# ── 5b'. the highlighted page (renderer HighlightPage.tsx, devices.ts a2), owner ruling 2026-10-11 ────────────────────
+# "Does not need to be mandatory, but it's very good animation. Try very hard to fit it on every video. Only reject when
+# it doesn't actually fit ... It can be used 2-3 times per 10 minutes of film, when it fits." Where: the narration
+# references, quotes, describes or attributes information to a person, document, book, article, report, study, record,
+# file, testimony, statement or other written/recorded source; the page highlights the specific phrase, claim, name or
+# finding being discussed inside a natural surrounding passage that gives it context (2026-09-10 it was mandatory and
+# placed by hand only; the automatic step was never built). The page: a light page, three paragraphs of 32 px Noto Sans
+# in a 1280 px column, one bold phrase in each; a yellow wipe goes behind the phrases one after another from the shot's
+# first frame, 13 frames a highlighted word, then 48 frames held, while the page zooms 1.0 -> 1.3 (highlightPageClock.ts).
+# One Claude call a film chooses the moments and writes the pages (mrtruth/highlights.json); the code checks every word
+# and times each page so its MAIN phrase - the one the narrator is discussing, in his own words - is highlighted while he
+# says it. A page covers the frame: its shot is searched for no picture and is not a showing (_covered).
+HL_PER_10MIN = max(0.0, float(os.environ.get("MRTRUTH_HIGHLIGHT_PER_10MIN", "3")))   # 11 min -> 3, 20 min -> 6; 0 = off
+HL_GAP_S = 90.0                          # two pages at least this far apart, start to start
+HL_MIN_S = LIBRARY["highlight-page"][2]  # a page's shot: 5-8 s
+HL_FRAMES_WORD, HL_FRAMES_HOLD = 13, 48  # the renderer's clock: frames a highlighted word, then frames held
+HL_V = 1                                 # what the page step is told: a change asks again
+HL_ASK_MAX = 40                          # candidate moments one call reads (the strongest)
+HL_EARLY_MS = 300                        # a page opens at most this much before the line it was cut on
+HL_PARA = (90, 150)                      # letters a paragraph Claude is asked for: two lines, as in the reference
+HL_LINES = (3, 7)                        # lines a paragraph and a page at most: the zoomed page stays inside the frame
+HL_PHRASE_WORDS = 8                      # words a highlighted phrase at most
+HL_BEFORE_MAX = 8                        # highlighted words before the main one at most (3.5 s of them)
+HL_YIELDS = ("photo-pop", "P08", "framed-card")   # templates that give their shot to a page (the source group's own job)
+HL_GROUP = "source page"
+HL = {}                                  # this film's page step: found, asked, placed, refused, dropped (gate.json, log)
+_HL_CH = (" !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+          "’‘“”—–…éèàçöüñ")
+# advance widths (em) of the renderer's own Noto Sans Regular and Bold (bodyFaceData.ts, bodyFaceBoldData.ts, read off
+# their hmtx tables), so a page is measured the way the browser will set it
+_HL_EM = dict(zip(_HL_CH, [
+    0.26, 0.269, 0.408, 0.646, 0.572, 0.831, 0.732, 0.225, 0.3, 0.3, 0.551, 0.572, 0.268, 0.322, 0.268, 0.372, 0.572,
+    0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.268, 0.268, 0.572, 0.572, 0.572, 0.434, 0.899, 0.639,
+    0.65, 0.632, 0.73, 0.556, 0.519, 0.728, 0.741, 0.339, 0.273, 0.619, 0.524, 0.907, 0.76, 0.781, 0.605, 0.781, 0.622,
+    0.549, 0.556, 0.731, 0.6, 0.93, 0.586, 0.566, 0.572, 0.329, 0.372, 0.329, 0.572, 0.444, 0.281, 0.561, 0.615, 0.48,
+    0.615, 0.564, 0.344, 0.615, 0.618, 0.258, 0.258, 0.534, 0.258, 0.935, 0.618, 0.605, 0.615, 0.615, 0.413, 0.479, 0.361,
+    0.618, 0.508, 0.786, 0.529, 0.51, 0.47, 0.38, 0.551, 0.38, 0.572, 0.175, 0.175, 0.359, 0.359, 1, 0.5, 0.791, 0.564,
+    0.564, 0.561, 0.48, 0.605, 0.618, 0.618]))
+_HL_EM_B = dict(zip(_HL_CH, [
+    0.26, 0.282, 0.479, 0.646, 0.572, 0.902, 0.75, 0.266, 0.339, 0.339, 0.542, 0.572, 0.285, 0.32, 0.281, 0.415, 0.572,
+    0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.572, 0.281, 0.285, 0.572, 0.572, 0.572, 0.477, 0.898, 0.692,
+    0.665, 0.642, 0.732, 0.56, 0.549, 0.724, 0.765, 0.389, 0.331, 0.664, 0.559, 0.943, 0.813, 0.791, 0.621, 0.791, 0.656,
+    0.551, 0.577, 0.756, 0.65, 0.967, 0.67, 0.626, 0.579, 0.331, 0.415, 0.331, 0.572, 0.411, 0.365, 0.599, 0.632, 0.516,
+    0.632, 0.597, 0.387, 0.632, 0.65, 0.299, 0.298, 0.62, 0.298, 0.975, 0.65, 0.625, 0.632, 0.632, 0.447, 0.502, 0.434,
+    0.65, 0.571, 0.856, 0.578, 0.571, 0.493, 0.394, 0.551, 0.394, 0.572, 0.217, 0.217, 0.445, 0.445, 1, 0.5, 0.855, 0.597,
+    0.597, 0.599, 0.516, 0.625, 0.65, 0.65]))
+# devices.ts deviceText: no link, path, file name or line break may reach a frame (a numeric date is not a path)
+_HL_LOCATOR = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\bdata:|\bfile:|\.\.[/\\]|\\|//|/[\w.-]+/|\.(?:png|jpe?g|webp|gif|svg|"
+                         r"bmp|tiff?|mp4|mov|webm|mkv|mp3|wav|flac|cube|3dl|lut|json|ya?ml|env|js|mjs|cjs|ts|sh|bat|ps1|exe)\b)",
+                         re.I)
+_HL_DATE = re.compile(r"\b(?:[12]\d|3[01]|0?[1-9])/(?:[12]\d|3[01]|0?[1-9])/(?:\d{4}|\d{2})\b")
+_HL_MARKUP = re.compile(r"[\r\n\t<>{}|`#]|\*\*|__|^\s*[-*•]\s")
+# the moments a page may go on: a line that cites, quotes or describes a written or recorded source (a cheap first look;
+# Claude chooses among them). Quotation marks, a verb of saying or writing, a document of any kind
+_HL_SAYS = re.compile(r"\b(said|says|saying|wrote|writes|written|writing|reads?|stated?|states|describ(?:ed|es|ing)|named|"
+                      r"called|recorded|noted|reported|mention(?:ed|s)?|claim(?:ed|s)?|argu(?:ed|es)|testif(?:y|ied|ies)|"
+                      r"declar(?:ed|es)|explain(?:ed|s)|quot(?:ed|es?)|specifie[ds]|insist(?:ed|s)|admitt?(?:ed|s)|told|tells|"
+                      r"according to|in (?:his|her|their) (?:own )?words)\b", re.I)
+_HL_SOURCE = re.compile(r"\b(letters?|diar(?:y|ies)|journals?|books?|manuscripts?|texts?|passages?|pages?|folios?|files?|"
+                        r"documents?|reports?|stud(?:y|ies)|articles?|records?|archives?|notes?|notations?|annotations?|"
+                        r"catalogue|register|ledger|inscriptions?|codex|codices|scrolls?|verses?|transcripts?|minutes|"
+                        r"memo(?:randum|s)?|cables?|telegrams?|interviews?|papers?|thesis|reviews?|testimony|statements?|"
+                        r"accounts?|phrase|wording|words?)\b", re.I)
+
+HL_PROMPT = """You are writing the HIGHLIGHTED PAGES of a photo documentary (channel: Mr Truth, dark and mysterious). A
+highlighted page fills the screen for one shot: a light page of three short paragraphs, as if from the very source the
+narrator is citing at that moment - the record, the letter, the book, the notes, the report, the testimony - with one
+phrase of each paragraph highlighted in yellow, one after another, while the narrator speaks.
+
+WHERE (the channel owner's ruling): where the narration references, quotes, describes or attributes information to a
+person, document, book, article, report, study, record, file, testimony, statement or other written or recorded source.
+The page highlights the specific phrase, claim, name or finding being discussed, inside a natural surrounding passage
+that gives it context. The owner wants it in every film where it fits, and only where it does.
+
+THE CANDIDATE MOMENTS below were found by the system: the shot that cites, the start and length (seconds) of its
+lines, the words spoken there with the second (from that start) each part is heard at, and the lines before and after
+them. The page is cut to fit inside those lines. Choose at most
+{most}: the clearest source-reference moments, spread across the film, never two within {gap:.0f} s of each other.
+Choose at least one when any moment fits. A moment does NOT fit when nothing written or recorded is cited, quoted or
+described there, or no phrase the narrator says there is worth highlighting.
+
+FOR EACH PAGE
+- "shot": its number. "source": what the page is, in a few words ("the access record's notation").
+- "paragraphs": exactly 3, natural prose written the way a page of THAT source would read (an archive record, a letter,
+  private notes, a report, a book), each {lo}-{hi} characters, plain text: no quotation marks around a whole paragraph,
+  no markdown, no line breaks, no links, no slashes, never "file:" or "data:" (a word then a colon reads as a link).
+- Use ONLY what the script and the film's notes below say: restate or paraphrase them; never invent a name, date,
+  number or event they do not state, never contradict them. Where the script quotes the source, use its exact words.
+- "phrases": exactly 3, one per paragraph, each COPIED EXACTLY from its own paragraph (the same letters, case and
+  punctuation), 1-5 words (the main one up to 8), a phrase that reads whole.
+- "main": the number (1-3) of the paragraph whose phrase is the MAIN one: the specific phrase, claim, name or finding the
+  narrator is discussing there, in his own words - a run of words he actually says in those lines, verbatim.
+  The highlights play from the moment the page appears, paragraph 1's first, about 0.43 s a highlighted word, and the
+  main one must play while he says it. The page appears as he starts on the source (the citing words): main 1 when the
+  main phrase comes right away; else main 2 (or 3), with about 2 highlighted words before it for every second between
+  the citing words and the main phrase (at most 8 before it).
+  All the highlighted words of a page together: 6 to 10 (the reference page has 3 + 4 + 3).
+- "why": a few words.
+For every candidate you do not choose, give its shot number and why, in a few words.
+
+THE FILM'S NOTES (from the research)
+{notes}
+
+<script>
+{script}
+</script>
+
+THE CANDIDATE MOMENTS
+{moments}
+
+Return {{"pages": [{{"shot": n, "source": "...", "paragraphs": ["...", "...", "..."], "phrases": ["...", "...", "..."],
+"main": 2, "why": "..."}}], "rejected": [{{"shot": n, "why": "..."}}]}}"""
+
+
+def _hl_cap(rows: list) -> int:
+    """Pages a film may carry (owner 2026-10-11: 2-3 per 10 minutes, and one in every film where a moment fits):
+    HL_PER_10MIN a ten minutes of film, rounded half up, at least 1, at most the template's own cap (6); 0 with
+    MRTRUTH_HIGHLIGHT_PER_10MIN=0."""
+    if HL_PER_10MIN <= 0 or not rows:
+        return 0
+    return min(LIBRARY["highlight-page"][4], max(1, int(HL_PER_10MIN * rows[-1]["endMs"] / 600000 + 0.5)))
+
+
+def _hl_main(dev: dict) -> int:
+    """The index of a page's main phrase (the one the narrator is discussing; 0 for a page that does not say)."""
+    m, n = (dev or {}).get("main"), len((dev or {}).get("phrases") or [])
+    return m if isinstance(m, int) and not isinstance(m, bool) and 0 <= m < n else 0
+
+
+def _hl_phrase(dev: dict) -> str:
+    phs = (dev or {}).get("phrases") or []
+    return str(phs[_hl_main(dev)]) if phs else ""
+
+
+def _hl_nwords(phrase) -> int:
+    """Words in a highlighted phrase, as the renderer counts them (highlightPageWordCount: split on white space)."""
+    return len(str(phrase or "").split())
+
+
+def _hl_frames(dev: dict) -> int:
+    """Frames a page needs to finish (highlightPageFrameCount): 13 a highlighted word, then the 48-frame hold."""
+    return HL_FRAMES_WORD * sum(_hl_nwords(p) for p in (dev or {}).get("phrases") or []) + HL_FRAMES_HOLD
+
+
+def _hl_pre_ms(dev: dict) -> int:
+    """How long after a page opens its main phrase's highlight starts: the highlights before it, 13 frames a word."""
+    return int(round(HL_FRAMES_WORD * sum(_hl_nwords(p) for p in ((dev or {}).get("phrases") or [])[:_hl_main(dev)])
+                     * 1000 / FPS))
+
+
+def _hl_need_ms(dev: dict) -> int:
+    """How long a page's shot must last: every highlight and the hold (a 4-frame margin), at least HL_MIN_S, + 0.3 s."""
+    return int(1000 * (max(HL_MIN_S, (_hl_frames(dev) + 4) / FPS) + 0.3))
+
+
+def _build_frames(dev: dict) -> int:
+    """Frames a template needs to finish: its registry's buildEndFrames; a page's from its own words."""
+    dev = dev or {}
+    return _hl_frames(dev) if dev.get("id") == "highlight-page" else BUILD_FRAMES.get(dev.get("id"), 0)
+
+
+def _hl_toks(text: str) -> list:
+    """The words of a line or phrase as the voice's words are kept (_heard): lower case, letters, digits, apostrophes."""
+    return [w for w in (re.sub(r"[^a-z0-9']", "", t.lower().replace("’", "'"))
+                        for t in re.split(r"[\s—–]+", str(text or ""))) if w]
+
+
+def _hl_align(p: list, t: list):
+    """The best near-verbatim run of the words p inside the words t: (edits, first word, end) of a word alignment free at
+    both ends of t, where a word the same by stem (_stem_same) is the same word; None when either is empty."""
+    if not p or not t:
+        return None
+    prev = [(0, j) for j in range(len(t) + 1)]
+    for i in range(1, len(p) + 1):
+        cur = [(i, 0)]
+        for j in range(1, len(t) + 1):
+            cur.append(min((prev[j - 1][0] + (0 if _stem_same(t[j - 1], p[i - 1]) else 1), prev[j - 1][1]),
+                           (prev[j][0] + 1, prev[j][1]), (cur[j - 1][0] + 1, cur[j - 1][1])))
+        prev = cur
+    return min((prev[j][0], prev[j][1], j) for j in range(1, len(t) + 1))
+
+
+def _hl_close(edits: int, n: int) -> bool:
+    """Near verbatim: one word in four may differ (none in a phrase of four words or fewer)."""
+    return edits <= (n - 1) // 4
+
+
+def _hl_heard_in(phrase: str, text: str) -> bool:
+    """`phrase` is a run of words the narrator says in `text`, near verbatim (_hl_close)."""
+    p = _hl_toks(phrase)
+    a = _hl_align(p, _hl_toks(text))
+    return bool(a) and _hl_close(a[0], len(p))
+
+
+def _hl_said_at(dev: dict, heard: list, lo: int, hi: int):
+    """The ms the narrator starts saying a page's main phrase, looked for inside [lo, hi] word by word (the voice's
+    words, _heard); None when it is not said there near verbatim."""
+    p = _hl_toks(_hl_phrase(dev))
+    win = [(ms, w) for ms, w in heard if lo <= ms <= hi and w]
+    a = _hl_align(p, [w for _, w in win])
+    if not a or not _hl_close(a[0], len(p)) or a[1] >= len(win):
+        return None
+    return int(win[a[1]][0])
+
+
+def _hl_lines(text: str, phrase: str) -> int:
+    """Lines a paragraph wraps to on the page: 32 px Noto Sans (the renderer's own widths) in the 1280 px column, the
+    bold phrase one unbreakable run with whatever is glued to it (HighlightPage.tsx sets the mark nowrap); 99 when one
+    run alone is wider than the column."""
+    at, n = text.find(phrase) if phrase else -1, len(phrase or "")
+    wide = lambda a, b: 32 * sum((_HL_EM_B if at <= i < at + n else _HL_EM).get(text[i], 0.62) for i in range(a, b))
+    boxes = []
+    for m in re.finditer(r"\S+", text):
+        inside = at >= 0 and m.start() < at + n and m.end() > at
+        if inside and boxes and boxes[-1][2]:
+            boxes[-1] = (boxes[-1][0], m.end(), True)
+        else:
+            boxes.append((m.start(), m.end(), inside))
+    lines, used, space = 1, 0.0, 32 * _HL_EM[" "]
+    for a, b, _ in boxes:
+        w = wide(a, b)
+        if w > 1280:
+            return 99
+        if used and used + space + w > 1280:
+            lines, used = lines + 1, w
+        else:
+            used = w if not used else used + space + w
+    return lines
+
+
+def _hl_plain(s: str) -> bool:
+    return bool(s.strip()) and not _HL_MARKUP.search(s) and not _HL_LOCATOR.search(_HL_DATE.sub("", s))
+
+
+def _hl_problem(dev: dict, said: str = None) -> str:
+    """'' when a page can be drawn as written, else what is wrong: three paragraphs and three phrases of plain text (no
+    link, path, markup or line break: devices.ts deviceText), each phrase an exact substring of its own paragraph
+    (HighlightPage.tsx marks its first occurrence and a phrase that is not there draws no mark), within the schema's
+    400 and 64 letters and HL_PHRASE_WORDS words, the paragraphs within the page's lines (HL_LINES); with `said` (the
+    words spoken on its shot), the main phrase a run of them, near verbatim."""
+    pars, phs = (dev or {}).get("paragraphs"), (dev or {}).get("phrases")
+    if not (isinstance(pars, list) and isinstance(phs, list) and len(pars) == 3 and len(phs) == 3
+            and all(isinstance(x, str) and x.strip() for x in pars + phs)):
+        return "not three paragraphs and three phrases"
+    if "main" in dev and dev["main"] != _hl_main(dev):
+        return "its main phrase is not paragraph 1, 2 or 3"
+    lines = 0
+    for n, (p, ph) in enumerate(zip(pars, phs), 1):
+        if len(p) > 400 or len(ph) > 64:
+            return f"paragraph {n} or its phrase is longer than 400 / 64 letters"
+        if not (_hl_plain(p) and _hl_plain(ph)):
+            return f"paragraph {n} is not plain text"
+        if ph not in p:
+            return f"phrase {n} '{ph[:40]}' is not in its paragraph"
+        if _hl_nwords(ph) > HL_PHRASE_WORDS:
+            return f"phrase {n} has more than {HL_PHRASE_WORDS} words"
+        k = _hl_lines(p, ph)
+        if k > HL_LINES[0]:
+            return f"paragraph {n} runs to {k if k < 99 else 'too many'} lines (at most {HL_LINES[0]})"
+        lines += k
+    if lines > HL_LINES[1]:
+        return f"the page runs to {lines} lines (at most {HL_LINES[1]})"
+    if said is not None and not _hl_heard_in(phs[_hl_main(dev)], said):
+        return f"the main phrase '{phs[_hl_main(dev)][:40]}' is not said on its shot"
+    return ""
+
+
+def _hl_good(s: str) -> bool:
+    """A highlighted run that reads whole: it does not open on a preposition or a joining word ("the" may open it) and
+    it ends on a noun or a name (_nounish) - never on "this", "his", a possessive or a verb in -ed."""
+    ws = [w for w in (t.strip("\"'“”‘’()[],.;:!?…—–-") for t in str(s or "").split()) if w]
+    if not ws:
+        return False
+    first, last = ws[0].lower(), ws[-1]
+    return (first not in (JOINING | _PREPOSITIONS) - {"the", "a", "an"} and _nounish(last, len(ws) > 1)
+            and not last.lower().endswith(("'s", "’s")) and last.lower() not in _NP_OPEN)
+
+
+def _hl_resize(par: str, phrase: str, n: int) -> str:
+    """`phrase` grown or cut to n words of its own paragraph around where it stands: whole words, no punctuation at its
+    edges, at most 64 letters, never ending on a joining word; a run that reads whole (_hl_good) first, then the one
+    sharing most words with it, then the one starting nearest it. '' when none."""
+    at = par.find(phrase) if phrase else -1
+    if at < 0 or n < 1:
+        return ""
+    toks = [(m.start(), m.end()) for m in re.finditer(r"\S+", par)]
+    own = [k for k, (a, b) in enumerate(toks) if a < at + len(phrase) and b > at]
+    if not own:
+        return ""
+    best, key = "", None
+    for i in range(max(0, own[0] - n + 1), min(len(toks) - n, own[-1]) + 1):
+        s = par[toks[i][0]:toks[i + n - 1][1]].strip("\"'“”‘’()[],.;:!?…—–- ")
+        last = (s.split() or [""])[-1].lower().strip("\"'“”‘’()[],.;:!?…—–-")
+        if not s or len(s) > 64 or _hl_nwords(s) != n or last in JOINING or last in _PHRASE_NO_END:
+            continue
+        k = (not _hl_good(s), -len(set(range(i, i + n)) & set(own)), abs(i - own[0]), i)
+        if key is None or k < key:
+            best, key = s, k
+    return best
+
+
+def _hl_tidy(dev: dict) -> dict:
+    """Claude's page brought within the page's limits before the checks: "file:" or "data:" (an archive's label, which
+    the renderer would refuse as a link) set with a dash; a phrase over HL_PHRASE_WORDS words or 64 letters cut - the
+    main one from its end (it still opens on the word the narrator starts it with), another to the five words of its
+    paragraph around it (_hl_resize). A phrase that is not in its paragraph is left for the checks."""
+    phs, pars = dev.get("phrases"), dev.get("paragraphs")
+    if not (isinstance(phs, list) and isinstance(pars, list) and len(phs) == len(pars) == 3
+            and all(isinstance(x, str) for x in phs + pars)):
+        return dev
+    colon = lambda s: re.sub(r"\b(file|data):", r"\1 —", s, flags=re.I)   # an archive label, not a link (deviceText)
+    phs, pars, m = [colon(x) for x in phs], [colon(x) for x in pars], _hl_main(dev)
+    dev = dict(dev, paragraphs=pars)
+    for i, (ph, par) in enumerate(zip(phs, pars)):
+        if not isinstance(ph, str) or not isinstance(par, str) or ph not in par or \
+                (_hl_nwords(ph) <= HL_PHRASE_WORDS and len(ph) <= 64):
+            continue
+        if i == m:
+            ws = ph.split()[:HL_PHRASE_WORDS]
+            while ws and (len(" ".join(ws)) > 64 or len(ws) > 3 and ws[-1].lower().strip(",.;:!?") in JOINING | _PHRASE_NO_END):
+                ws.pop()
+            cut = " ".join(ws).rstrip(",.;:!?—–- ")
+        else:
+            cut = _hl_resize(par, ph, 5) or _hl_resize(par, ph, 3)
+        phs[i] = cut if cut and cut in par else ph
+    return dict(dev, phrases=phs)
+
+
+def _hl_shorten(dev: dict, frames: int, main: bool = True):
+    """A page cut until it finishes within `frames`: the phrases after the main one first, the last first, then (main)
+    the main one from its end (it still opens on the same word; at least three words) - the timing of the main
+    highlight never moves. None when it cannot be."""
+    m, pars, phs = _hl_main(dev), list(dev["paragraphs"]), list(dev["phrases"])
+    new = dict(dev, phrases=phs)
+    for i in [x for x in (2, 1) if x > m] + ([m] if main else []):
+        floor = 1 if i != m else min(3, _hl_nwords(phs[m]))
+        while _hl_frames(new) > frames and _hl_nwords(phs[i]) > floor:
+            if i == m:
+                ws = phs[m].split()[:_hl_nwords(phs[m]) - 1]
+                while len(ws) > floor and ws[-1].lower().strip(",.;:!?") in JOINING | _PHRASE_NO_END:
+                    ws.pop()
+                cut = " ".join(ws).rstrip(",.;:!?—–- ")
+            else:
+                cut = next((s for k in range(_hl_nwords(phs[i]) - 1, 0, -1) for s in [_hl_resize(pars[i], phs[i], k)] if s), "")
+            if not cut or cut not in pars[i]:
+                break
+            phs[i] = cut
+        if _hl_frames(new) <= frames:
+            return new
+    return new if _hl_frames(new) <= frames else None
+
+
+def _hl_before(dev: dict) -> list:
+    """Every way to set the phrases before the main one (whole words of their own paragraphs, 1-HL_PHRASE_WORDS words
+    each): [(words before the main phrase, the phrases, how far from Claude's own)] - a phrase as Claude wrote it costs
+    nothing, another one word more for each word it differs by, and two more when it does not read whole; (the sum,
+    the most one phrase costs), so a cut is spread over the phrases rather than taken from one."""
+    m, pars, phs = _hl_main(dev), dev["paragraphs"], dev["phrases"]
+    opts = []
+    for i in range(m):
+        n0 = _hl_nwords(phs[i])
+        o = {n: (s, 0 if s == phs[i] else 1 + abs(n - n0) + 2 * (not _hl_good(s)))
+             for n in range(1, HL_PHRASE_WORDS + 1) for s in [phs[i] if n == n0 else _hl_resize(pars[i], phs[i], n)] if s}
+        if not o:
+            return []
+        opts.append(o)
+    out = [(0, [], (0, 0))]
+    for o in opts:
+        out = [(b + n, c + [s], (p[0] + q, max(p[1], q))) for b, c, p in out for n, (s, q) in o.items()]
+    return out
+
+
+def _hl_fit(dev: dict, since: int, h: int, until: int):
+    """A page timed on its moment (owner 2026-10-11: the main phrase is highlighted while the narrator says it). The
+    highlights run one after another from the page's first frame, so the phrases before the main one set when its
+    highlight starts: they stay as Claude wrote them when that fits, else they are grown or cut (whole words of their
+    own paragraphs, runs that read whole first: _hl_before) - the fewest changes, then the most words - so the main
+    highlight starts SYNC_LEAD_MS before its first word is heard (h) with the page opening no earlier than `since` (its
+    window's start less HL_EARLY_MS, or where the overlay before it is done), at most HL_BEFORE_MAX words before it.
+    Then it is cut (_hl_shorten) until everything is done by `until` (the next overlay's start) and within SCENE_MAX_S.
+    (device, opens at ms) or None: the main phrase comes too soon for the highlights before it, or nothing fits."""
+    per = HL_FRAMES_WORD * 1000 / FPS
+    want = min(HL_BEFORE_MAX, int((h - SYNC_LEAD_MS - since) // per))
+    m = _hl_main(dev)
+    fit = sorted(((b, c, p) for b, c, p in _hl_before(dev) if b <= want), key=lambda bcp: (bcp[2], -bcp[0]))
+    for main in (False, True):                   # the main phrase whole first; cut from its end only when nothing else fits
+        for b, c, _ in fit:
+            new = dict(dev, phrases=c + list(dev["phrases"][m:]))
+            opens = h - SYNC_LEAD_MS - _hl_pre_ms(new)
+            room = min(until - opens, int(SCENE_MAX_S * 1000))
+            while new is not None and _hl_need_ms(new) > room:
+                new = _hl_shorten(new, _hl_frames(new) - 1, main)
+            if new is not None:
+                return new, int(opens)
+    return None
+
+
+def _hl_retime(dev: dict, s: int, h: int, frames: int):
+    """A page whose cut is set (the gate): the phrases before the main one re-set so its highlight starts on its words
+    from the shot's own start s - within SYNC_TOLERANCE_MS early or SYNC_MAX_LATE_MS late - and the page still done in
+    `frames`. The new device, or None."""
+    best = None
+    for b, c, p in _hl_before(dev):
+        new = dict(dev, phrases=c + list(dev["phrases"][_hl_main(dev):]))
+        off = s + _hl_pre_ms(new) - (h - SYNC_LEAD_MS)
+        if -SYNC_TOLERANCE_MS <= off <= SYNC_MAX_LATE_MS and _hl_frames(new) <= frames:
+            key = (p, abs(off), -b)
+            if best is None or key < best[0]:
+                best = (key, new)
+    return best[1] if best else None
+
+
+def _hl_free(r: dict) -> bool:
+    """A shot a page may take: no typed caption, chapter or planned hold, no template but one that gives way."""
+    return (not (r.get("typedCaption") or r.get("section_turn") or r.get("hold"))
+            and ((r.get("device") or {}).get("id") in (None,) + HL_YIELDS))
+
+
+def _hl_pinned(r: dict) -> bool:
+    """A shot sync pins to its words (a caption, a chapter, a template that says something): the room around a page."""
+    return bool(r.get("typedCaption") or r.get("section_turn") or (r.get("device") and _overlay_words(r)))
+
+
+def _hl_score(text: str) -> int:
+    """How plainly a line cites a source: quotation marks 3, a verb of saying or writing 2, each kind of document 1."""
+    return (3 * bool(re.search(r"[\"“”]", text)) + 2 * bool(_HL_SAYS.search(text))
+            + min(2, len({m.lower().rstrip("s") for m in _HL_SOURCE.findall(text)})))
+
+
+def _hl_candidates(rows: list, cues: list) -> tuple:
+    """The moments a page may go on (a cheap look: _hl_score), each with its window of lines (the page is cut inside it
+    once its words are known, _hl_take): the citing shot, the one before it when its sentence opens there, the one
+    after it when its sentence runs on there (a quote is often said on the next line: "a notation that read, in" /
+    "translation, 'material not suitable...'"), and the plain shots after while it is under HL_MIN_S - free shots
+    only (_hl_free), at most 2 x SCENE_MAX_S; `since`/`until`: where the page may open and must be done (the window's
+    start less HL_EARLY_MS, the overlay before it done; the next overlay). ([candidate], [(row, why)] - the moments
+    that cannot carry a page, and why)."""
+    out, refused = [], []
+    for k, r in enumerate(rows):
+        sc = _hl_score(r["text"])
+        if not sc:
+            continue
+        tid = (r.get("device") or {}).get("id")
+        why = ("the opening title's shot" if k == 0 else "a chapter opens there" if r.get("section_turn") else
+               "a typed caption sits there" if r.get("typedCaption") else "a planned long hold" if r.get("hold") else
+               f"{tid} sits there" if not _hl_free(r) else
+               "a year is said there (its date card's shot)" if _year_in(r["text"]) else "")
+        if why:
+            refused.append((r, why))
+            continue
+        i = j = k
+        ok = lambda x: _hl_free(x) and not _year_in(x["text"])
+        if k > 1 and ok(rows[k - 1]) and _cut_kind(rows[k - 1]["text"]) < 2:
+            i = k - 1
+        if k + 1 < len(rows) and ok(rows[k + 1]) and _cut_kind(r["text"]) < 2:
+            j = k + 1
+        while (rows[j]["endMs"] - rows[i]["startMs"] < HL_MIN_S * 1000 + 300 and j + 1 < len(rows) and ok(rows[j + 1])
+               and rows[j + 1]["endMs"] - rows[i]["startMs"] <= 2 * SCENE_MAX_S * 1000):
+            j += 1
+        s0 = rows[i]["startMs"]
+        before = next((x for x in reversed(rows[:i]) if _hl_pinned(x)), None)
+        since = max(s0 - HL_EARLY_MS, before["startMs"] + _need_ms(before) if before else 0)
+        until = next((x["startMs"] for x in rows[j + 1:] if _hl_pinned(x)), rows[-1]["endMs"])
+        if until - max(s0, since) < HL_MIN_S * 1000 + 300:
+            refused.append((r, f"too short ({(until - max(s0, since)) / 1000:.1f}s before the next words on screen; "
+                               f"a page needs {HL_MIN_S + 0.3:.1f}s)"))
+            continue
+        said = [(max(0, a - s0), t) for a, b, t in cues if s0 - 300 <= a < rows[j]["endMs"] - 300]
+        line = (" ".join(f"[{a / 1000:.1f}] {t}" for a, t in said) if said else
+                " ".join(x["text"] for x in rows[i:j + 1]))
+        twin = next((c for c in out if (c["i"], c["j"]) == (i, j)), None)
+        if twin is not None:                         # one span, one moment: the shot that cites more plainly speaks
+            if sc > twin["score"]:
+                refused.append((rows[twin["k"]], f"the same lines as another moment ({r['startMs'] / 1000:.1f}s)"))
+                twin.update(k=k, score=sc, taking=tid or "")
+            else:
+                refused.append((r, f"the same lines as another moment ({rows[twin['k']]['startMs'] / 1000:.1f}s)"))
+            continue
+        out.append({"k": k, "i": i, "j": j, "s0": s0, "since": since, "until": until, "score": sc, "line": line,
+                    "text": " ".join(x["text"] for x in rows[i:j + 1]), "taking": tid or ""})
+    return out, refused
+
+
+def _hl_take(rows: list, i: int, j: int, dev: dict, opens: int, cues: list) -> dict:
+    """The window's shots i..j re-cut around the page, before the pictures (so nothing is searched twice): the page's
+    shot runs from the subtitle start where it opens (opens, or the line just before it) to the first one after
+    everything is done (_hl_need_ms); what the window says before and after it, a second or more, stays a plain shot
+    of its own with the brief of the shot it came from (its own picture search); a shorter rest joins the page. A
+    template that gave way is remembered (hl_was) for a drop to restore."""
+    s, e = rows[i]["startMs"], rows[j]["endMs"]
+    starts = sorted({int(a) for a, b, t in cues if s < a < e})
+    a = max((x for x in starts if x <= opens + 250), default=s)
+    b = min((x for x in starts if x >= opens + _hl_need_ms(dev) and x > a), default=e)
+    a = s if a - s < SYNC_MIN_SHOT_MS else a
+    b = e if e - b < SYNC_MIN_SHOT_MS else b
+    said = lambda lo, hi: " ".join(t for c0, c1, t in cues if lo <= c0 < hi)
+    part = lambda src, lo, hi: dict({k_: v for k_, v in src.items() if k_ not in ("device", "overlay", "hl_was")},
+                                    startMs=lo, endMs=hi, device=None, text=said(lo, hi) or src["text"])
+    head = part(rows[i], s, a) if a > s else None
+    tail = part(rows[j], b, e) if b < e else None
+    was = next(((x.get("device") or {}).get("id") for x in rows[i:j + 1] if x.get("device")), None)
+    r = dict(rows[i], startMs=a, endMs=b, text=said(a, b) or " ".join(x["text"] for x in rows[i:j + 1]), device=dev,
+             entities=list(dict.fromkeys(e_ for x in rows[i:j + 1] for e_ in x.get("entities") or [])))
+    r.pop("overlay", None)                   # a page shows no beat overlay
+    if was:
+        r["hl_was"] = was
+    rows[i:j + 1] = [x for x in (head, r, tail) if x is not None]
+    return r
+
+
+def _hl_drop(rows: list, k: int, why: str) -> None:
+    """A page goes (the gate, sync): a wordless photo-pop it took the shot from comes back, else the shot is a plain
+    photograph - its picture comes from the reuse guard on the re-cut (a shot without a picture, as a split part)."""
+    r = rows[k]
+    was = r.pop("hl_was", None)
+    DEV_DROPS.append((k, "highlight-page", why))
+    HL.setdefault("dropped", []).append({"at_s": round(r["startMs"] / 1000, 1), "main": _hl_phrase(r.get("device")),
+                                         "why": why})
+    r["device"] = {"id": was} if was == "photo-pop" else None
+
+
+def _hl_notes(dossier: dict) -> str:
+    d = dossier or {}
+    ents = [f"- {e.get('name', '')} ({e.get('kind', '')}): {e.get('note', '')}" for e in (d.get("keyEntities") or [])[:14]
+            if isinstance(e, dict)]
+    return "\n".join([f"topic: {d.get('topic', '')}", f"period: {d.get('period', '')}", f"setting: {d.get('setting', '')}"]
+                     + (["people, places and documents:"] + ents if ents else []))
+
+
+def _hl_answer(got) -> tuple:
+    """([page], [(shot, why)]) out of Claude's answer, the words with their white space made single (as the renderer
+    trims them); a page that is not three and three, or has no shot, is kept for the checks to refuse by name."""
+    pages, rej = [], []
+    for p in (got or {}).get("pages") or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            shot = int(p.get("shot"))
+            main = int(p.get("main") or 1) - 1
+        except (TypeError, ValueError):
+            continue
+        clean = lambda xs: [re.sub(r"\s+", " ", str(x)).strip() for x in xs] if isinstance(xs, list) else xs
+        pages.append({"shot": shot, "source": str(p.get("source") or "")[:80], "why": str(p.get("why") or "")[:120],
+                      "dev": {"id": "highlight-page", "paragraphs": clean(p.get("paragraphs")),
+                              "phrases": clean(p.get("phrases")), "main": main}})
+    for x in (got or {}).get("rejected") or []:
+        try:
+            rej.append((int(x.get("shot")), str(x.get("why") or "")[:100]))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return pages, rej
+
+
+def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, cues: list, force: bool = False) -> dict:
+    """The highlighted pages (owner 2026-10-11), after the typed captions and before the pictures: the page covers the
+    frame, so its shot is searched for no picture and the shots it joins are never searched at all.
+      1. the moments: every shot whose line cites, quotes or describes a written or recorded source (_hl_candidates),
+         less those that cannot carry a page (the opening, a chapter, a typed caption, a template that does not give
+         way, a year's card, too little room before the next words on screen) - each refusal logged with its reason;
+      2. one Claude call (HL_PROMPT, cached in mrtruth/highlights.json under its prompt, so a changed script asks again;
+         an answer that fails, or has a page the checks refuse, is never cached) chooses at most _hl_cap of them, at
+         least HL_GAP_S apart, and writes each page: three paragraphs in the register of the source, grounded in the
+         script and the dossier only, three phrases each an exact substring of its paragraph, the main one the narrator's
+         own words on that shot;
+      3. the code checks every page (_hl_problem), finds when its main phrase is heard (_hl_said_at) and times it
+         (_hl_fit: the main highlight on its words, the page done before the next words on screen, 5-8 s); a page
+         that fails drops that moment only, never the film;
+      4. the page's shot is cut inside its window of lines (_hl_take: what is said there before and after it stays a
+         plain shot of its own); spacing (HL_GAP_S), the cap and one page beside another are checked first.
+    Writes HL (gate.json reports it) and returns it."""
+    HL.clear()
+    HL.update(cap=_hl_cap(rows), found=0, candidates=0, placed=[], rejected=[], dropped=[], claude="", answer=[])
+    if not HL["cap"] or len(rows) < 3:
+        engine.log("  highlighted pages: off" + (" (MRTRUTH_HIGHLIGHT_PER_10MIN=0)" if HL_PER_10MIN <= 0 else ""))
+        return HL
+    cands, refused = _hl_candidates(rows, cues)
+    HL["found"], HL["candidates"] = len(cands) + len(refused), len(cands)
+    no = lambda r, why, by="code": HL["rejected"].append({"at_s": round(r["startMs"] / 1000, 1), "line": r["text"][:90],
+                                                          "why": why, "by": by})
+    for r, why in refused:
+        no(r, why)
+    if not cands:
+        engine.log(f"  highlighted pages: none ({HL['found']} moment(s) cite a source, none can carry a page)")
+        return HL
+    ask = sorted(sorted(cands, key=lambda c: (-c["score"], c["s0"]))[:HL_ASK_MAX], key=lambda c: c["s0"])
+    for c in cands:
+        if c not in ask:
+            no(rows[c["k"]], "a weaker moment (not asked)")
+    moments = "\n".join(f"shot {c['k']} ({c['s0'] / 1000:.1f}s, {(rows[c['j']]['endMs'] - c['s0']) / 1000:.1f}s"
+                        + (f", now {c['taking']} - it gives way" if c["taking"] else "") + f"): {c['line']}\n"
+                        f"   before: {rows[c['i'] - 1]['text'] if c['i'] else ''}\n"
+                        f"   after: {rows[c['j'] + 1]['text'] if c['j'] + 1 < len(rows) else ''}" for c in ask)
+    prompt = HL_PROMPT.format(most=HL["cap"], gap=HL_GAP_S, lo=HL_PARA[0], hi=HL_PARA[1], notes=_hl_notes(dossier),
+                              script=script, moments=moments)
+    out = job / "mrtruth" / "highlights.json"
+    key = _hash([HL_V, prompt])
+    got = None if force else _load(out)
+    fresh = not (isinstance(got, dict) and got.get("key") == key and isinstance(got.get("answer"), dict))
+    if fresh:
+        engine.log(f"Mr Truth: highlighted pages - {len(ask)} moment(s) that cite a source, Claude chooses and writes "
+                   f"at most {HL['cap']}...")
+        try:
+            got = {"key": key, "answer": _ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL)}
+        except RuntimeError as e:
+            engine.log(f"  highlighted pages: {e} - none this run (asked again next run)")
+            HL["claude"] = "failed"
+            for c in ask:
+                no(rows[c["k"]], "Claude did not answer")
+            return HL
+    HL["claude"] = "asked" if fresh else "cached"
+    pages, rej = _hl_answer(got["answer"])
+    by_k = {c["k"]: c for c in ask}
+    heard = _heard(job, cues)
+    chosen, bad_text = [], False
+    for p in pages:
+        c = by_k.get(p["shot"])
+        if c is None:
+            continue
+        p["dev"] = _hl_tidy(p["dev"])
+        bad, main = _hl_problem(p["dev"]), _hl_phrase(p["dev"])
+        if not bad and not _hl_heard_in(main, c["text"]):     # said on a moment beside it: the page goes there (as sync
+            c = next((x for x in cands if abs(x["s0"] - c["s0"]) <= 10000 and _hl_heard_in(main, x["text"])), c)   # re-seats
+            bad = "" if _hl_heard_in(main, c["text"]) else f"the main phrase '{main[:40]}' is not said on its shot"
+        r, p["seat"] = rows[c["k"]], c["k"]
+        HL["answer"].append({"shot": p["shot"], "seat": c["k"], "at_s": round(c["s0"] / 1000, 1), "source": p["source"],
+                             "main": _hl_phrase(p["dev"]), "why": p["why"], "refused": bad})
+        if bad:
+            bad_text = True
+            no(r, f"Claude's page refused: {bad}", "check")
+            continue
+        h = _hl_said_at(p["dev"], heard, c["s0"] - 300, rows[c["j"]]["endMs"])
+        fit = _hl_fit(p["dev"], c["since"], h, c["until"]) if h is not None else None
+        if h is None:
+            no(r, f"the main phrase '{_hl_phrase(p['dev'])[:40]}' is not heard on its shot", "check")
+        elif fit is None:
+            no(r, f"no timing puts '{_hl_phrase(p['dev'])[:40]}' on its words and the page in its room", "check")
+        else:
+            chosen.append(dict(p, c=c, dev=fit[0], opens=fit[1], h=h))
+    kept = []
+    for p in sorted(chosen, key=lambda p: p["opens"]):
+        r = rows[p["c"]["k"]]
+        near = next((q for q in kept if abs(q["opens"] - p["opens"]) < HL_GAP_S * 1000), None)
+        if near is not None:
+            no(r, f"within {HL_GAP_S:.0f}s of the page at {near['opens'] / 1000:.0f}s", "check")
+        elif any(not (p["c"]["j"] + 1 < q["c"]["i"] or q["c"]["j"] + 1 < p["c"]["i"]) for q in kept):
+            no(r, "beside another page", "check")
+        elif len(kept) >= HL["cap"]:
+            no(r, f"over the film's {HL['cap']}", "check")
+        else:
+            kept.append(p)
+    took = {p["shot"] for p in pages} | {p.get("seat") for p in pages}
+    for k_, why in rej:
+        if k_ in by_k and k_ not in took:
+            no(rows[k_], f"not chosen: {why or 'no reason given'}", "claude")
+    for c in ask:
+        if c["k"] not in took and not any(k_ == c["k"] for k_, _ in rej):
+            no(rows[c["k"]], "not chosen (no reason given)", "claude")
+    if fresh and not bad_text:                       # a page the checks refused is asked again next run
+        _dump(out, got)
+    elif fresh:                                      # kept for the owner to read, never read back
+        _dump(job / "mrtruth" / "highlights_refused.json", dict(got, refused=[a for a in HL["answer"] if a["refused"]]))
+    for p in sorted(kept, key=lambda p: -p["c"]["i"]):       # last first, so the earlier shots keep their numbers
+        r = _hl_take(rows, p["c"]["i"], p["c"]["j"], p["dev"], p["opens"], cues)
+        HL["placed"].append({"at_s": round(p["opens"] / 1000, 1), "line_at_s": round(r["startMs"] / 1000, 1),
+                             "shot_s": round((r["endMs"] - r["startMs"]) / 1000, 1), "source": p["source"],
+                             "main": _hl_phrase(p["dev"]), "main_heard_s": round(p["h"] / 1000, 2),
+                             "highlight_starts_s": round((p["opens"] + _hl_pre_ms(p["dev"])) / 1000, 2),
+                             "frames": _hl_frames(p["dev"]), "paragraphs": p["dev"]["paragraphs"],
+                             "phrases": p["dev"]["phrases"], "took": r.get("hl_was", "")})
+        engine.log(f"      highlighted page at {p['opens'] / 1000:.1f}s ({p['source'] or 'the source'}): "
+                   f"'{_hl_phrase(p['dev'])}' highlighted as it is said ({p['h'] / 1000:.1f}s)"
+                   + (f" - {r['hl_was']} gives way" if r.get("hl_was") else ""))
+    HL["placed"].sort(key=lambda x: x["at_s"])
+    engine.log(f"  highlighted pages: {len(kept)} placed of at most {HL['cap']} ({HL['found']} moment(s) cite a source, "
+               f"{len(ask)} asked, Claude {HL['claude']}; {len(HL['rejected'])} refused: {_hl_reasons(HL['rejected'])})")
+    return HL
+
+
+def _hl_report(rows: list, heard: list) -> dict:
+    """The page step for gate.json and the log: each page on screen (where, how long, its main phrase, how far its
+    highlight starts from its words, its words), the film's cap, and what was found, refused and dropped (HL)."""
+    pages = []
+    for r in rows:
+        dev = r.get("device") or {}
+        if dev.get("id") != "highlight-page":
+            continue
+        h = _hl_said_at(dev, heard, r["startMs"] - 1500, r["endMs"])
+        pages.append({"at_s": round(r["startMs"] / 1000, 1), "shot_s": round((r["endMs"] - r["startMs"]) / 1000, 2),
+                      "main": _hl_phrase(dev), "frames": _hl_frames(dev),
+                      "offset_s": None if h is None else round((r["startMs"] + _hl_pre_ms(dev) - h + SYNC_LEAD_MS) / 1000, 2),
+                      "paragraphs": dev.get("paragraphs"), "phrases": dev.get("phrases"), "main_n": _hl_main(dev) + 1})
+    return {"on_screen": len(pages), "cap": _hl_cap(rows), "found": HL.get("found", 0), "asked": HL.get("candidates", 0),
+            "claude": HL.get("claude", ""), "pages": pages, "placed": HL.get("placed", []),
+            "rejected": HL.get("rejected", []), "dropped": HL.get("dropped", [])}
+
+
+def _hl_reasons(rejected: list, most: int = 5) -> str:
+    """The refusals grouped for the log: '4 not chosen by Claude, 3 a typed caption sits there, ...'."""
+    def kind(x):
+        w = str(x.get("why") or "")
+        if x.get("by") == "claude":
+            return "not chosen by Claude"
+        if w.startswith("Claude's page refused"):
+            return "Claude's page refused by the checks"
+        return re.sub(r"\s*\(.*$|\s+\d.*$|:.*$", "", re.sub(r"^\S+ sits there", "a template sits there", w)) or "?"
+    n = Counter(kind(x) for x in rejected)
+    return ", ".join(f"{v} {k}" for k, v in n.most_common(most)) + (", ..." if len(n) > most else "") if n else "none"
+
+
 # ── 5c. every overlay lands on the word it shows (owner 2026-10-09: cards were seconds early) ─────────────────────
 SYNC_LEAD_MS = 150          # the overlay starts this much before its first word is heard
 SYNC_TOLERANCE_MS = 400     # closer than this is left alone
@@ -5023,6 +5737,8 @@ _SYNC_STOP = JOINING | {"his", "her", "its", "was", "were", "is", "are", "be", "
 
 def _overlay_words(r: dict) -> list:
     dev, tc = r.get("device") or {}, r.get("typedCaption") or {}
+    if dev.get("id") == "highlight-page":           # its passage is context: what the narrator says is its main phrase
+        dev = {"id": "highlight-page", "line": _hl_phrase(dev)}
     text = " ".join([str(v) for k, v in dev.items() if k != "id" and isinstance(v, str)]
                     + [str(x) for v in dev.values() if isinstance(v, list) for x in v if isinstance(x, str)]
                     + list(tc.get("lines") or []))
@@ -5068,7 +5784,8 @@ def _spoken_at(words: list, heard: list, lo: int, hi: int):
 SYNC_MAX_LATE_MS = 350      # an overlay crowded by the one before may start this much after its word, no more (was
                             # 1.5 s; owner 2026-10-10: ON its words, within half a second as the viewer sees it - a
                             # caption types 0.27 s into its shot, so 0.35 s late is 0.47 s after the word)
-_SYNC_RANK = {"P03": 9, "chapter-plate": 8, "typed caption": 7, "corner-label": 5, "P04": 5, "P17": 5, "P12": 4}
+_SYNC_RANK = {"P03": 9, "chapter-plate": 8, "typed caption": 7, "highlight-page": 6, "corner-label": 5, "P04": 5, "P17": 5,
+              "P12": 4}
 # the capped layout (owner 2026-10-10: no shot over SCENE_MAX_S anywhere, cuts on the narration, a second sync changes
 # nothing; the pod's 11-min film had five shots of 8-12.4 s, all made here, and 179 of 206 cuts off the narration)
 SYNC_SNAP_MS = 700          # a plain cut the layout moved goes to the nearest subtitle start this close
@@ -5081,7 +5798,26 @@ def _need_ms(r: dict) -> int:
     if r.get("typedCaption"):
         return int(1000 * _tc_need_s(r["typedCaption"]["lines"]))
     tid = (r.get("device") or {}).get("id")
+    if tid == "highlight-page":                     # every highlight and the hold, at least HL_MIN_S (5-8 s)
+        return _hl_need_ms(r["device"])
     return int(1000 * _need_s(tid)) if tid in LIBRARY else SYNC_MIN_SHOT_MS
+
+
+def _said_at(r: dict, heard: list, lo: int, hi: int, own: tuple = None):
+    """When an overlay's words are heard inside [lo, hi]: a page's main phrase word by word (_hl_said_at), inside its
+    own line first (`own`: a short phrase may be said again nearby), any other overlay's words as a group (_spoken_at)."""
+    dev = r.get("device") or {}
+    if dev.get("id") == "highlight-page" and not r.get("typedCaption"):
+        at = _hl_said_at(dev, heard, own[0] - SYNC_TOLERANCE_MS, own[1]) if own else None
+        return at if at is not None else _hl_said_at(dev, heard, lo, hi)
+    return _spoken_at(_overlay_words(r), heard, lo, hi)
+
+
+def _lead_ms(r: dict) -> int:
+    """How long before its words an overlay's shot opens: SYNC_LEAD_MS; a page's also the highlights before its main
+    phrase (they run from its first frame, 13 frames a word), so the main one is highlighted as it is said."""
+    dev = r.get("device") or {}
+    return SYNC_LEAD_MS + (_hl_pre_ms(dev) if dev.get("id") == "highlight-page" else 0)
 
 
 def _cap_ms(r: dict) -> int:
@@ -5199,7 +5935,7 @@ def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
         if not t or k == 0 or r.get("_seated") or r.get("section_turn") or t in ("P03", "chapter-plate"):
             continue
         s0, e0 = r["_said"]
-        at = _spoken_at(_overlay_words(r), heard, s0 - 12000, e0 + 12000)
+        at = _said_at(r, heard, s0 - 12000, e0 + 12000, (s0, e0))
         if at is None or s0 - SYNC_TOLERANCE_MS <= at < e0:
             continue
         j = next((j for j in range(max(1, k - 2), min(len(rows), k + 3))
@@ -5276,7 +6012,10 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
 
     def drop(r, why):
         engine.log(f"      {tid(r)} at {r['startMs'] / 1000:.1f}s dropped: {why}")
-        for key in ("typedCaption", "section_turn", "companions", "type_shade"):
+        if tid(r) == "highlight-page":
+            HL.setdefault("dropped", []).append({"at_s": round(r["startMs"] / 1000, 1), "main": _hl_phrase(r["device"]),
+                                                 "why": f"sync: {why}"})
+        for key in ("typedCaption", "section_turn", "companions", "type_shade", "hl_was"):
             r.pop(key, None)
         r["device"] = None
 
@@ -5303,11 +6042,11 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
                 continue
             anchors.append([r, min(near, key=lambda s: (abs(s - s0), s)) if near else s0])
         else:
-            at = _spoken_at(_overlay_words(r), heard, s0 - 12000, e0 + 12000)
+            at = _said_at(r, heard, s0 - 12000, e0 + 12000, (s0, e0))
             if at is None:     # words the narrator does not say anywhere near: never on screen out of step with the voice
                 drop(r, "its words are not said near it")
                 continue
-            anchors.append([r, max(0, at - SYNC_LEAD_MS)])
+            anchors.append([r, max(0, at - _lead_ms(r))])        # a page: its main phrase highlighted as it is said
     chapters = sum(1 for r, _ in anchors if tid(r) == "chapter-plate")
     kept, late, again, shifted = [], 0, 0, 0
     for r, t in anchors:                             # crowding, in film order; a pair is settled the same way each time
@@ -5322,9 +6061,9 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
                 t, late = free, late + 1
                 break
             if not chap:                                              # its words again, later in its own line
-                at = _spoken_at(_overlay_words(r), heard, free + SYNC_LEAD_MS, max(r["_said"][1], free + SYNC_LEAD_MS))
+                at = _said_at(r, heard, free + _lead_ms(r), max(r["_said"][1], free + _lead_ms(r)))
                 if at is not None:
-                    t, again = at - SYNC_LEAD_MS, again + 1
+                    t, again = at - _lead_ms(r), again + 1
                     break
             if r.get("typedCaption") and tid(p) == "chapter-plate":  # the chapter steps back onto the shot of
                 k = next(j for j, x in enumerate(rows) if x is p)       # an earlier sentence
@@ -6154,7 +6893,9 @@ _FILLERS = (("shadow-up", 32), ("top-title", 21), ("P02", 46), ("P05", 25))
 
 def _group_cap(rows: list, g: str) -> int:
     """A group's cap for this film: its cap a film of 3 minutes, scaled to the film's length the way fill_gaps lets it
-    grow (3 a group for 3 minutes, 11 for 11)."""
+    grow (3 a group for 3 minutes, 11 for 11). The highlighted page's: _hl_cap (2-3 per 10 minutes, owner 2026-10-11)."""
+    if g == HL_GROUP:
+        return _hl_cap(rows)
     return math.ceil(OVERLAY_GROUPS[g][2] * max(1.0, rows[-1]["endMs"] / 60000 / 3) - 1e-6)
 
 
@@ -6678,6 +7419,8 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     took("more overlays")
     typed_captions(engine, job, rows, script, force)
     took("typed captions")
+    highlight_pages(engine, job, rows, script, dossier, _cues(engine, srt), force)   # owner 2026-10-11
+    took("highlighted pages")
     cap0 = getattr(engine, "AI_IMAGE_CAP", None)
     try:                                             # the film's AI budget lasts until its last picture decision (C2)
         _pictures_and_cut(engine, job, srt, rows, dossier, build, force, took, title)
@@ -6779,8 +7522,8 @@ CARD_CHECK = (os.environ.get("MRTRUTH_CARD_CHECK") or "on").strip().lower() != "
 CARD_BATCH = int(os.environ.get("MRTRUTH_CARD_BATCH", "12"))   # labelled pictures one call looks at
 CARD_MAX = int(os.environ.get("MRTRUTH_CARD_MAX", "60"))       # pictures a film's card check may send (11 min: ~6-12)
 CARD_MEDIA = "HIGH"                     # a label is read against a sharp picture (1280 px), like a drawn stand-in
-GATE_RULES = ("opening", "text", "double text", "same words", "label", "groups", "words", "too short", "quiet", "long",
-              "quick run", "average", "era", "ai", "reuse", "no picture")
+GATE_RULES = ("opening", "text", "double text", "same words", "label", "groups", "words", "page", "too short", "quiet",
+              "long", "quick run", "average", "era", "ai", "reuse", "no picture")
 GATE = {}                               # this film's gate: counts for gate.json and the log (reset by gate())
 # what a stop asks to change (C9: everything before the gate is saved, so a re-run stops in the same place)
 _GATE_HINT = {"opening": "the film's title or the dossier's first section must fit the opening card (26 letters, two lines)",
@@ -6788,7 +7531,8 @@ _GATE_HINT = {"opening": "the film's title or the dossier's first section must f
               "reuse": "more pictures for the film, or MRTRUTH_REUSE_PER_MIN", "ai": "MRTRUTH_AI_PER_MIN",
               "average": "MRTRUTH_PACE_AIM", "quick run": "MRTRUTH_PACE_AIM", "long": "MRTRUTH_PACE_AIM",
               "era": "a picture of the shot's own time (the stored answers found something later)",
-              "text": "the template's words in the overlay plan", "no picture": "more pictures for the film"}
+              "text": "the template's words in the overlay plan", "no picture": "more pictures for the film",
+              "page": "the highlighted page's words (mrtruth/highlights.json), or MRTRUTH_HIGHLIGHT_PER_10MIN=0"}
 CARD_RULES = """You check the LABELS of a documentary before it is drawn. Each numbered picture is one shot with a label
 set over it that tells the viewer what the picture shows. Answer ONE question about EACH picture on its own: does the
 picture show what its label names? Never compare the pictures.
@@ -6871,7 +7615,8 @@ def _texts(rows: list) -> list:
     for k, r in enumerate(rows):
         dev = r.get("device") or {}
         if dev and _overlay_words({"device": dev}):
-            out.append((k, "device", dev["id"], _dev_text(dev), r["startMs"]))
+            out.append((k, "device", dev["id"], _hl_phrase(dev) if dev["id"] == "highlight-page" else _dev_text(dev),
+                        r["startMs"]))
         if r.get("typedCaption"):
             out.append((k, "caption", "typed caption", " / ".join(r["typedCaption"].get("lines") or []), _on_screen_ms(r)))
         if r.get("overlay") and not dev and r.get("pick") and str(r["overlay"].get("text") or "").strip():
@@ -7002,9 +7747,10 @@ def _gate_find(rows: list, ctx: dict) -> list:
             else:
                 for f, why, fix in _field_problems(rows, k, ctx):
                     add("text", k, f"{tid} {f} {why}", field=f, fix=fix)
-                if tid in BUILD_FRAMES and round(r["endMs"] * FPS / 1000) - round(r["startMs"] * FPS / 1000) < BUILD_FRAMES[tid]:
+                if tid in BUILD_FRAMES and tid != "highlight-page" and \
+                        round(r["endMs"] * FPS / 1000) - round(r["startMs"] * FPS / 1000) < _build_frames(dev):
                     add("too short", k, f"{tid} is cut before its animation ends ({d[k]:.2f}s, it needs "
-                                        f"{BUILD_FRAMES[tid] / FPS:.2f}s)")
+                                        f"{_build_frames(dev) / FPS:.2f}s)")
         if k and _year_in(r.get("text", "")) and not dev and not r.get("overlay") and not r.get("typedCaption") \
                 and (rows[k - 1].get("device") or {}).get("id") not in ("P12", "P14"):
             ctx["notes"].append(f"shot {k} ({r['startMs'] / 1000:.0f}s) says {_year_in(r['text'])} with no date on screen")
@@ -7070,7 +7816,7 @@ def _gate_find(rows: list, ctx: dict) -> list:
     # every block of words starts on its words (the owner's main fix); the opening title and chapters are exempt
     offs = []
     for k, kind, name, text, on in texts:
-        if name in ("chapter-plate", "chapter-title") or k == 0 and name == "P03":
+        if name in ("chapter-plate", "chapter-title", "highlight-page") or k == 0 and name == "P03":
             continue
         words = (_overlay_words({"device": rows[k]["device"]}) if kind == "device" else
                  _overlay_words({"typedCaption": rows[k]["typedCaption"]}) if kind == "caption" else sorted(_wordset(text)))
@@ -7085,6 +7831,36 @@ def _gate_find(rows: list, ctx: dict) -> list:
         if off < -SYNC_TOLERANCE_MS or off > SYNC_MAX_LATE_MS:
             add("words", k, f"{name} '{text[:40]}' starts {abs(off) / 1000:.2f}s {'before' if off < 0 else 'after'} "
                             f"its words", kind=kind)
+    # the highlighted pages (owner 2026-10-11): drawable as written, the main phrase highlighted as the narrator says it,
+    # the page done inside its shot, a shot of 5-8 s, HL_GAP_S apart, never beside another full-frame page; how many a
+    # film carries is the source page group's cap (groups)
+    pages, hl_offs = [k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") == "highlight-page"], []
+    for n, k in enumerate(pages):
+        r, dev = rows[k], rows[k]["device"]
+        main = _hl_phrase(dev)[:40]
+        bad = _hl_problem(dev, r.get("text") or "")
+        if bad:
+            add("page", k, f"highlighted page: {bad}", fix="drop")
+            continue
+        frames = round(r["endMs"] * FPS / 1000) - round(r["startMs"] * FPS / 1000)
+        if frames < _hl_frames(dev):
+            add("page", k, f"highlighted page '{main}' needs {_hl_frames(dev)} frames, its shot has {frames}", fix="fit")
+        elif d[k] < HL_MIN_S - 0.5 / FPS:
+            add("page", k, f"highlighted page '{main}' on a {d[k]:.1f}s shot (at least {HL_MIN_S:.0f}s)", fix="fit")
+        h = _hl_said_at(dev, ctx["heard"], r["startMs"] - 1500, r["endMs"])
+        if h is None:
+            add("page", k, f"highlighted page: '{main}' is not heard on its shot", fix="drop")
+        else:
+            off = r["startMs"] + _hl_pre_ms(dev) - (h - SYNC_LEAD_MS)
+            hl_offs.append(off)
+            if off < -SYNC_TOLERANCE_MS or off > SYNC_MAX_LATE_MS:
+                add("page", k, f"highlighted page '{main}' is highlighted {abs(off) / 1000:.2f}s "
+                               f"{'before' if off < 0 else 'after'} it is said", fix="time", h=h)
+        if n and r["startMs"] - rows[pages[n - 1]]["startMs"] < HL_GAP_S * 1000:
+            add("page", k, f"highlighted page '{main}' {(r['startMs'] - rows[pages[n - 1]]['startMs']) / 1000:.0f}s after "
+                           f"the one before (at least {HL_GAP_S:.0f}s)", fix="drop")
+        elif k and _covered(rows[k - 1]):
+            add("page", k, f"highlighted page '{main}' beside another full-frame page", fix="drop")
     marks = [0] + _text_times(rows) + [total]
     for a, b in _gaps(rows):
         add("quiet", next((k for k, r in enumerate(rows) if r["startMs"] >= a), None),
@@ -7153,7 +7929,8 @@ def _gate_find(rows: list, ctx: dict) -> list:
                       "shortest_repeat_s": round(gaps_[0], 1) if gaps_ else None, "ai_on_screen": len(ai), "ai_cap": ctx["cap"],
                       "words_gap_s": round(max(b - a for a, b in zip(marks, marks[1:])) / 1000, 1),
                       "word_offsets_s": [round(min(offs) / 1000, 2), round(max(offs) / 1000, 2)] if offs else None,
-                      "era_unverified": unverified,
+                      "era_unverified": unverified, "pages": len(pages), "page_cap": _hl_cap(rows),
+                      "page_offsets_s": [round(x / 1000, 2) for x in hl_offs],
                       "groups": {g: sum(1 for r in rows if (r.get("device") or {}).get("id") in ts)
                                  for g, (ts, _, _) in OVERLAY_GROUPS.items()}}
     return v
@@ -7321,6 +8098,8 @@ def _drop_words(rows: list, k: int, kind: str, why: str) -> None:
         r.pop("typedCaption", None)
     elif kind == "overlay":
         r.pop("overlay", None)
+    elif (r.get("device") or {}).get("id") == "highlight-page":
+        _hl_drop(rows, k, why)
     elif r.get("device"):
         tid = r["device"]["id"]
         r.pop("section_turn", None)
@@ -7596,6 +8375,44 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
             moved = moved or "dropped" in how or "re-worded" in how or "rebuilt" in how
         else:
             stuck(x, "its words cannot be repaired")
+    for x in by.get("page", []):                     # a highlighted page: re-timed, re-synced, cut or held, else dropped
+        k = at(x["id"])
+        if k is None or (rows[k].get("device") or {}).get("id") != "highlight-page":
+            continue                                 # gone with an earlier repair
+        r, dev = rows[k], rows[k]["device"]
+        frames = round(r["endMs"] * FPS / 1000) - round(r["startMs"] * FPS / 1000)
+        why = x["what"]
+        if x["fix"] == "time":
+            new = _hl_retime(dev, r["startMs"], x["h"], frames)
+            if new is not None:
+                r["device"] = new
+                did(x, f"re-timed: {sum(_hl_nwords(p) for p in new['phrases'][:_hl_main(new)])} highlighted word(s) "
+                       f"before '{_hl_phrase(new)}'")
+                continue
+            if x["id"] not in ctx["resynced"]:
+                ctx["resynced"].add(x["id"])
+                moved = True
+                did(x, "re-synced on its main phrase")
+                continue
+            why = "still off its words after a re-sync"
+        elif x["fix"] == "fit":
+            cut = _hl_shorten(dev, frames) if r["endMs"] - r["startMs"] >= HL_MIN_S * 1000 else None
+            if cut is not None:
+                r["device"] = cut
+                did(x, f"phrases cut to fit its shot (the main one opens on the same word: '{_hl_phrase(cut)}')")
+                continue
+            nxt = rows[k + 1] if k + 1 < len(rows) else None
+            miss = r["startMs"] + _hl_need_ms(dev) - r["endMs"]
+            if nxt is not None and _bare(nxt) and nxt["endMs"] - nxt["startMs"] - miss >= SYNC_MIN_SHOT_MS \
+                    and r["endMs"] + miss - r["startMs"] <= SCENE_MAX_S * 1000:
+                r["endMs"] += miss
+                nxt["startMs"] = r["endMs"]
+                did(x, f"held {miss / 1000:.2f}s longer, from the plain shot after it")
+                continue
+            why = "its shot cannot hold the page"
+        _hl_drop(rows, k, why)
+        moved = True
+        did(x, "page dropped (the shot shows a picture of its own)")
     for x in by.get("double text", []):
         k = at(x["id"])
         if k is None:
@@ -7641,9 +8458,10 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
             members = sorted((k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") in OVERLAY_GROUPS[g][0]),
                              key=lambda k: (0 if rows[k].get("filler") else 1, _SYNC_RANK.get(rows[k]["device"]["id"], 1),
                                             -rows[k]["startMs"]))
+            over = min(x["over"], len(members) - _group_cap(rows, g))   # counted again: a repair above may have dropped one
             n = 0
             for k in members:
-                if n >= x["over"]:
+                if n >= over:
                     break
                 words = str((rows[k]["device"] or {}).get({"shadow-up": "line", "top-title": "line1", "P02": "headline"}.get(
                     rows[k]["device"]["id"], "-")) or "")
@@ -7654,7 +8472,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
                     _drop_words(rows, k, "device", f"{g} over its cap")
                     did(x, f"one {g} dropped")
                 n += 1
-            if n < x["over"]:
+            if n < over:
                 stuck(x, f"{g}: nothing left to drop")
         else:
             how = _group_add(engine, rows, g, build, ctx)
@@ -7680,7 +8498,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         if k is None or not rows[k].get("device"):
             continue
         r = rows[k]
-        need = int(math.ceil((BUILD_FRAMES.get(r["device"]["id"], 0) + 1) * 1000 / FPS))
+        need = int(math.ceil((_build_frames(r["device"]) + 1) * 1000 / FPS))
         nxt = rows[k + 1] if k + 1 < len(rows) else None
         miss = r["startMs"] + need - r["endMs"]
         if nxt is not None and _bare(nxt) and nxt["endMs"] - nxt["startMs"] - miss >= SYNC_MIN_SHOT_MS \
@@ -7837,7 +8655,8 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
                                         "how": dict(GATE.get("card", {})), "calls": GATE.get("card_calls", 0),
                                         "sent": GATE.get("card_sent", 0), "answers": GATE.get("card_answers", [])},
            "looks_missing": ctx.get("looks", []), "kept_on_exact": ctx.get("trusted", []),
-           "warnings": ctx.get("warnings", []), "soft": ctx.get("soft", {}), "notes": ctx.get("notes", [])}
+           "warnings": ctx.get("warnings", []), "soft": ctx.get("soft", {}), "notes": ctx.get("notes", []),
+           "highlight": _hl_report(rows, ctx["heard"])}
     _dump(job / "mrtruth" / "gate.json", rec)
     cards = rec["card_check"]
     said_no = sum(1 for a in cards["answers"] if a["main"] and a["shows"] is False)
@@ -7852,6 +8671,14 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
                + (f"; period unverified on {m['era_unverified']} shot(s) (no stored answer)" if m["era_unverified"] else ""))
     for w in ctx.get("warnings", []):
         engine.log(f"  ⚠ pre-render gate: {w}")
+    hl = rec["highlight"]
+    engine.log(f"  highlighted text: {hl['on_screen']} placed ({hl['found']} moments found; {len(hl['rejected'])} rejected: "
+               f"{_hl_reasons(hl['rejected'])}" + (f"; {len(hl['dropped'])} dropped later: "
+                                                   + "; ".join(x['why'][:60] for x in hl['dropped'][:3]) if hl["dropped"] else "")
+               + f"; at most {hl['cap']} for {rows[-1]['endMs'] / 60000:.0f} min)")
+    for p in hl["pages"]:
+        engine.log(f"    page at {p['at_s']:.1f}s ({p['shot_s']:.1f}s, {p['frames']} frames): '{p['main']}' highlighted "
+                   + (f"{p['offset_s']:+.2f}s from its words" if p["offset_s"] is not None else "- its words not heard"))
     if ctx["fixed"]:
         engine.log(f"  pre-render gate: {first['broken']} break(s) found ({', '.join(first['rules'])}), "
                    f"{len(ctx['fixed'])} repair(s) in {rounds} round(s): "
@@ -7895,8 +8722,8 @@ def _gate_scenes(engine, job: Path, rows: list, sc_list: list) -> list:
         if move in ("pushCut", "slide") and (dev or (sc_list[i - 1].get("device") if i else None)):
             sc["transitionIn"], sc["prevAsset"] = {"type": "cut", "durationFrames": 0}, None
             fixed.append(f"shot {i}: {move} into or out of a template made a cut")
-        if dev and n < BUILD_FRAMES.get(dev.get("id"), 0):
-            broken.append(f"shot {i}: {dev['id']} cut before its animation ends ({n} of {BUILD_FRAMES[dev['id']]} frames)")
+        if dev and n < _build_frames(dev):
+            broken.append(f"shot {i}: {dev['id']} cut before its animation ends ({n} of {_build_frames(dev)} frames)")
     if (sc_list[0].get("device") or {}).get("id") != "P03":
         broken.append("the opening has no P03")
     cards = [i for i, sc in enumerate(sc_list) if sc.get("textCard")]
@@ -8045,7 +8872,7 @@ PREVIEW = [
     ("P08", "Full-screen source", 150, "codex", [], {"id": "P08"}),
     ("framed-card", "Framed source", 90, "scroll_fragment", [], {"id": "framed-card", "caption": "Fragment from Cave 4"}),
     ("photo-pop", "Photo pops forward", 120, "papyrus", [], {"id": "photo-pop"}),
-    ("highlight-page", "Words highlighted on a page", 178, "codex", [], {"id": "highlight-page", "paragraphs": [
+    ("highlight-page", "Words highlighted on a page", 210, "codex", [], {"id": "highlight-page", "paragraphs": [
         "In the spring of 1947 a young shepherd threw a stone into a cave and heard pottery break.",
         "Inside the jars were leather scrolls, wrapped in linen and sealed for two thousand years.",
         "Scholars would later call them the greatest manuscript find of the twentieth century."],
