@@ -11,11 +11,14 @@ INSTALL (into your MoveFast folder, overwriting):
 1) PLAN (where Claude + Gemini + your keys are, ~1 minute for 3 min of video; nothing heavy is drawn):
    .venv/bin/python run_test.py script.txt voice.mp3 "Title" 3 --export
    -> output/mr-truth/_work/<slug>/mrtruth/render_package.tgz   (about 56 MB per 3 minutes)
-   Pictures are searched on Wikimedia Commons first, then Bing (free; it needs curl_cffi from requirements.txt), with
-   Brave only as Bing's backup (a failed, blocked or junk answer, or too few pictures that fit; at most
+   Pictures are searched on Bing first (free; it needs curl_cffi from requirements.txt); a shot that NAMES a person,
+   place or thing (its archive name or an entity that is not a date) searches Wikimedia Commons first and Bing only
+   when Commons gave nothing usable; a generic shot asks Commons once in round 2 when Bing gave nothing usable (owner
+   2026-10-10). Brave is only Bing's backup (a failed, blocked or junk answer, or too few pictures that fit; at most
    MRTRUTH_BRAVE_LAST_MAX=30 a film while Bing works). The log says "Bing (free web pictures): ok" before the first
-   search, "Bing ... is OFF" (and why) if it stops answering, and counts every search in its "search:" line and in
-   mrtruth/search.json. A dry or missing Brave key is a warning now; the run stops only when Bing is off as well.
+   search, "Bing ... is OFF" (and why) if it stops answering, how many shots looked at Commons or Bing first and how
+   often Commons was asked in its "search order:" line, counts every search in its "search:" line and in
+   mrtruth/search.json. MRTRUTH_ARCHIVES=1 keeps the old order (Commons for every shot, then the open archives). A dry or missing Brave key is a warning now; the run stops only when Bing is off as well.
    MRTRUTH_WEB_SEARCH=brave goes back to Brave for every search.
 
 2) DRAW (any Linux machine: Netcup server, RunPod pod). Needs node 20+, the Chromium libraries
@@ -62,6 +65,11 @@ PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
    (HIGH), MRTRUTH_JUDGE_PICS (6), MRTRUTH_JUDGE_ENOUGH (2: more pictures are looked at only while fewer pass),
    MRTRUTH_VERDICTS=off, MRTRUTH_VERDICTS_DB (the store's file), MRTRUTH_RUN_ID.
    Store by hand: python verdicts.py stats|export|import|compact ...
+   A frame alone (a ruler, colour chart, border, mount or margin along an edge) on a real photo of the right kind is
+   cut off - 10% at each edge - and the crop asked once more (one picture a call, kept in the store under the crop's
+   own identity), only for a shot with no other usable picture, and only when the crop is still 800 px wide and
+   1.0-2.5 in shape; at most MRTRUTH_CROP_MAX (25) a film. Counted in "picture checks (...)" (frame rechecks, their
+   cost), verdicts.json, timing.json and pick_audit.json; shots.json marks a cropped picture.
 
 PACING, OVERLAYS ON THEIR WORDS, NOTHING OVER 8 S (2026-10-10)
    Claude's shot list is kept as Claude wrote it (mrtruth/beats.json) and paced every time it is loaded: about 4.2 s a

@@ -105,7 +105,7 @@ MIN_SCORE = 5.0                 # the old 0-10 judge's bar (MRTRUTH_JUDGE=score 
 # BEATS_V 6 (2026-10-10, one bump for both): each shot says its own era, and one sentence is one scene (a run about a
 # person shows him every second SENTENCE; the five-second leftovers are gone); PICK_V 10: yes/no picture checks
 BRIEF_V, BEATS_V, NAMES_V, ANCHORS_V, PICK_V = 3, 6, 2, 3, 10
-JUDGE_MAX = 10                  # new pictures a search round brings to the checks: Commons' 4 and the web's 6 of round 1
+JUDGE_MAX = 10                  # new pictures a search round brings to the checks: Commons' 4 and the web's 6 at most
 # the picture judge: Flash-Lite at minimal thinking scored a COVID-masked researcher 9 for the 1980s and one image 1 and
 # then 8 (audit 2026-10-08); Mr Truth's judge is a stronger Gemini that thinks a little. Env overrides. gemini-3.8-flash
 # answers thinking "minimal" with HTTP 400 (then every look would go to Claude): an empty setting is "low"
@@ -123,6 +123,12 @@ JUDGE_ENOUGH = int(os.environ.get("MRTRUTH_JUDGE_ENOUGH", "2"))
 JUDGE_MEDIA = (os.environ.get("MRTRUTH_JUDGE_MEDIA") or "MEDIUM").strip().upper()
 AI_CHECK_MEDIA = (os.environ.get("MRTRUTH_AI_CHECK_MEDIA") or "HIGH").strip().upper()
 JUDGE_PX, AI_CHECK_PX = 640, 1280
+# the frame-only crop for REAL photos too (owner 2026-10-10, ~22:45): a photo refused for a frame alone (a ruler, colour
+# chart, border, mount or margin along an edge) is cut CROP_EDGE off each edge and asked once more - one picture a call,
+# kept in the verdict store under the crop's own identity - only for a shot with no other usable picture, at most
+# CROP_MAX a film; the crop must still be MIN_WIDTH wide and 1.0-2.5 in shape, else it stays refused (~10-20 a film)
+CROP_EDGE = 0.10
+CROP_MAX = int(os.environ.get("MRTRUTH_CROP_MAX", "25"))
 TIERS = ("no", "generic", "kind", "exact")
 NO, GENERIC, KIND, EXACT = 0, 1, 2, 3
 SUBJECT_MAX, SUBJECT_GAP = 2, 6      # one view of one subject: at most twice a film, never within 6 shots
@@ -2040,6 +2046,27 @@ def _shape_ok(path: Path) -> bool:
         return False
 
 
+def _crop_box(w: int, h: int, edge: float = CROP_EDGE) -> tuple:
+    """The part of a w x h picture kept when `edge` of its width and height is cut off each side."""
+    return int(w * edge), int(h * edge), int(w * (1 - edge)), int(h * (1 - edge))
+
+
+def _crop_edges(src: Path, dest: Path, edge: float = CROP_EDGE, keep_size: bool = False) -> Path:
+    """`src` with `edge` cut off each side (a ruler, colour chart, border, mount or margin along an edge), saved as
+    `dest`. keep_size: scaled back up to the original size (a drawn stand-in, 1536x864, must still fill the frame); a
+    real photo keeps its own pixels, so its crop must pass _shape_ok by itself (owner 2026-10-10)."""
+    from PIL import Image
+    with Image.open(src) as im:
+        w, h = im.size
+        im = im.convert("RGB").crop(_crop_box(w, h, edge))
+        if keep_size:
+            im = im.resize((w, h), Image.LANCZOS)
+        tmp = Path(dest).with_name(f"{Path(dest).stem}.{threading.get_ident()}.part.jpg")   # never read half-written
+        im.save(tmp, "JPEG", quality=92)
+        os.replace(tmp, dest)
+    return Path(dest)
+
+
 JUDGE_TAIL = """
 For this run return ONLY a JSON array, one object per candidate, in candidate order, with the fields the brief above
 describes: [{"candidateIndex": 1, "score": 0-10, "reason": "one sentence", "subjectAnchor": {"x": 0-1, "y": 0-1},
@@ -2596,13 +2623,15 @@ def _ask_pictures(engine, lead: str, prompt: str, items: list, era: bool, ai: bo
     return got, via
 
 
-def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after: str = "") -> list:
+def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after: str = "",
+          purpose: str = "picture check") -> list:
     """The picture check (owner 2026-10-10): yes/no questions about each candidate on the same Gemini as the old 0-10
     judge (JUDGE_MODEL, thinking JUDGE_THINKING), one shot a call, at JUDGE_MEDIA - the pictures, each after its
     caption, behind the rules, the film and the shot. Code turns the answers into a tier and a list of what is wrong
     (_verdict); a shot that names nothing has no "exact". Every answer is kept (verdicts.py): one asked before for this
     line comes from the store, a picture found with added text or a frame is not sent again, two shots never ask the
-    same question at once. Candidates come back sorted by _rank. MRTRUTH_JUDGE=score: the old judge, read as tiers."""
+    same question at once. Candidates come back sorted by _rank. MRTRUTH_JUDGE=score: the old judge, read as tiers.
+    `purpose` names the calls in the Gemini spend ("frame recheck": a cropped photo asked again, _crop_recheck)."""
     if not cands:
         return []
     if JUDGE_MODE == "score":
@@ -2625,7 +2654,7 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
             + (("\n" + ERA_Q.format(era=era)) if era else "") + "\n")
     prompt = FORMAT.format(extra='"modern": "", ' if era else "")
     res = _checked(store, items, lambda part: _ask_pictures(engine, lead, prompt, part, bool(era), False,
-                                                             "picture check", JUDGE_MEDIA, JUDGE_PX),
+                                                             purpose, JUDGE_MEDIA, JUDGE_PX),
                    dirt=lambda a: ",".join(k for k in ("text", "frame") if a.get(k)))
     for _k, base, _p, key in items:
         a, how = res.get(key, (None, "failed"))
@@ -2684,14 +2713,16 @@ def archive_names(engine, job: Path, rows: list, dossier: dict, force: bool = Fa
         prev = name or prev
 
 
-# ── the web picture search (owner 2026-10-10): Wikimedia Commons first, then Bing Images - free, asked the way a browser
-#    asks (curl_cffi with Chrome's handshake; a plain Python request is answered with unrelated pictures) - and Brave
-#    only as the backup: for a Bing search that failed, was blocked or came back unrelated, and for a shot whose
-#    searches together leave fewer than BING_MIN_USABLE pictures able to fill the frame. Bing's health is watched three
-#    ways: a canary before the first search (two searches whose answers are known), a guard on every answer (the share
-#    of its rows carrying the search's own words) and a latch (BING_BAD_OF[0] bad answers in the last BING_BAD_OF[1])
-#    that hands the web search to Brave, says so loudly, and asks the canary again after a pause.
-#    MRTRUTH_WEB_SEARCH=brave is the old order (Brave for every search), the instant way back.
+# ── the web picture search (owner 2026-10-10): Bing Images first for a generic or mood shot, Wikimedia Commons
+#    first for a shot that names a person, place or thing (owner 2026-10-10, ~23:50; _search_plan). Bing is free,
+#    asked the way a browser asks (curl_cffi with Chrome's handshake; a plain Python request is answered with
+#    unrelated pictures) - and Brave only as the backup: for a Bing search that failed, was blocked or came back
+#    unrelated, and for a shot whose searches together leave fewer than BING_MIN_USABLE pictures able to fill the
+#    frame. Bing's health is watched three ways: a canary before the first search (two searches whose answers are
+#    known), a guard on every answer (the share of its rows carrying the search's own words) and a latch
+#    (BING_BAD_OF[0] bad answers in the last BING_BAD_OF[1]) that hands the web search to Brave, says so loudly, and
+#    asks the canary again after a pause. MRTRUTH_WEB_SEARCH=brave is the old order (Brave for every search), the
+#    instant way back.
 WEB_SEARCH = (os.environ.get("MRTRUTH_WEB_SEARCH") or "bing").strip().lower()
 BING_AT_ONCE = int(os.environ.get("MRTRUTH_BING_AT_ONCE", "3"))      # Bing searches in flight at once, all shots together
 BING_GAP = float(os.environ.get("MRTRUTH_BING_GAP", "0.5"))          # seconds between two Bing requests (a pod took 3 at
@@ -3400,11 +3431,18 @@ def _broader(query: str, names: list) -> list:
 
 
 def _search_plan(rows: list, dossier: dict) -> list:
-    """Each shot's round-1 searches, decided in film order before any of them runs: {q, web, commons, names, stand,
-    archive}.
-      commons  the archive name of a named thing, else the shot's search in three plain words (owner 2026-10-10:
-               Wikimedia Commons first, for every shot - it was searched for 43 shots of 216); taken already by
-               an earlier shot: the plain words of its other searches, else no Commons search in round 1
+    """Each shot's searches, decided in film order before any of them runs: {q, web, commons, names, stand, archive,
+    first}.
+      first    where round 1 looks first (owner 2026-10-10, ~23:50): "commons" for a shot that NAMES a person, place
+               or thing (its archive name, a name in its entities, any entity that is not a date), "bing" for every
+               other shot - a generic or mood line, and a line about a person of whom no likeness exists (it searches
+               the ROLE, a generic figure). On the pod, Commons searches on generic lines came back empty 174 times of
+               229 and 4-6% usable, and every one waits on the Wikimedia gate (a 6-9 min floor run for all ~200 shots);
+               on named things Commons is the most accurate and licence-clean.
+      commons  the Commons wording: the archive name of a named thing, else the shot's search in three plain words;
+               taken already by an earlier shot: the plain words of its other searches, else none. The Commons-first
+               shots take theirs first (in film order); a Bing-first shot's wording is for its round 2 only (asked
+               once, when Bing gave nothing usable)
       web      the shot's search and its second: the archive name, or the other wording (for a person of whom no
                likeness exists, the role's searches - never the name)
     A search an earlier shot already runs is not run again: the shot takes its next wording (2026-10-10: 29 shots
@@ -3412,15 +3450,17 @@ def _search_plan(rows: list, dossier: dict) -> list:
     pictures again, a repeat; 12 of the 14 archive names were one library)."""
     canon = {str(e.get("name", "")).lower(): str(e.get("canonicalSearchName") or e.get("name") or "")
              for e in dossier.get("keyEntities") or []}
-    ran_web, ran_commons, out = set(), set(), []
+    ran_web, ran_commons, out, wordings_of = set(), set(), [], []
     for r in rows:
         lit, con, mood = (list(r.get("queries") or []) + ["", "", ""])[:3]
-        # a dossier name is only an archive name when it is one: at most 3 words, no appositive ("X, Sicilian priest")
+        # a dossier name is only an archive name when it is one: at most 3 words, no appositive ("X, Sicilian priest"),
+        # and not a date (a bare "1943" was searched on Commons as the name of a thing)
         names = [n for n in (canon.get(str(e).lower(), str(e)) for e in r.get("entities") or [] if str(e).strip())
-                 if len(n.split()) <= 3 and "," not in n and "/" not in n]
+                 if len(n.split()) <= 3 and "," not in n and "/" not in n and not _DATE_ENTITY.search(n)]
         q = lit or r.get("visualIntent") or r["text"]
         archive = str(r.get("archive") or "").strip() or (names[0] if names else "")
         stand = _stand_in(r, dossier)
+        named = not stand and bool(archive or names or _names_of(r))
         if stand:                                    # a person of whom no likeness exists: search the ROLE, not the name
             sur = _surname(stand)
             archive = stand.get("commons") or ""
@@ -3433,20 +3473,22 @@ def _search_plan(rows: list, dossier: dict) -> list:
         web = [x for x in dict.fromkeys(str(x or "").strip() for x in web) if x]
         # Commons: the name, else the plain words of the shot's searches in turn - and nothing when an earlier shot
         # already asked every one of them (its answer would only bring the same pictures again)
-        wordings = [x for x in dict.fromkeys([archive, *(_plain(w, 3) for w in [q] + web), *(_plain(w, 2) for w in web)])
-                    if x]
-        commons = next((x for x in wordings if x.lower() not in ran_commons), "")
+        wordings_of.append([x for x in dict.fromkeys([archive, *(_plain(w, 3) for w in [q] + web),
+                                                     *(_plain(w, 2) for w in web)]) if x])
         fresh = [x for x in web if x.lower() not in ran_web]
         web = (fresh + [x for x in web if x not in fresh])[:2]
         ran_web.update(x.lower() for x in web)
-        ran_commons.add(commons.lower())
-        out.append({"q": web[0] if web else q, "web": web, "commons": commons, "names": names, "stand": stand,
-                    "archive": archive})
+        out.append({"q": web[0] if web else q, "web": web, "commons": "", "names": names, "stand": stand,
+                    "archive": archive, "first": "commons" if named else "bing"})
+    for k in sorted(range(len(out)), key=lambda k: out[k]["first"] != "commons"):     # named shots' wordings first
+        out[k]["commons"] = next((x for x in wordings_of[k] if x.lower() not in ran_commons), "")
+        ran_commons.add(out[k]["commons"].lower())
     return out
 
 
-_SOURCES = ("commons-archive", "commons", "bing", "brave", "archive")   # Commons first (owner 2026-10-10: licensed and
-                                                                       # credited), the shot's archive name above all
+_SOURCES = ("commons-archive", "commons", "bing", "brave", "archive")   # within a tier Commons ranks first (owner
+                                                                       # 2026-10-10: licensed and credited), the shot's
+                                                                       # archive name above all
 
 
 def _src_rank(c: dict) -> int:
@@ -3543,17 +3585,66 @@ def _need(r: dict) -> int:
     return KIND
 
 
+def _frame_only(r: dict, c: dict) -> bool:
+    """A real photo whose ONLY yes/no problem is a frame (a ruler, colour chart, border, mount or margin along an edge;
+    owner 2026-10-10, ~22:45): asked, and at the shot's bar or better - or skipped as known to have a frame, with nothing
+    else known wrong. Never a drawn stand-in, a crop already, or a studio shot under a template."""
+    return (not c.get("ai") and not c.get("crop_of") and list(c.get("bad") or []) == ["frame"] and _studio_ok(r, c)
+            and (c.get("looked") == "dirty" or (c.get("looked") in ("asked", "stored") and _tier(c) >= _need(r))))
+
+
+def _crop_fits(path) -> bool:
+    """The crop of a picture (CROP_EDGE off each edge) would still be MIN_WIDTH wide and 1.0-2.5 in shape."""
+    from PIL import Image
+    try:
+        with Image.open(path) as im:
+            x0, y0, x1, y1 = _crop_box(*im.size)
+    except Exception:                                                # noqa: BLE001
+        return False
+    return x1 - x0 >= MIN_WIDTH and y1 > y0 and 1.0 <= (x1 - x0) / (y1 - y0) <= 2.5
+
+
+_CROP_KEEP = ("title", "url", "source", "license", "artist", "provider", "img", "via", "pos", "stand_in")
+
+
+def _crop_recheck(engine, row: dict, c: dict, dossier: dict, before: str = "", after: str = "") -> dict:
+    """The frame-only photo `c` cut CROP_EDGE off each edge (its own pixels, no scaling up) and asked once more - one
+    picture, the shot's own questions on JUDGE_MODEL (judge, purpose "frame recheck") - kept in the verdict store under
+    the crop's own identity (its bytes), so a re-run or another pod asks nothing. The crop's file is named after the
+    original's bytes (Commons names its files c00..c03 in every folder). Returns the crop's verdict (crop_of: the
+    original's file), or {} when the crop is too small or cannot be made: the photo stays refused, unasked."""
+    src = Path(c["photo"])
+    if not _crop_fits(src):
+        return {}
+    dest = src.with_name(f"{src.stem}_crop{_photo_id(src)[:10]}.jpg")
+    try:
+        if not dest.exists():
+            _crop_edges(src, dest)
+    except Exception:                                                # noqa: BLE001 - the refusal stands
+        return {}
+    if not _shape_ok(dest):
+        return {}
+    got = judge(engine, row, [(dict({k: c[k] for k in _CROP_KEEP if k in c}, crop_of=str(src)), dest)], dossier,
+                before, after, purpose="frame recheck")
+    return got[0] if got else {}
+
+
 def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) -> None:
     """row["pick"] = the shot's picture, row["step"] = how it was found, row["spare"] = its runner-ups.
 
     Search, up to three rounds a shot, stopping the moment a picture passes the checks at the shot's own bar (kind)
-    (owner 2026-10-10: Wikimedia Commons first, then Bing - free - and Brave only as Bing's backup):
-      1  Commons (the archive name of a named thing, else the shot's search in plain words) and the web (the shot's
-         two searches: Bing, Brave when Bing fails or comes back thin), checked together in search order, JUDGE_PICS a
+    (owner 2026-10-10: Bing - free - first for a generic or mood shot, Wikimedia Commons first only for a shot that
+    names a person, place or thing; Brave only as Bing's backup):
+      1  a shot that names something (_search_plan's "first"): Commons (its archive name, else its search in plain
+         words), checked; Bing (the shot's two searches, Brave when Bing fails or comes back thin) only when Commons
+         gave nothing usable at the shot's bar. Every other shot: Bing first. Checked in search order, JUDGE_PICS a
          call while fewer than JUDGE_ENOUGH pass; Commons first within a tier. A search an earlier shot runs is not
-         run twice: the shot takes its next wording. With MRTRUTH_ARCHIVES=1 the open archives come in between,
-         checked as before (an exact Commons picture ends it).
-      2  only when round 1 came back THIN (fewer than 4 usable pictures): the same subject, worded wider
+         run twice: the shot takes its next wording. With MRTRUTH_ARCHIVES=1 the old order stands: Commons for every
+         shot, the open archives, the web (an exact Commons picture ends it).
+      2  only when round 1 came back THIN (fewer than 4 usable pictures): the same subject, worded wider - Commons
+         for each wider wording on a named shot, once (the plan's own wording) on a Bing-first shot
+      -  still nothing usable: a real photo refused for a frame alone (a ruler, colour chart, border, mount or margin
+         along an edge) is cropped CROP_EDGE at each edge and asked once more (_crop_recheck)
       3  still failing, and the shot names a person/place/object: a different ANCHOR from the same narration
          (one Claude call for all such shots). A shot that names nothing takes a contextual photo instead.
     The picture checks answer yes/no questions (judge): a tier - exact (the very thing the shot names, or the stand-in's
@@ -3626,6 +3717,10 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     def complete(cands):                             # an unanswered or Claude-answered picture is asked again next run
         return not any(c.get("unjudged") or c.get("looked") == "claude" for c in cands)
 
+    def ask_commons(rnd, q, folder):                 # Commons asked, by round (the owner sees what the order saves)
+        _count(f"commons_r{rnd}")
+        return commons_photos(q, folder)
+
     def first_rounds(i):
         r, home, sp = rows[i], home_of(rows[i]), plan[i]
         state = None if force else _load(home / "pick.json")
@@ -3633,10 +3728,13 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                 and state.get("complete", True) and all(Path(c["photo"]).exists() for c in state["cands"])):
             return state
         q, web_q, cq, names, stand = sp["q"], sp["web"], sp["commons"], sp["names"], sp["stand"]
-        commons = commons_photos(cq, home / "commons") if cq else []
+        # Commons first only for a shot that names a person, place or thing (owner 2026-10-10, ~23:50); the open
+        # archives' order (MRTRUTH_ARCHIVES=1) keeps Commons first for every shot
+        cfirst = archives_on or sp.get("first", "commons") == "commons"
+        commons = ask_commons(1, cq, home / "commons") if cq and cfirst else []
         if cq and cq == sp.get("archive"):           # a Commons file under the shot's own archive name ranks first
             commons = [(dict(c, via="commons-archive"), p) for c, p in commons]
-        scored, tried = [], list(dict.fromkeys(x for x in [*web_q, cq] if x))
+        scored, tried, r2 = [], list(dict.fromkeys(x for x in [*web_q, cq if cfirst else ""] if x)), False
         if archives_on:                              # as before: Commons checked on its own (an exact ends it), the
             scored = judged(i, commons, [], person=bool(stand))   # open archives (LoC, Openverse, IA, the Met), the web
             done = 1 if any(_usable(r, c, EXACT) for c in scored) else 0
@@ -3648,17 +3746,30 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             if not done:
                 scored = judged(i, web_photos(web_q, home / "web"), scored, person=bool(stand))
                 done = 1 if passes(r, scored) else 0
-        else:                                        # Commons and the web checked together, in search order
-            scored = judged(i, commons + web_photos(web_q, home / "web", skip=[p for _, p in commons]), [],
-                            person=bool(stand))
+        elif cfirst:                                 # a named thing: Commons, then Bing only when Commons gave nothing
+            scored = judged(i, commons, [], person=bool(stand))                     # usable at the shot's bar
             done = 1 if passes(r, scored) else 0
-        # thin: fewer than 4 pictures the checks would let on screen (kind or better, nothing wrong)
+            if not done:
+                scored = judged(i, web_photos(web_q, home / "web", skip=[p for _, p in commons]), scored,
+                                person=bool(stand))
+                done = 1 if passes(r, scored) else 0
+        else:                                        # a generic or mood line: Bing (Brave its backup) first
+            scored = judged(i, web_photos(web_q, home / "web"), [], person=bool(stand))
+            done = 1 if passes(r, scored) else 0
+        # thin: fewer than 4 pictures the checks would let on screen (kind or better, nothing wrong) - round 2 runs only
+        # when nothing usable came back at all (done is 0)
         if not done and sum(1 for c in scored if _usable(r, c, KIND)) < 4:
-            wider = _broader(q, names)
-            found = []
-            for k, w in enumerate(wider):
-                if w.lower() != cq.lower():          # the wording round 1 asked Commons already
-                    found += commons_photos(w, home / f"commons_r2_{k}")
+            wider, found, r2 = _broader(q, names), [], True
+            if cfirst:
+                for k, w in enumerate(wider):
+                    if w.lower() != cq.lower():      # the wording round 1 asked Commons already
+                        found += ask_commons(2, w, home / f"commons_r2_{k}")
+            elif cq or wider:                        # a Bing-first shot whose Bing gave nothing usable: Commons once,
+                w = cq or wider[0]                   # with the wording the plan kept for it (no other shot asks it)
+                tag = w == sp.get("archive")         # a stand-in's role name ranks as it did in round 1
+                found += [(dict(c, via="commons-archive") if tag else c, p)
+                          for c, p in ask_commons(2, w, home / "commons_r2_0")]
+                tried += [w] if w not in tried else []
             found += web_photos(wider, home / "web_r2", skip=[p for _, p in found])
             scored = judged(i, found, scored, person=bool(stand))
             tried += [w for w in wider if w not in tried]
@@ -3667,22 +3778,73 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
             scored = [dict(c, stand_in=True) for c in scored]
         state = {"v": PICK_V, "film": film_key, "text": r["text"], "cands": scored, "round": done, "tried": tried,
                  "stand_in": (stand or {}).get("role", ""), "stand_look": (stand or {}).get("appearance", ""),
-                 "complete": complete(scored)}
+                 "first": "commons" if cfirst else "bing", "r2": r2, "complete": complete(scored)}
         _dump(home / "pick.json", state)
         return state
 
     bud = _budget_set(engine, rows)                  # the film's stand-ins, drawings and repeats (see _choose)
-    web = ("then Brave (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else
-           f"then Bing (free), Brave as backup (at most {BRAVE_LAST_MAX} for thin answers)")
-    engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, "
-               + ("the open archives, " if archives_on else "")
-               + f"{web}; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most {bud['cap']} on screen from "
+    web = ("Brave (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else
+           f"Bing (free), Brave as backup (at most {BRAVE_LAST_MAX} for thin answers)")
+    engine.log(f"Mr Truth: pictures for {len(rows)} shots ("
+               + (f"Commons first, the open archives, then {web}" if archives_on else
+                  f"{web} first; Commons first for a shot that names a person, place or thing, then the web; for the "
+                  f"others Commons once in round 2 if nothing usable")
+               + f"; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most {bud['cap']} on screen from "
                f"{bud['draw_cap']} drawings; repeats at most {bud['reuse_cap']}"
                + ("" if archives_on else "; open archives off, MRTRUTH_ARCHIVES=1 turns them on") + ")...")
     archive_names(engine, job, rows, dossier, force)
     plan = _search_plan(rows, dossier)
+    with _SEARCH_LOCK:                               # where each shot looks first (the log's "search order" line)
+        SEARCH["first_commons"] = len(rows) if archives_on else sum(1 for p in plan if p["first"] == "commons")
+        SEARCH["first_bing"] = len(rows) - SEARCH["first_commons"]
     with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         states = list(ex.map(first_rounds, range(len(rows))))
+
+    # the frame-only crop (owner 2026-10-10, ~22:45): a shot with no usable picture of its own after rounds 1-2 whose
+    # refused photos include one refused for a frame alone: the best of them (_rank) whose crop still fills the frame is
+    # cut CROP_EDGE off each edge and asked once more - before round 3's other anchor or a stand-in, which cost more and
+    # show less of the line. Chosen in film order, at most CROP_MAX a film; one recheck a shot (the yes/no checks only)
+    if JUDGE_MODE != "score":
+        want = []
+        for i, (r, st) in enumerate(zip(rows, states)):
+            framed = ([] if _covered(r) or passes(r, st["cands"]) else
+                      sorted((c for c in st["cands"] if _frame_only(r, c)), key=_rank))
+            fit = next((c for c in framed if _crop_fits(c["photo"])), None)
+            if framed and fit is None:
+                _vcount("crop_small")
+            elif fit is not None:
+                want.append((i, fit))
+        _vcount("crop_wanted", len(want))
+        if len(want) > CROP_MAX:
+            _vcount("crop_capped", len(want) - CROP_MAX)
+            engine.log(f"  frame crops: {len(want)} shots could use one, MRTRUTH_CROP_MAX allows {CROP_MAX} a film - "
+                       f"the {len(want) - CROP_MAX} after shot {want[CROP_MAX - 1][0]} keep their refusal")
+            want = want[:CROP_MAX]
+
+        def recrop(ic):
+            i, c = ic
+            r, st = rows[i], states[i]
+            v = _crop_recheck(engine, r, c, dossier, *around(i))
+            if not v:
+                _vcount("crop_small")
+                return
+            _vcount("crop_rechecks")
+            _vcount("crop_asked" if v.get("looked") == "asked" else "crop_stored" if v.get("looked") == "stored" else
+                    "crop_other")
+            if v.get("unjudged") or v.get("looked") == "claude":     # asked again next run, never kept
+                return
+            ok = _usable(r, v, _need(r))
+            v = dict(v, stand_in=True) if st.get("stand_in") else v
+            st["crop"] = {"of": c["photo"], "photo": v["photo"], "ok": ok, "why": str(v.get("reason") or "")[:100]}
+            if ok:
+                _vcount("crop_passed")
+                st["cands"] = sorted(st["cands"] + [v], key=_rank)
+                st["round"] = 2 if st.get("r2") else 1
+            if st.get("complete", True):
+                _dump(home_of(r) / "pick.json", st)
+
+        with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
+            list(ex.map(recrop, want))
 
     # round 3: a different anchor for every shot still without a photo (one Claude call for all of them)
     failing = [i for i, st in enumerate(states) if not st.get("round")
@@ -3724,7 +3886,7 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                              f"film's era, setting and tone.{who} Originally wanted: {r.get('visualIntent', '')}")
                 if a.get("kind") in ("person", "thing", "object", "place"):   # a named anchor can be shown exactly
                     stand["entities"] = [a["anchor"]] + list(r.get("entities") or [])
-                found = commons_photos(a.get("commons") or a["anchor"], home / "commons_r3")
+                found = ask_commons(3, a.get("commons") or a["anchor"], home / "commons_r3")
                 found += web_photos([a.get("web") or a["anchor"]], home / "web_r3", skip=[p for _, p in found])
                 have = [c["photo"] for c in st["cands"]]
                 new = [dict(c, anchor_switched=True) for c in judged(i, found, [], row=stand, against=have,
@@ -3774,7 +3936,8 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     info = _choose(engine, job, rows, states, found, borrowed, dossier)
     steps = info["steps"]
     by_round = [sum(1 for st in states if st.get("round") == k) for k in (1, 2, 3)]
-    engine.log(f"  pictures in {time.time() - t0:.0f}s (search rounds: 1 {by_round[0]}, 2 {by_round[1]}, 3 {by_round[2]}); "
+    engine.log(f"  pictures in {time.time() - t0:.0f}s (search rounds: 1 {by_round[0]}, 2 {by_round[1]}, 3 {by_round[2]}; "
+               f"saved by a frame crop {sum(1 for st in states if (st.get('crop') or {}).get('ok'))}); "
                f"on screen: exact {steps.get('exact', 0)}, another anchor {steps.get('anchor', 0)}, contextual "
                f"{steps.get('contextual', 0)}, neighbour {steps.get('neighbour', 0)}, AI {steps.get('ai', 0)}, earlier photo "
                f"{steps.get('reused', 0)}, long hold {steps.get('hold', 0)}, joined to a shot beside it "
@@ -3946,7 +4109,9 @@ def _choose(engine, job: Path, rows: list, states: list, found: list, borrowed: 
                       "dirty": looked.get("dirty", 0), "later": looked.get("later", 0), "good": len(good),
                       "good_shown": sum(1 for c in good if led.n(c["photo"]) > 0),
                       "good_subject_cap": sum(1 for c in good if led.n(c["photo"]) == 0 and not varied(c, i)),
-                      "subjects": sorted({c.get("subject") or "" for c in good})[:6], "demand": ""})
+                      "subjects": sorted({c.get("subject") or "" for c in good})[:6], "demand": "",
+                      "crop": ("" if not states[i].get("crop") else "passed" if states[i]["crop"].get("ok")
+                               else "refused: " + str(states[i]["crop"].get("why") or "")[:60])})
         if about[i]:
             # a line about a person of whom no likeness exists: the viewer gets a PERSON of his role to picture him
             # by (owner 2026-10-08) — a real photo first, else an AI stand-in of the same fixed look, and only then a
@@ -4254,16 +4419,7 @@ def _verdict_report(engine, job: Path, rows: list) -> dict:
     with _VLOCK:
         v = dict(VSTAT)
     st = VERDICTS["store"]
-    g = getattr(engine, "GEMINI_PICKS", None) or {}
-    prices = getattr(engine, "GEMINI_PRICES", None) or {}
-    tok = {"in": 0, "out": 0, "think": 0, "usd": 0.0}
-    for x in (g.get("by") or {}).values():
-        if x.get("what") in ("picture check", "AI check", "picture judge"):
-            pr = prices.get(x.get("model"))
-            for k in ("in", "out", "think"):
-                tok[k] += int(x.get(k) or 0)
-            if pr:
-                tok["usd"] += (x["in"] * pr[0] + (x["out"] + x["think"]) * pr[1]) / 1e6
+    tok, crop = _spent(engine, ("picture check", "AI check", "picture judge", "frame recheck")), _spent(engine, ("frame recheck",))
     shown = {}
     for r in rows:
         pk = r.get("pick")
@@ -4271,6 +4427,7 @@ def _verdict_report(engine, job: Path, rows: list) -> dict:
             t = "ai" if pk.get("ai") else TIERS[_tier(pk)]
             shown[t] = shown.get(t, 0) + 1
     out = {"checks": v, "tokens": dict(tok, usd=round(tok["usd"], 3)), "shown_tiers": shown, "mode": JUDGE_MODE,
+           "frame_rechecks": _crop_stats(v, crop),
            "media": JUDGE_MEDIA, "model": JUDGE_MODEL, "check_v": CHECK_V, "store": st.stats() if st else {}}
     k = lambda n: f"{n / 1000:.0f}k"
     engine.log(f"    picture checks ({JUDGE_MODE}, {JUDGE_MODEL}, {JUDGE_MEDIA}): {v.get('calls', 0)} calls, "
@@ -4278,9 +4435,36 @@ def _verdict_report(engine, job: Path, rows: list) -> dict:
                f"skipped as known-dirty, {v.get('waited', 0)} waited for another shot, {v.get('later', 0)} not needed, "
                f"{v.get('blank', 0)} blank; {v.get('failed', 0)} unanswered, {v.get('claude', 0)} answered by Claude "
                f"(not kept); in {k(tok['in'])} / out {k(tok['out'] + tok['think'])} tokens (~${tok['usd']:.2f}); "
-               f"on screen: " + ", ".join(f"{t} {shown.get(t, 0)}" for t in ("exact", "kind", "generic", "no", "ai")))
+               f"frame rechecks {v.get('crop_rechecks', 0)} ({v.get('crop_asked', 0)} asked, {v.get('crop_passed', 0)} "
+               f"passed, {v.get('crop_small', 0)} too small after the crop"
+               + (f", {v['crop_capped']} over MRTRUTH_CROP_MAX {CROP_MAX}" if v.get("crop_capped") else "")
+               + f", ~${crop['usd']:.3f}); on screen: "
+               + ", ".join(f"{t} {shown.get(t, 0)}" for t in ("exact", "kind", "generic", "no", "ai")))
     _dump(job / "mrtruth" / "verdicts.json", out)
     return out
+
+
+def _spent(engine, whats) -> dict:
+    """This run's Gemini tokens and dollars for the calls made for `whats` (the purposes pick_vision was given)."""
+    g = getattr(engine, "GEMINI_PICKS", None) or {}
+    prices = getattr(engine, "GEMINI_PRICES", None) or {}
+    tok = {"calls": 0, "in": 0, "out": 0, "think": 0, "usd": 0.0}
+    for x in (g.get("by") or {}).values():
+        if x.get("what") in whats:
+            pr = prices.get(x.get("model"))
+            for k in ("calls", "in", "out", "think"):
+                tok[k] += int(x.get(k) or 0)
+            if pr:
+                tok["usd"] += (int(x.get("in") or 0) * pr[0] + (int(x.get("out") or 0) + int(x.get("think") or 0)) * pr[1]) / 1e6
+    return tok
+
+
+def _crop_stats(v: dict, crop: dict) -> dict:
+    """The frame-only crops of this film (owner 2026-10-10, ~22:45), for verdicts.json and timing.json."""
+    return {"rechecks": v.get("crop_rechecks", 0), "asked": v.get("crop_asked", 0), "stored": v.get("crop_stored", 0),
+            "passed": v.get("crop_passed", 0), "too_small": v.get("crop_small", 0), "wanted": v.get("crop_wanted", 0),
+            "over_cap": v.get("crop_capped", 0), "cap": CROP_MAX, "calls": crop.get("calls", 0),
+            "usd": round(crop.get("usd", 0.0), 4)}
 
 
 def _search_report(engine, job: Path, rows: list, brave_requests: int) -> dict:
@@ -4300,6 +4484,11 @@ def _search_report(engine, job: Path, rows: list, brave_requests: int) -> dict:
     if _BING.get("why"):
         t = _BING["at"] - _BING.get("t0", _BING["at"])
         off = f"; Bing OFF at {int(t // 60)}:{int(t % 60):02d} after {_BING['n_at']} searches: {_BING['why']}"
+    # owner 2026-10-10 (~23:50): Commons first only on a shot that names something - the saving shows here
+    engine.log(f"    search order: Commons first for {g('first_commons')} shots (they name a person, place or thing), "
+               f"{'Bing' if WEB_SEARCH != 'brave' else 'Brave'} first for {g('first_bing')}; Commons asked "
+               f"{g('commons_r1') + g('commons_r2') + g('commons_r3')} times (round 1 {g('commons_r1')}, round 2 "
+               f"{g('commons_r2')}, round 3 {g('commons_r3')}), {g('commons')} of them searched (the rest saved earlier)")
     engine.log(f"    search: Commons {g('commons')} searches ({g('commons_found')} with photos); "
                + ("Bing not used (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else
                   f"Bing {g('bing')} searches ({g('bing_ok')} ok, {g('bing_thin_page')} thin, {failed} failed, "
@@ -4316,6 +4505,8 @@ def _search_report(engine, job: Path, rows: list, brave_requests: int) -> dict:
     if hosts:
         engine.log("    web pictures refused, by site (top 10): " + ", ".join(f"{h} {n}" for h, n in hosts[:10]))
     out = {"search": S, "web_search": WEB_SEARCH, "bing_params": BING_PARAMS, "bing_canary": _BING.get("canary", ""),
+           "first": {"commons": g("first_commons"), "bing": g("first_bing")},
+           "commons_asked": {"round1": g("commons_r1"), "round2": g("commons_r2"), "round3": g("commons_r3")},
            "bing_off": _BING.get("why", ""), "bing_off_after_searches": _BING.get("n_at", 0) if _BING.get("why") else None,
            "brave_out": _BRAVE_OUT["why"], "brave_requests": brave_requests, "on_screen_by_source": on_screen,
            "refused_hosts": dict(hosts[:40])}
@@ -4536,11 +4727,7 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
             if not ok and v.get("bad") == ["frame"]:  # only a drawn border: crop it off, ask once more (a Gemini check
                 crop = dest.with_name(dest.stem + "_crop.jpg")   # costs far less than a new picture)
                 try:
-                    from PIL import Image
-                    with Image.open(dest) as im:
-                        w, h = im.size
-                        im.convert("RGB").crop((int(w * .1), int(h * .1), int(w * .9), int(h * .9))) \
-                            .resize((w, h), Image.LANCZOS).save(crop, quality=92)
+                    _crop_edges(dest, crop, keep_size=True)      # the real photos' crop (_crop_recheck), scaled back up
                     ok, why2, v2 = _ai_ok(engine, crop, row, dossier, before, after, loose=bool(k), nobody=nobody)
                     if ok:
                         crop.replace(dest)
@@ -6317,7 +6504,7 @@ def _usage(engine) -> dict:
             "pictures_n": {k: n for k, (t, n) in PIC_T.items()},
             "gemini": json.loads(json.dumps(g, default=str)), "brave_requests": _BRAVE["requests"],
             "wikimedia_requests": COMMONS["requests"], "search": dict(SEARCH), "bing_off": _BING.get("why", ""),
-            "picture_checks": dict(VSTAT),
+            "picture_checks": dict(VSTAT), "frame_rechecks": _crop_stats(dict(VSTAT), _spent(engine, ("frame recheck",))),
             "claude": {k: c.get(k) for k in ("calls", "in", "out", "usd") if k in c}}
 
 
@@ -6447,7 +6634,8 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
                                  "ai": bool((r.get("pick") or {}).get("ai")), "provider": _provider(r.get("pick")),
                                  "tier": "" if not r.get("pick") or r["pick"].get("ai") else TIERS[_tier(r["pick"])],
                                  "anchor_switched": r.get("step") in ("anchor", "neighbour", "reused", "split-reused"),
-                                 "hold": bool(r.get("hold")), "filler": bool(r.get("filler"))} for r in rows])
+                                 "hold": bool(r.get("hold")), "filler": bool(r.get("filler")),
+                                 "cropped": bool((r.get("pick") or {}).get("crop_of"))} for r in rows])
     _credits(job, rows)                          # with the plan, so a finish from it needs nothing else
     return sc_list
 

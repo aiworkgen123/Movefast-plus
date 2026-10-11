@@ -1,4 +1,5 @@
-"""Mr Truth A1 (2026-10-10): the search order - Commons first, free Bing, Brave as backup - and one photo identity.
+"""Mr Truth A1 (2026-10-10): the search - free Bing, Brave as backup - and one photo identity; E1 (owner 2026-10-10,
+~23:50): Bing first for a generic shot, Commons first only for a shot that names a person, place or thing.
 Synthetic data only: no network, no paid call, no owner script or voice.
 
     .venv/bin/python -m unittest tests.test_mrtruth_a1 -v
@@ -566,6 +567,7 @@ class SearchPlan(unittest.TestCase):
         self.assertEqual(plan[1]["commons"], "vatican library hall")           # the plain words, not the name again
         self.assertEqual(plan[2]["commons"], "priest reading")                 # no name: the search in plain words
         self.assertEqual(plan[2]["web"], ["old priest reading 1950s"])
+        self.assertEqual([p["first"] for p in plan], ["commons", "commons", "bing"])   # owner 2026-10-10, ~23:50
 
     def test_a_person_without_likeness_is_searched_by_role(self):
         dossier = {"visualBrief": {"people": [{"name": "Father Aldo Brunetti", "likenessKnown": False, "role": "priest",
@@ -578,6 +580,40 @@ class SearchPlan(unittest.TestCase):
         self.assertEqual(p["commons"], "Catholic priest")
         self.assertTrue(p["stand"])
         self.assertFalse(any("brunetti" in w.lower() for w in p["web"] + [p["commons"]]))
+        self.assertEqual(p["first"], "bing")                 # the ROLE is searched: a generic figure, Bing first
+
+
+class SearchOrder(unittest.TestCase):
+    """E1 (owner 2026-10-10, ~23:50): Bing first for a generic or mood shot, Commons first only for a named thing."""
+
+    def test_named_by_archive_name_entity_or_names_list(self):
+        rows = [{"text": "a", "queries": ["dark corridor", "", ""], "archive": "Vatican Library"},
+                {"text": "b", "queries": ["papyrus fragment", "", ""], "entities": ["Rylands Papyrus"]},
+                {"text": "c", "queries": ["library hall", "", ""], "entities": ["Vatican Apostolic Library, Rome"]},
+                {"text": "d", "queries": ["candle smoke", "", ""], "entities": ["1943"]},
+                {"text": "e", "queries": ["old ledger", "", ""], "entities": ["the 1950s"]},
+                {"text": "f", "queries": ["silence", "", ""]}]
+        plan = M._search_plan(rows, {})
+        self.assertEqual([p["first"] for p in plan], ["commons", "commons", "commons", "bing", "bing", "bing"])
+        self.assertEqual(plan[1]["commons"], "Rylands Papyrus")             # the name itself
+        self.assertEqual((plan[3]["archive"], plan[3]["names"]), ("", []))   # a date is no archive name
+
+    def test_named_shots_take_their_commons_wording_first(self):
+        rows = [{"text": "a", "queries": ["roman forum", "", ""]},                       # generic, earlier in the film
+                {"text": "b", "queries": ["roman forum", "forum ruins", ""], "entities": ["Roman Forum"]}]
+        plan = M._search_plan(rows, {})
+        self.assertEqual([p["first"] for p in plan], ["bing", "commons"])
+        self.assertEqual(plan[1]["commons"], "Roman Forum")
+        self.assertNotEqual(plan[0]["commons"].lower(), "roman forum")   # its round-2 wording, never the named one's
+        self.assertEqual(len({p["commons"].lower() for p in plan if p["commons"]}),
+                         sum(1 for p in plan if p["commons"]))
+
+    def test_saving_on_a_mostly_generic_film(self):
+        rows = [{"text": f"line {k}", "queries": [f"mood picture {k}", f"shadow {k}", ""],
+                 "entities": ["Vatican Library"] if k % 5 == 0 else []} for k in range(40)]
+        plan = M._search_plan(rows, {})
+        self.assertEqual(sum(1 for p in plan if p["first"] == "commons"), 8)
+        self.assertTrue(all(p["web"] for p in plan))                       # every shot still searches the web
 
 
 class SearchPlanMore(unittest.TestCase):
@@ -601,60 +637,98 @@ class SearchPlanMore(unittest.TestCase):
 
 
 class RoundOne(unittest.TestCase):
-    """pictures() round 1 with every source stubbed: Commons and the web in one judge call, Commons first."""
+    """pictures() rounds 1-2 with every source stubbed (owner 2026-10-10, ~23:50): Bing first for a generic shot,
+    Commons first only for a shot that names something, then Bing only when Commons gave nothing usable."""
 
-    def run_pictures(self, env, web_extra=None):
+    def run_pictures(self, env, named=False, commons_tier=6.0, web_tier=6.5, copy=True):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             rows = [{"text": f"Line number {i} about the vault.", "startMs": i * 4000, "endMs": (i + 1) * 4000,
-                     "queries": [f"vault door {i}", f"bank vault {i}", ""], "entities": []} for i in range(2)]
-            calls, archive_calls = [], []
+                     "queries": [f"vault door {i}", f"bank vault {i}", ""],
+                     "entities": [f"Vault {i}"] if named else []} for i in range(2)]
+            calls, archive_calls, asked = [], [], {"commons": [], "web": []}
             commons_pic = {i: textured(d / "src" / f"c{i}.jpg", 10 + i) for i in range(2)}
             web_pic = {i: textured(d / "src" / f"w{i}.jpg", 20 + i) for i in range(2)}
             copy_pic = {i: textured(d / "src" / f"copy{i}.jpg", 10 + i, scale=(1280, 720)) for i in range(2)}
 
             def commons(q, folder, n=4):
+                asked["commons"].append((q, folder.name))
                 i = int(q.split()[-1])
                 return [({"title": f"commons {i}", "url": "", "source": "commons", "license": "cc", "provider": "commons"},
                          commons_pic[i])]
 
             def web(queries, folder, n=6, skip=()):
+                asked["web"].append((list(queries), folder.name))
+                if not queries[0].split()[-1].isdigit():                       # round 2's wider wording: nothing
+                    return []
                 i = int(queries[0].split()[-1])
                 return [({"title": f"web {i}", "url": "", "source": "web", "license": "", "provider": "bing"}, web_pic[i]),
                         ({"title": f"copy {i}", "url": "", "source": "web", "license": "", "provider": "bing"},
-                         copy_pic[i])]
+                         copy_pic[i])][:2 if copy else 1]
 
             def judge(engine, row, cands, dossier, before="", after=""):
                 calls.append([c["title"] for c, _ in cands])
-                return sorted([dict(c, photo=str(p), score=6.5 if c["provider"] == "bing" else 6.0, studio=False,
-                                    anchor=(0.5, 0.5), depiction="named-subject", flags=[], reason="", subject="",
-                                    person=False) for c, p in cands], key=lambda c: -c["score"])
+                return sorted([dict(c, photo=str(p), score=web_tier if c["provider"] == "bing" else commons_tier,
+                                    studio=False, anchor=(0.5, 0.5), depiction="named-subject", flags=[], reason="",
+                                    subject="", person=False) for c, p in cands], key=lambda c: -c["score"])
             e = Engine()
             M._search_reset(e)
             with mock.patch.dict(os.environ, env), mock.patch.object(M, "commons_photos", commons), \
                     mock.patch.object(M, "web_photos", web), mock.patch.object(M, "judge", judge), \
                     mock.patch.object(M, "archive_names", lambda *a, **k: None), \
                     mock.patch.object(M, "archive_photos", lambda q, f: archive_calls.append(q) or []), \
-                    mock.patch.object(M, "_ai_picture", lambda *a, **k: None):
+                    mock.patch.object(M, "_ai_picture", lambda *a, **k: None), \
+                    mock.patch.object(M, "_stop", lambda engine, msg: engine.log("stopped: " + msg)):
                 M.pictures(e, d / "job", rows, {})
             search = json.loads((d / "job" / "mrtruth" / "search.json").read_text())
-            return rows, calls, archive_calls, e.lines, search
+            return rows, calls, archive_calls, e.lines, search, asked
 
-    def test_one_call_commons_first_copy_dropped(self):
-        rows, calls, archive_calls, lines, search = self.run_pictures({"MRTRUTH_ARCHIVES": "0"})
-        self.assertEqual(sorted(calls), [["commons 0", "web 0"], ["commons 1", "web 1"]])   # one call, no copy
+    def test_generic_shot_bing_first_no_commons(self):
+        rows, calls, archive_calls, lines, search, asked = self.run_pictures({"MRTRUTH_ARCHIVES": "0"})
+        self.assertEqual(asked["commons"], [])                                        # Bing gave a usable picture
+        self.assertEqual(sorted(calls), [["web 0", "copy 0"], ["web 1", "copy 1"]])
         self.assertEqual(archive_calls, [])
-        self.assertTrue(all(r["pick"]["provider"] == "commons" for r in rows))        # 6.0 Commons over 6.5 web
-        self.assertEqual(search["on_screen_by_source"], {"commons": 2})
-        self.assertEqual(search["search"].get("judge_copies"), 2)
+        self.assertTrue(all(r["pick"]["provider"] == "bing" for r in rows))
+        self.assertEqual(search["first"], {"commons": 0, "bing": 2})
+        self.assertEqual(search["commons_asked"], {"round1": 0, "round2": 0, "round3": 0})
         self.assertTrue(any(l.strip().startswith("search: Commons") for l in lines))
-        self.assertTrue(any("on screen by source: commons 2" in l for l in lines))
+        self.assertTrue(any("search order: Commons first for 0 shots" in l and "Bing first for 2" in l for l in lines))
+        self.assertTrue(any("on screen by source: bing 2" in l for l in lines))
+
+    def test_named_shot_commons_first_and_bing_not_needed(self):
+        rows, calls, _, lines, search, asked = self.run_pictures({"MRTRUTH_ARCHIVES": "0"}, named=True)
+        self.assertEqual(sorted(q for q, _ in asked["commons"]), ["Vault 0", "Vault 1"])   # the archive name
+        self.assertEqual(asked["web"], [])                                            # Commons was usable: no Bing
+        self.assertEqual(sorted(calls), [["commons 0"], ["commons 1"]])
+        self.assertTrue(all(r["pick"]["provider"] == "commons" for r in rows))
+        self.assertEqual(search["first"], {"commons": 2, "bing": 0})
+        self.assertEqual(search["commons_asked"]["round1"], 2)
+
+    def test_named_shot_bing_when_commons_unusable_copy_dropped(self):
+        rows, calls, _, _, search, asked = self.run_pictures({"MRTRUTH_ARCHIVES": "0"}, named=True, commons_tier=4.0)
+        self.assertEqual(len(asked["web"]), 2)                                        # Commons was only generic
+        self.assertEqual(sorted(calls), [["commons 0"], ["commons 1"], ["web 0"], ["web 1"]])   # the copy dropped
+        self.assertTrue(all(r["pick"]["provider"] == "bing" for r in rows))
+        self.assertEqual(search["search"].get("judge_copies"), 2)
+
+    def test_generic_shot_round2_asks_commons_once(self):
+        rows, calls, _, _, search, asked = self.run_pictures({"MRTRUTH_ARCHIVES": "0"}, web_tier=4.0, copy=False)
+        self.assertEqual(sorted(f for _, f in asked["commons"]), ["commons_r2_0", "commons_r2_0"])   # once a shot
+        self.assertEqual(sorted(q for q, _ in asked["commons"]), ["vault door 0", "vault door 1"])  # the plan's wording
+        self.assertEqual(search["commons_asked"], {"round1": 0, "round2": 2, "round3": 0})
+        self.assertTrue(all(r["pick"]["provider"] == "commons" and r["step"] == "contextual" for r in rows))
+        # the Commons file is the very picture Bing brought (a near copy): it is not checked twice
+        rows, calls, _, _, search, asked = self.run_pictures({"MRTRUTH_ARCHIVES": "0"}, web_tier=4.0)
+        self.assertEqual(len(asked["commons"]), 2)
+        self.assertEqual(search["search"].get("judge_copies"), 2)
+        self.assertEqual(sorted(calls), [["web 0", "copy 0"], ["web 1", "copy 1"]])
 
     def test_archives_switched_on_keep_the_old_order(self):
-        rows, calls, archive_calls, _, _ = self.run_pictures({"MRTRUTH_ARCHIVES": "1"})
+        rows, calls, archive_calls, _, search, asked = self.run_pictures({"MRTRUTH_ARCHIVES": "1"})
         self.assertEqual(len(archive_calls), 2)
         self.assertIn(["commons 0"], calls)                                           # Commons judged on its own first
         self.assertIn(["web 0"], calls)
+        self.assertEqual(search["first"], {"commons": 2, "bing": 0})
 
 
 class Rank(unittest.TestCase):
