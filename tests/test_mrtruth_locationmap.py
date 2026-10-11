@@ -84,7 +84,8 @@ class Planner(unittest.TestCase):
     def test_his_hard_cuts_in_and_out(self):
         # every 3rd shot carries one of his two clips, some on a section turn; over many films the shots around them
         # still burn, flash and dip, but nothing lies over his own frames: a cut in, never a burn out
-        self.assertEqual(M.HARD_CUT_DEVICES, {"location-map", "date-stamp"})
+        # (impl-z: one set with the highlighted page and the gallery strip of impl-c, as both branches asked)
+        self.assertEqual(M.HARD_CUT_DEVICES, {"location-map", "date-stamp", "highlight-page", "gallery-strip"})
         seen, kinds, said, turns = 0, set(), [], 0
         for seed in range(60):
             rows, _ = film_rows(n=30, secs=8.0)
@@ -121,7 +122,10 @@ class Planner(unittest.TestCase):
         self.assertIn('"-b:a", audio_bitrate', inspect.getsource(make_video._final_mux))
         self.assertEqual(M.MAP_AUDIO_BITRATE, "320k")
         src = inspect.getsource(M.assemble)
-        self.assertIn('**({"audio_bitrate": MAP_AUDIO_BITRATE} if _map_sounds(sc_list) else {})', src)
+        # (impl-z: any of his template sounds - map, highlighted page, gallery - is one list, _template_sounds)
+        self.assertIn("his = _template_sounds(sc_list)", src)
+        self.assertIn('**({"audio_bitrate": MAP_AUDIO_BITRATE} if his else {})', src)
+        self.assertTrue(M._template_sounds([shot(0, 240, dev=MAPDEV)]))
 
 
 # ── his sound ──────────────────────────────────────────────────────────────────────────────────────────────────────────
