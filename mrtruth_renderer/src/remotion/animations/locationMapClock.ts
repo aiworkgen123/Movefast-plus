@@ -46,7 +46,15 @@ import { LOCATION_MAP_ADVANCES, LOCATION_MAP_CHARS, LOCATION_MAP_KERNING } from 
  * exactly. On any other length the move is compressed or stretched to the shot
  * (it always ends on the last frame, as his does), the build (dot, ring, label,
  * line) keeps his absolute frames from the shot's start and is never cut, and the
- * label's exit keeps its place relative to the END. The planner seats it on 5-8 s.
+ * label's exit keeps its place relative to the END. The planner seats it on 7-8 s:
+ * shorter, the camera runs more than 1.14x his speed and his sound (which
+ * follows his camera) would be cut in its loudest whoosh.
+ *
+ * SOFT, AS HIS (`overlaySoft`). His dot, ring, line and name are an end-size
+ * raster magnified by the camera: their edges are soft early and sharpen as the
+ * camera pulls back, a constant blur in the map plane. Ours are vector, so the
+ * same blur is put on them in the map plane (it scales with the camera as his).
+ * The shadows are not blurred again: they were fitted on his frames as they are.
  */
 export const LOCATION_MAP = {
   /** His shot: reference frames 22..261. */
@@ -79,6 +87,12 @@ export const LOCATION_MAP = {
     /** Linear sweep 0 -> 360 deg, starting east and going clockwise (east, south, west, north). */
     ringDraw: { from: 10.26, to: 34.12 },
     /**
+     * OURS: past this share the ring is drawn closed. On frame 34 the sweep is
+     * 0.995, a 1.8 deg gap (~2 px at the start's 1.86x) that showed as a notch at
+     * the closing point; his ring reads closed on that frame.
+     */
+    ringClosedAt: 0.99,
+    /**
      * Black, multiplied onto the map, fading in with the dot. The shadow numbers
      * here and on the ring are refitted (same model as his notes) on his own
      * shading map - frames 100-200 over frame 0, in map units: rms 0.0246 against
@@ -108,6 +122,12 @@ export const LOCATION_MAP = {
     thickness: 6,
     /** Linear scaleX 0 -> 1, anchored at x0; the gradient is squeezed into the drawn part. */
     draw: { from: 29.95, to: 39.91 },
+    /**
+     * Not drawn while shorter than this (M units). His first line pixel is on
+     * frame 31 (57 units drawn); on frame 30 ours was a 2.7-unit sliver that his
+     * has not. The 10/50/90% crossings are untouched.
+     */
+    minDrawn: 4,
   },
   label: {
     colour: '#FFFFFF',
@@ -147,6 +167,19 @@ export const LOCATION_MAP = {
     linePitch: 0.95,
     maxLines: 2,
   },
+  /**
+   * The softness of his dot and ring, his line and his name: a Gaussian of this
+   * sigma in M units, in the map plane (see the box above). Fitted on our render
+   * through the film's encode against his frames, 10-90% edge widths:
+   *   marker  the ring's outer edge and the dot's edge along radial lines, local
+   *           34-237: ring 3.95-4.4 px vs his 3.5-4.25 (2.7-2.9 sharp), dot
+   *           4.5-5.2 vs his 4.5-5.3 (2.65-3.3 sharp).
+   *   line    its top edge across x 150-260, local 45-225: his 1.1-1.2 units.
+   *   label   the L's left stem, local 45-200: his 1.7-1.9 units (0.7-1.0 sharp).
+   * Any filter at all adds about a pixel of resampling softness in Chromium, so
+   * these are smaller than a Gaussian alone would need.
+   */
+  overlaySoft: { marker: 0.4, line: 0.25, label: 0.55 },
   /** Screen-fixed, over everything: V = 1 - amount * smoothstep(r0, r1, rho), rho over an ellipse. */
   vignette: { r0: 0.6135, r1: 1.6559, ex: 0.9234, ey: 0.9255, amount: [0.591, 0.6796, 0.4277] as const },
 } as const

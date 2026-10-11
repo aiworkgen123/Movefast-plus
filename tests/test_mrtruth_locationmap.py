@@ -46,11 +46,12 @@ class Planner(unittest.TestCase):
         on, pics, lo, hi, cap, pos, chain, lim = M.LIBRARY["location-map"]
         self.assertFalse(on)                                   # the table's never-placed mark
         self.assertIn("location-map", M.AWAITING_RULINGS)
-        self.assertEqual((pics, lo, hi, cap, chain, lim), (1, 5.0, 8.0, None, [], {"label": 32}))
+        self.assertEqual((pics, lo, hi, cap, chain, lim), (1, 7.0, 8.0, None, [], {"label": 32}))
         self.assertEqual(M.BUILD_FRAMES["location-map"], 51)   # his name settles on frame 51
+        self.assertAlmostEqual(M._need_s("location-map"), 7.3)
         row = next(p for p in M.PREVIEW if p[0] == "location-map")
         self.assertEqual(row[2], 240)                          # his shot: 8.000 s
-        self.assertEqual(row[3], "map:Lake Monoun:5.58:10.585")
+        self.assertEqual(row[3], "map:Lake Monoun:5.58:10.585:5.5729:10.5853")   # centred on his own ground
         self.assertEqual(row[5], {"id": "location-map", "label": "Lake Monoun"})
 
     def test_never_placed(self):
@@ -80,6 +81,32 @@ class Planner(unittest.TestCase):
         self.assertNotIn("ambience", sc[2])                    # no dust or leak over a template
         self.assertNotIn("cinemaMove", sc[2])
 
+    def test_his_hard_cuts_in_and_out(self):
+        # every 3rd shot carries one of his two clips, some on a section turn; over many films the shots around them
+        # still burn, flash and dip, but nothing lies over his own frames: a cut in, never a burn out
+        self.assertEqual(M.HARD_CUT_DEVICES, {"location-map", "date-stamp"})
+        seen, kinds = 0, set()
+        for seed in range(60):
+            rows, _ = film_rows(n=30, secs=8.0)
+            for i, r in enumerate(rows):
+                r["text"] += f" film {seed}"
+                if i % 3 == 1:
+                    r["device"] = ({"id": "location-map", "label": "Lake Monoun"} if (i + seed) % 2 else
+                                   {"id": "date-stamp", "date": "February", "year": "1994"})
+                    r["section_turn"] = (i + seed) % 5 == 0
+                elif i % 7 == 3:
+                    r["section_turn"] = True
+            M.transitions(rows)
+            for i, r in enumerate(rows):
+                if (r.get("device") or {}).get("id") in M.HARD_CUT_DEVICES:
+                    seen += 1
+                    self.assertEqual(r["tin"], {"type": "cut", "durationFrames": 0}, (seed, i))
+                    self.assertIsNone(r["tout"], (seed, i))                    # the next shot never burns over it
+                else:
+                    kinds.add(r["tin"]["type"])
+        self.assertGreater(seen, 500)
+        self.assertTrue({"filmBurn", "flash", "dipToBlack", "cut"} <= kinds, kinds)   # the others still get theirs
+
 
 # ── his sound ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 def shot(start, n, kind="cut", dev=None):
@@ -107,6 +134,28 @@ class Sound(unittest.TestCase):
         self.assertIn("atrim=end=4.935354", chain)
         self.assertIn("afade=t=out", chain)
         self.assertIn(f"adelay={round(short[0] * 48000)}S:all=1", chain)      # to the sample
+
+    def test_the_shortest_seat_cuts_only_his_tail(self):
+        # on 7 s (the library's floor) his sound is cut where it is already down to -46.6 dBFS (rms of its last 200 ms;
+        # -52.6 at his 8 s); on 5 s it was cut in the loudest whoosh (-23.7 dBFS) - why the floor is 7 s
+        import numpy as np
+        with wave.open(str(R / "sfx" / M.MAP_SFX)) as w:
+            a = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, 2).astype(np.float64) / 32768
+        db = lambda end: 20 * np.log10(np.sqrt((a[int((end - 0.2) * 48000):int(end * 48000)] ** 2).mean()))
+        keep = lambda secs: M._map_sounds([shot(0, round(secs * M.FPS), dev=MAPDEV)])[0][1]
+        self.assertLess(db(keep(M.LIBRARY["location-map"][2])), -46)
+        self.assertGreater(db(keep(5.0)), -30)
+
+    def test_a_music_bed_that_would_level_his_sound_is_named(self):
+        class E:
+            USE_SOUND_BED, INTRO_MUSIC, SFX_HIT = True, Path("/nonexistent/INTRO.wav"), Path("/nonexistent/hit.mp3")
+            _music_beds = staticmethod(lambda: [])
+        self.assertFalse(M._bed_under(E))                      # no VOICE DESIGN folder: no bed, nothing to say
+        E._music_beds = staticmethod(lambda: [Path("bed.mp3")])
+        self.assertTrue(M._bed_under(E))
+        E.USE_SOUND_BED = False
+        self.assertFalse(M._bed_under(E))
+        self.assertFalse(M._bed_under(object()))               # an engine without the bed at all
 
     def _graph(self, sc_list, channels=1):
         calls = []
@@ -248,6 +297,53 @@ class Plate(unittest.TestCase):
             z, y, x = (int(v) for v in re.search(r"/(\d+)/(\d+)/(\d+)\.jpg$", u).groups())
             self.assertTrue(0 <= x < 2 ** z and 0 <= y < 2 ** z, u)
 
+    def test_a_bright_place_is_brought_down_and_a_green_one_kept(self):
+        # his curve lifts a desert to near white, where his white line and name stop reading (Qumran: 182 over the end
+        # view, 225 behind the line); such a plate is scaled down by one factor, a green one is left byte for byte
+        import numpy as np
+        from PIL import Image
+        luma = lambda x: float((np.asarray(x, np.float64) @ np.array([0.2126, 0.7152, 0.0722])).mean())
+        green = MAP.grade(Image.new("RGB", (2200, 1560), (57, 70, 61)))
+        same, k = MAP.expose(green)
+        self.assertEqual((k, same.tobytes()), (1.0, green.tobytes()))
+        desert = MAP.grade(Image.new("RGB", (2200, 1560), (200, 185, 150)))
+        self.assertGreater(luma(desert), 200)
+        down, k = MAP.expose(desert)
+        self.assertLess(k, 1.0)
+        self.assertLessEqual(luma(down), MAP.LABEL_LUMA_MAX + 0.5)
+        ratio = np.asarray(down, np.float64).reshape(-1, 3).mean(0) / np.asarray(desert, np.float64).reshape(-1, 3).mean(0)
+        self.assertLess(float(ratio.max() - ratio.min()), 0.01)                  # the hue stays
+        said = []                                               # the grey test world grades bright: plate() says so
+        got = MAP.plate(LAT, LON, self.d / "a.jpg", self.d / "tiles", get=TileWorld(), tpu=TPU, say=said.append)
+        self.assertLess(got["exposure"], 1.0)
+        self.assertTrue(any("scaled by" in s for s in said), said)
+
+    def test_a_hanging_service_fails_the_zoom_at_once(self):
+        # the first tile that fails all its tries stops the rest (a service that times out cost every tile 3 x 20 s)
+        import threading
+        z = MAP.fetch_zoom(LAT, TPU)
+        calls, lock = [], threading.Lock()
+
+        def hang(url, headers):
+            with lock:
+                calls.append(url)
+            raise TimeoutError("timed out")
+        with self.assertRaises(MAP.ImageryError):
+            MAP.stitch(LAT, LON, z, self.d / "tiles", hang, TPU)
+        self.assertLessEqual(len(calls), MAP.TILE_TRIES * MAP.TILE_WORKERS)    # not every tile, not every try
+        # and a zoom has PLATE_DEADLINE_S in all, however slowly its tiles fail
+        clock, slow_calls = [0.0], []
+
+        def slow(url, headers):
+            with lock:
+                clock[0] += 30.0
+                slow_calls.append(url)
+            raise OSError("slow and failing")
+        with mock.patch.object(MAP.time, "monotonic", lambda: clock[0]):
+            with self.assertRaises(MAP.ImageryError):
+                MAP.stitch(LAT, LON, z, self.d / "t2", slow, TPU)
+        self.assertLessEqual(len(slow_calls), MAP.TILE_TRIES * MAP.TILE_WORKERS)
+
     def test_his_look_keeps_white_white_and_order(self):
         from PIL import Image
         ramp = Image.new("RGB", (256, 1))
@@ -370,6 +466,13 @@ class Geocode(unittest.TestCase):
             self.assertEqual((again["photo"], world.n, geo.asked), (pick["photo"], n, ["Lake Monoun"]))
             self.assertIsNone(MAP.build_place("Lake Monoun", 40.0, 10.585, d / "maps", d / "shared", get=get,
                                               say=lambda m: None))
+            # the preview's plate on his own ground: the place still checked, the plate centred where asked
+            his = MAP.build_place("Lake Monoun", 5.58, 10.585, d / "maps", d / "shared", get=get, say=lambda m: None,
+                                  at=(5.5729, 10.5853))
+            self.assertEqual((his["map"]["lat"], his["map"]["lon"]), (5.5729, 10.5853))
+            self.assertNotEqual(his["photo"], pick["photo"])
+            self.assertIsNone(MAP.build_place("Lake Monoun", 40.0, 10.585, d / "maps", d / "shared", get=get,
+                                              say=lambda m: None, at=(5.5729, 10.5853)))
         self.assertEqual(MAP.LAYER, "s2cloudless_3857")        # the 2016 mosaic: CC BY 4.0 (2018+ are NonCommercial)
 
 
@@ -438,12 +541,26 @@ class Renderer(unittest.TestCase):
                      "vignette: { r0: 0.6135, r1: 1.6559, ex: 0.9234, ey: 0.9255, amount: [0.591, 0.6796, 0.4277] as const }",
                      f"metresPerUnit: {MAP.M_PER_UNIT}", "LOCATION_MAP_BUILD_END_FRAMES = 51"):
             self.assertIn(want, clock)
+        for want in ("overlaySoft: { marker: 0.4, line: 0.25, label: 0.55 }", "ringClosedAt: 0.99", "minDrawn: 4"):
+            self.assertIn(want, clock)                         # fix round 1: his softness, his closed ring, no sliver
         x0, x1, y0, y1 = MAP.PLATE
         self.assertIn(f"plate: {{ x0: {x0}, x1: {x1}, y0: {y0}, y1: {y1} }}", clock)
         # his camera covers the plate on every frame (the end frame turned 13 deg needs +-1056.8 x +-741.9)
         h = lambda w, hh, a: (w * math.cos(a) + hh * math.sin(a), w * math.sin(a) + hh * math.cos(a))
         cx, cy = h(960, 540, math.radians(12.985))
         self.assertTrue(cx < x1 and cy < y1)
+
+    def test_ids_are_the_maps_own_and_the_soft_filters_are_on(self):
+        tsx = read("src/remotion/animations/LocationMap.tsx")
+        self.assertIn("useId()", tsx)
+        self.assertNotIn('id="lm-', tsx)                       # no fixed document ids left
+        self.assertNotIn("url(#lm-", tsx)
+        for f in ("soft-mark", "soft-line", "soft-label"):
+            self.assertEqual(tsx.count("id={`${uid}-" + f + "`}"), 1, f)
+            self.assertEqual(tsx.count("url(#${uid}-" + f + ")"), 1, f)
+        self.assertEqual(tsx.count("filter={soft}"), 2)        # the dot and the ring
+        self.assertIn("if (length < l.minDrawn) return null", tsx)
+        self.assertIn("sweep >= m.ringClosedAt ? undefined", tsx)
 
     def test_the_face_is_the_matched_file_with_its_licence(self):
         f = R / "public" / "fonts"

@@ -92,18 +92,26 @@ LIBRARY = {
     "name-plate":     (False, 1, 3.0, 5.0, 3, "any", [], {}),
     # the owner's date overlay (2026-10-11, renderer DateStamp.tsx), copied 1:1 off his reference: in the library and
     # previewable, NOT placed yet - his placement rulings come later. Off here is the table's never-placed mark (as for
-    # the switched-off ones above); the preview labels it as waiting for its rulings, not as switched off
-    "date-stamp":     (False, 1, 2.0, 8.0, None, "any", [], {}),
+    # the switched-off ones above); the preview labels it as waiting for its rulings, not as switched off. 3.5 s at
+    # least (until he rules): his 45-frame build and then 2 s of the settled date (his own shot holds it 78 frames)
+    "date-stamp":     (False, 1, 3.5, 8.0, None, "any", [], {}),
     # the owner's map animation (2026-10-11, renderer LocationMap.tsx, planning half mrtruth_map.py), copied 1:1 with
-    # his sound (MAP_SFX): in the library and previewable, NOT placed yet, the same way. His shot is 8.0 s; on 5-8 s the
-    # camera move fills the shot and the ring and name keep his frames. Its one picture is the place's satellite plate.
+    # his sound (MAP_SFX): in the library and previewable, NOT placed yet, the same way. His shot is 8.0 s; on 7-8 s the
+    # camera move fills the shot and the ring and name keep his frames. Not shorter: his sound follows his camera (its
+    # whoosh peaks 0.8 s after the camera's fastest moment) and is cut with the shot; on 7 s the camera runs at most
+    # 1.14x his speed and the cut lands at -46.6 dBFS (his last 200 ms there; -52.6 at his 8 s), on 5 s it fell in the
+    # loudest whoosh (-23.7 dBFS) after the camera had stopped. Its one picture is the place's satellite plate.
     # FOR THE PLANNER, when his rulings come: the place's name as the narration says it (mrtruth_map.label_fits), its
-    # coordinates from the dossier or Claude, and the shot whose words name it (5-8 s); then at planning time
+    # coordinates from the dossier or Claude, and the shot whose words name it (7-8 s); then at planning time
     # pick = mrtruth_map.build_place(name, lat, lon, <job>/mrtruth/maps, <output>/_shared) - None (the geocoder unsure,
     # no imagery) keeps the photograph - and row["device"] = {"id": "location-map", "label": name}
-    "location-map":   (False, 1, 5.0, 8.0, None, "any", [], {"label": 32}),
+    "location-map":   (False, 1, 7.0, 8.0, None, "any", [], {"label": 32}),
 }
 AWAITING_RULINGS = {"date-stamp", "location-map"}     # drawn and previewed, never placed, until the owner rules where they go
+# his two clips cut in and cut out hard: transitions() gives a shot carrying one of these a cut in (no flash, burn or
+# dip over his dot, ring or date building) and never a burn out (it would lie over his name's fade or his held date).
+# A section turn that lands on one is a hard cut too, until he rules otherwise
+HARD_CUT_DEVICES = {"date-stamp", "location-map"}
 # frames each template needs to finish building (the repo's DEVICE_REGISTRY buildEndFrames) — never seated on a shorter shot
 BUILD_FRAMES = {"P12": 36, "P17": 42, "P03": 55, "P22": 123, "P19": 76, "gallery-strip": 131, "framed-card": 25,
                 "photo-pop": 61, "shadow-up": 60, "P08": 60, "P04": 60, "P02": 90, "P09": 90, "P05": 120, "P14": 71,
@@ -7017,7 +7025,8 @@ def _content_draw(text: str) -> float:
 
 def transitions(rows: list) -> None:
     """transitionIn/Out per shot: a dip to black at a section turn, then (keyed on each shot's own words, never
-    periodic) a film burn, flash, push or slide at the repo's shares; everything else a hard cut."""
+    periodic) a film burn, flash, push or slide at the repo's shares; everything else a hard cut. A shot with one of the
+    owner's hard-cut templates (HARD_CUT_DEVICES) is cut into, and the shot after it never burns over its end."""
     last_burn, run = -1e9, 0
     burns_by_min = {}
     for i, r in enumerate(rows):
@@ -7027,12 +7036,16 @@ def transitions(rows: list) -> None:
         u = _content_draw(r["text"] + str(i))
         t = r["startMs"] / 1000.0
         dev = (r.get("device") or {}).get("id")
+        if dev in HARD_CUT_DEVICES:
+            run = 0
+            continue
         if r.get("section_turn") or dev == "chapter-title":
             r["tin"] = {"type": "dipToBlack", "durationFrames": DIP_FRAMES}
             run = 0
             continue
         minute = int(t // 60)
         if (u < BURN_SHARE and t - last_burn >= BURN_GAP_S and burns_by_min.get(minute, 0) < BURN_PER_MIN
+                and (rows[i - 1].get("device") or {}).get("id") not in HARD_CUT_DEVICES
                 and run < BURN_MAX_RUN and (r["endMs"] - r["startMs"]) / 1000 * FPS > BURN_IN + 2
                 and (rows[i - 1]["endMs"] - rows[i - 1]["startMs"]) / 1000 * FPS > BURN_OUT + 2):
             r["tin"] = {"type": "filmBurn", "durationFrames": BURN_IN, "clip": "burn02"}
@@ -7351,6 +7364,16 @@ def _channels(path: Path) -> int:
         return 1
 
 
+def _bed_under(engine) -> bool:
+    """Will make_video's final mux lay its music bed under the film (and run its normaliser over everything)? Only when
+    USE_SOUND_BED is on and assets/VOICE DESIGN holds something; that folder is not in the repo or the pod package, so
+    a Mr Truth film normally has none. Whether Mr Truth should ever carry it is the owner's call."""
+    try:
+        return bool(engine.USE_SOUND_BED and (engine._music_beds() or engine.INTRO_MUSIC.exists() or engine.SFX_HIT.exists()))
+    except (AttributeError, OSError):
+        return False
+
+
 def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
     """The voice with the repo's two live sounds under it (a shutter on each flash, a thud on each dip) and the owner's
     map sound on each location-map shot (MAP_SFX: his level, his offset, stereo, never thinned by the gap rule)."""
@@ -7449,6 +7472,9 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     render(engine, work, tasks, workers=int(_cfg(engine, style).get("render_processes") or 2))
     engine._concat_segments([Path(t["output"]) for t in tasks], job / "_visual.mp4")
     audio = _sfx_audio(engine, job, mp3, sc_list)
+    if _map_sounds(sc_list) and _bed_under(engine):
+        engine.log("  sound: WARNING - a music bed (assets/VOICE DESIGN) is mixed under this film and its normaliser "
+                   "(dynaudnorm) evens out his map sound too: his boom and riser are not 1:1 (USE_SOUND_BED=0 keeps them)")
     # the planned cuts go with it: a freeze is a failed read only if it runs to the end across one of them (a slow
     # move on a dark photo or a 13 s planned hold ends at its own cut; owner 2026-10-10, three needless re-muxes)
     engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False,
@@ -8873,7 +8899,7 @@ def check(job: Path) -> list:
 
 # ── 8. previews: every template, labelled, so the owner can watch them (the switched-off ones too) ────────────
 # the map preview's place, as a planner would hand it over: Lake Monoun, Cameroon (his reference), 5.58 N 10.585 E
-PREVIEW_MAP = "map:Lake Monoun:5.58:10.585"
+PREVIEW_MAP = "map:Lake Monoun:5.58:10.585:5.5729:10.5853"     # name : planner's point : his own ground (the plate's centre)
 PREVIEW = [
     ("P03", "Opening title", 150, "qumran_caves", [], {"id": "P03", "kicker": "Qumran, 1947", "headline": "The scrolls in the cave", "highlightWords": ["scrolls"]}),
     ("gallery-strip", "Previews 4 pictures from later", 150, "desert", ["scroll_fragment", "shrine", "jars", "isaiah_scroll"], {"id": "gallery-strip"}),
@@ -8929,8 +8955,9 @@ def preview(which: str = "all") -> Path:
         out = work / "segments" / f"{k:02d}_{tid}.mp4"
         if img.startswith("map:"):                       # the place's satellite plate, made as at planning time
             import mrtruth_map
-            _, name, lat, lon = img.split(":")
-            got = mrtruth_map.build_place(name, lat, lon, work / "maps", Path(engine.OUTPUT_ROOT) / "_shared")
+            _, name, lat, lon, *at = img.split(":")
+            got = mrtruth_map.build_place(name, lat, lon, work / "maps", Path(engine.OUTPUT_ROOT) / "_shared",
+                                          at=(float(at[0]), float(at[1])) if at else None)
             if not got:
                 print(f"Mr Truth preview: {tid} left out - no map plate for {name} (see above)")
                 continue

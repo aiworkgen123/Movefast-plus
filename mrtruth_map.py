@@ -15,11 +15,17 @@ here, stored in the job like any other picture and never fetched at render time.
             Web Mercator, centred on the place) at TEXELS_PER_UNIT: his end frame at one texel a screen pixel, as his
             own texture had (his start view, magnified 1.87x, is soft, and so is ours). Fetched at the zoom that gives
             at least that, downsampled with Lanczos. Fallback: one zoom lower (softer), then no plate - the template is
-            not used and the shot stays a photograph.
+            not used and the shot stays a photograph. A zoom gives up at its first tile that fails all its tries, and
+            after PLATE_DEADLINE_S in all, so a service that hangs instead of refusing costs about a minute a zoom.
   grade     his look, fitted on his end frame against the same S2 imagery registered under it: per channel
             gain * x^gamma + offset (GRADE). Mean RGB 71.6/91.2/48.6 vs his 71.9/91.6/49.2, median hue 90 deg, saturation
             0.47 and value 0.36 for both. A smooth curve, not his region's histogram, so a desert or a city keeps its own
             colours under the same look.
+  exposure  his curve was fitted on green tropical ground (mean luma ~82 in his end view); on a bright place it lifts
+            the ground to near white (Qumran: 182 over the end view, 225 behind the line and name), where his white line
+            and name stop reading. So a plate whose end view is brighter than VIEW_LUMA_MAX, or whose line-and-name
+            area is brighter than LABEL_LUMA_MAX, is scaled down as a whole (every channel by one factor: the hue stays);
+            green places (Monoun 81.5 / 80.6, Texoma 82.5 / 85.2) are untouched.
   place     the planner's coordinates (from the dossier / Claude) checked against OpenStreetMap Nominatim: a name it
             cannot resolve, resolves only far from the planner's point (MATCH_KM) or resolves to a region too large to
             ring (MAX_PLACE_KM) is refused, and the template is not used there. 1 request a second at most, a named
@@ -27,7 +33,7 @@ here, stored in the job like any other picture and never fetched at render time.
 
 FOR THE PLANNER (not written yet - the owner rules on placement later; nothing places this template today). To seat a
 location-map on a shot the planner needs: the place's name as the narration says it (the label, `label_fits`), its
-coordinates from the dossier or Claude (lat, lon), and the moment - the shot whose words name the place, 5-8 s long.
+coordinates from the dossier or Claude (lat, lon), and the moment - the shot whose words name the place, 7-8 s long.
 Then, at planning time: `pick = build_place(name, lat, lon, <job>/mrtruth/maps, <output>/_shared, say=engine.log)`;
 a pick -> row["pick"] = pick, row["device"] = {"id": "location-map", "label": name}; None -> the shot keeps its
 photograph. The sound is cued by mrtruth._sfx_audio from the device alone.
@@ -66,6 +72,7 @@ TILE = 256
 MAX_ZOOM = 13                              # 2016's 3857 pyramid is deeper; a 260 km view never needs more
 TILE_WORKERS = 4                           # tiles asked at once
 TILE_TRIES = 3
+PLATE_DEADLINE_S = 60.0                    # one zoom's tiles, all tries included; then that zoom has failed
 
 # his geometry (renderer locationMapClock.ts LOCATION_MAP: metresPerUnit, plate) - a unit test keeps them equal
 M_PER_UNIT = 135.34
@@ -82,6 +89,11 @@ EARTH_M_PER_PX0 = 156543.03392804097       # Web Mercator ground metres per pixe
 # white stays white (his cloud puffs are white). Fitted 2026-10-11 on this module's own plate (z11, softened) laid under
 # his de-vignetted end frame: quantiles 1-99% within 1.2 / 1.3 / 2.1 levels (R / G / B)
 GRADE = {"R": (0.5285, 1.3093, -0.3093), "G": (0.3633, 1.7267, -0.7267), "B": (0.5182, 1.5418, -0.5418)}
+# OURS, after his curve (see `exposure` above): the most a graded plate's mean luma (Rec. 709 weights, 0-255) may be
+# over his end view (M units -960..960 x -540..540) and over the line and name (x 77.5..620, y -80..60). His own end
+# view is ~82; at 110 / 120 the line keeps 84% / 77% of its contrast on Monoun over the ground behind it
+VIEW_LUMA_MAX, LABEL_LUMA_MAX = 110.0, 120.0
+END_VIEW, LABEL_AREA = (-960, 960, -540, 540), (77.5, 620, -80, 60)
 
 # ── place check ────────────────────────────────────────────────────────────────────────────────────────────────────────
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
@@ -121,14 +133,20 @@ def fetch_zoom(lat: float, tpu: float = TEXELS_PER_UNIT) -> int:
     return max(1, min(MAX_ZOOM, z))
 
 
-def _tile(z: int, x: int, y: int, cache: Path, get) -> bytes:
-    """One tile, from the cache or the service (TILE_TRIES tries); its bytes are checked to decode before keeping."""
+def _tile(z: int, x: int, y: int, cache: Path, get, stop=None, deadline: float = None) -> bytes:
+    """One tile, from the cache or the service (TILE_TRIES tries); its bytes are checked to decode before keeping.
+    `stop` (a threading.Event): another tile of this zoom has failed, give up at once; `deadline` (time.monotonic())
+    the zoom's own time is up."""
     from PIL import Image
     path = cache / LAYER / str(z) / str(x) / f"{y}.jpg"
     if path.exists():
         return path.read_bytes()
     last = ""
     for k in range(TILE_TRIES):
+        if stop is not None and stop.is_set():
+            raise ImageryError(f"tile {z}/{x}/{y}: not asked, another tile of this zoom failed")
+        if deadline is not None and time.monotonic() > deadline:
+            raise ImageryError(f"tile {z}/{x}/{y}: the zoom's {PLATE_DEADLINE_S:.0f} s are up ({last or 'no answer yet'})")
         try:
             data = get(TILE_URL.format(z=z, x=x, y=y), {"User-Agent": USER_AGENT})
             with Image.open(io.BytesIO(data)) as im:
@@ -140,7 +158,7 @@ def _tile(z: int, x: int, y: int, cache: Path, get) -> bytes:
             return data
         except Exception as e:                                       # noqa: BLE001 - asked again, then this zoom fails
             last = f"{type(e).__name__}: {str(e)[:120]}"
-            if k + 1 < TILE_TRIES:
+            if k + 1 < TILE_TRIES and not (stop is not None and stop.is_set()):
                 time.sleep(0.5 * 3 ** k)
     raise ImageryError(f"tile {z}/{x}/{y}: {last}")
 
@@ -160,8 +178,25 @@ def stitch(lat: float, lon: float, z: int, cache: Path, get=None, tpu: float = T
     ty0, ty1 = math.floor(top / TILE), math.floor((bottom - 1e-9) / TILE)
     cells = [(tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)]
     mosaic = Image.new("RGB", ((tx1 - tx0 + 1) * TILE, (ty1 - ty0 + 1) * TILE))
-    with ThreadPoolExecutor(max_workers=TILE_WORKERS) as ex:      # x wraps across the date line
-        datas = list(ex.map(lambda c: _tile(z, c[0] % n, c[1], cache, get), cells))
+    # the first tile that fails all its tries fails the zoom at once: the tiles still queued are cancelled and the ones
+    # being asked give up before their next try (a service that times out would otherwise cost every tile 3 x 20 s)
+    stop, deadline = threading.Event(), time.monotonic() + PLATE_DEADLINE_S
+
+    def one(c):
+        try:
+            return _tile(z, c[0] % n, c[1], cache, get, stop, deadline)          # x wraps across the date line
+        except BaseException:
+            stop.set()
+            raise
+    with ThreadPoolExecutor(max_workers=TILE_WORKERS) as ex:
+        futures = [ex.submit(one, c) for c in cells]
+        try:
+            datas = [f.result() for f in futures]
+        except BaseException:
+            stop.set()
+            for f in futures:
+                f.cancel()
+            raise
     for (tx, ty), data in zip(cells, datas):
         with Image.open(io.BytesIO(data)) as im:
             mosaic.paste(im.convert("RGB").resize((TILE, TILE)), ((tx - tx0) * TILE, (ty - ty0) * TILE))
@@ -196,9 +231,31 @@ def grade(im):
     return im.convert("RGB").point(lut)
 
 
+def _mean_luma(a, box, tpu: float) -> float:
+    """Mean Rec. 709 luma of a plate array over an M-unit box (x0, x1, y0, y1)."""
+    x0, x1, y0, y1 = box
+    c0, r0 = round((x0 - PLATE[0]) * tpu), round((y0 - PLATE[2]) * tpu)
+    c1, r1 = round((x1 - PLATE[0]) * tpu), round((y1 - PLATE[2]) * tpu)
+    s = a[max(0, r0):r1, max(0, c0):c1]
+    return float((s[..., 0] * 0.2126 + s[..., 1] * 0.7152 + s[..., 2] * 0.0722).mean())
+
+
+def expose(im, tpu: float = TEXELS_PER_UNIT):
+    """(image, factor): a graded plate brighter than VIEW_LUMA_MAX over the end view or LABEL_LUMA_MAX behind the line
+    and name, scaled down by one factor on every channel (the hue stays); any other plate as it is, factor 1."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(im.convert("RGB"), np.float32)
+    k = min(1.0, VIEW_LUMA_MAX / max(1.0, _mean_luma(a, END_VIEW, tpu)),
+            LABEL_LUMA_MAX / max(1.0, _mean_luma(a, LABEL_AREA, tpu)))
+    if k >= 1.0:
+        return im, 1.0
+    return Image.fromarray(np.clip(a * k + 0.5, 0, 255).astype(np.uint8)), round(k, 4)
+
+
 def plate(lat: float, lon: float, out: Path, cache: Path, get=None, tpu: float = TEXELS_PER_UNIT, say=print):
     """The graded plate for a place, written to `out` (JPEG). Tries the fetch zoom, then one lower; returns
-    {"zoom", "tiles_at", "size", "soft"} or None when neither could be made (the template is then not used)."""
+    {"zoom", "size", "soft", "exposure"} or None when neither could be made (the template is then not used)."""
     if not (-MAX_LAT <= lat <= MAX_LAT) or not (-180 <= lon <= 180):
         say(f"      map plate: {lat:.4f}, {lon:.4f} is outside the map's range")
         return None
@@ -211,9 +268,12 @@ def plate(lat: float, lon: float, out: Path, cache: Path, get=None, tpu: float =
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".part.jpg")
-        grade(soften(im, SOFTEN_UNITS * tpu)).save(tmp, "JPEG", quality=92, subsampling=0, optimize=True)
+        graded, k = expose(grade(soften(im, SOFTEN_UNITS * tpu)), tpu)
+        if k < 1.0:
+            say(f"      map plate: a bright place, the whole plate scaled by {k:.2f} so his white line and name read")
+        graded.save(tmp, "JPEG", quality=92, subsampling=0, optimize=True)
         os.replace(tmp, out)
-        return {"zoom": z, "size": list(im.size), "soft": z < z0}
+        return {"zoom": z, "size": list(im.size), "soft": z < z0, "exposure": k}
     return None
 
 
@@ -328,15 +388,20 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:40] or "place"
 
 
-def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=print):
+def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=print, at=None):
     """The map shot's picture for a place: checked, its plate made (or found made) in `folder`. The pick, shaped like
-    every other picture of the film (credits.json reads it), or None - the place could not be checked, or no imagery."""
+    every other picture of the film (credits.json reads it), or None - the place could not be checked, or no imagery.
+    The plate is centred on the geocoder's point, or on `at` = (lat, lon) when given (the preview: his own ground,
+    5.5729 N 10.5853 E, measured off his frames, 0.69 km south of OpenStreetMap's point for Lake Monoun); the place is
+    checked either way."""
     g = geocode(name, lat, lon, shared / "geocode_nominatim.json", get=get)
     if not g["ok"]:
         say(f"      map for '{name}' not used: {g['why']}")
         return None
-    tag = hashlib.sha1(f"{LAYER}|{g['lat']:.5f}|{g['lon']:.5f}|{TEXELS_PER_UNIT}|{SOFTEN_UNITS}|{json.dumps(GRADE)}|{PLATE}".encode()
-                       ).hexdigest()[:10]
+    if at is not None:
+        g = dict(g, lat=float(at[0]), lon=float(at[1]))
+    tag = hashlib.sha1((f"{LAYER}|{g['lat']:.5f}|{g['lon']:.5f}|{TEXELS_PER_UNIT}|{SOFTEN_UNITS}|{json.dumps(GRADE)}|{PLATE}"
+                        f"|{VIEW_LUMA_MAX}|{LABEL_LUMA_MAX}").encode()).hexdigest()[:10]
     out = folder / f"map_{_slug(name)}_{tag}.jpg"
     meta = out.with_suffix(".json")
     info = None

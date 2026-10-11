@@ -1,4 +1,5 @@
 import { AbsoluteFill, useCurrentFrame, useVideoConfig } from 'remotion'
+import { useId } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { LOCATION_MAP_LABEL_FAMILY } from '../constants.js'
 import { useLocationMapFont } from '../fonts.js'
@@ -37,6 +38,13 @@ import {
  * is within 0.05 unit of his and the slide is smooth. (Everything is vector and
  * rastered at the scale it lands on screen, so it stays sharp at the start's
  * 1.87x either way.)
+ *
+ * SOFT AS HIS. The dot and the ring, the line, and the name each pass through a
+ * Gaussian of `LOCATION_MAP.overlaySoft` M units, in the map plane, so it grows
+ * with the camera as his end-size raster does; the shadows under them are drawn
+ * as fitted. Filter and gradient ids carry this map's own `useId()` prefix, so
+ * two maps on one page (a combined preview, a transition drawing the outgoing
+ * shot) never read each other's gradient.
  *
  * NO HOUSE GRADE (`carriesOwnGrade: true`, and the scene's grade is not read):
  * his look is baked into the plate when it is made, his vignette is drawn here
@@ -82,6 +90,8 @@ export function LocationMap({ src, label }: LocationMapProps): ReactNode {
   })
   const b = OVERLAY_BOX
   const d = OVERLAY_DENSITY
+  /* Ids local to this map (React's id, cut to the characters an SVG url() reference takes as they are). */
+  const uid = `lm${useId().replace(/[^A-Za-z0-9_-]/g, '')}`
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#000', overflow: 'hidden' }}>
@@ -116,9 +126,26 @@ export function LocationMap({ src, label }: LocationMapProps): ReactNode {
               viewBox={`${b.x0} ${b.y0} ${b.x1 - b.x0} ${b.y1 - b.y0}`}
               style={{ position: 'absolute', left: b.x0 * d, top: b.y0 * d, overflow: 'visible' }}
             >
-              <Marker frame={frame} />
-              <Line frame={frame} />
-              <Label frame={frame} durationFrames={durationInFrames} label={label} />
+              <defs>
+                {/* The marker's, on a box just round it (the dot and the ring reach 39 units). */}
+                <filter id={`${uid}-soft-mark`} filterUnits="userSpaceOnUse" x={-50} y={-50} width={100} height={100}>
+                  <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.marker} />
+                </filter>
+                <filter id={`${uid}-soft-line`} {...REGION}>
+                  <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.line} />
+                </filter>
+                <filter id={`${uid}-soft-label`} {...REGION}>
+                  <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.label} />
+                </filter>
+              </defs>
+              <Marker frame={frame} uid={uid} />
+              <g filter={`url(#${uid}-soft-line)`}>
+                <Line frame={frame} uid={uid} />
+              </g>
+              {/* The name above the line, as his. */}
+              <g filter={`url(#${uid}-soft-label)`}>
+                <Label frame={frame} durationFrames={durationInFrames} label={label} uid={uid} />
+              </g>
             </svg>
           </div>
         </div>
@@ -147,36 +174,38 @@ const REGION = {
 }
 
 /** Dot and ring with their shadows. Bottom to top: dot shadow, dot, ring shadow, ring. */
-function Marker({ frame }: { frame: number }): ReactNode {
+function Marker({ frame, uid }: { frame: number; uid: string }): ReactNode {
   const m = LOCATION_MAP.marker
   const sweep = locationMapRingSweep(frame)
   const dotOpacity = locationMapDotOpacity(frame)
   const circumference = 2 * Math.PI * m.ringRadius
-  /* A circle's stroke starts at 3 o'clock and runs clockwise on screen: his east, south, west, north. */
-  const dash = `${circumference * sweep} ${circumference * 2}`
+  /* A circle's stroke starts at 3 o'clock and runs clockwise on screen: his east, south, west, north. Drawn closed
+     (ring and shadow) once `ringClosedAt` of it is, so no hairline gap shows where it meets its start. */
+  const dash = sweep >= m.ringClosedAt ? undefined : `${circumference * sweep} ${circumference * 2}`
+  const soft = `url(#${uid}-soft-mark)`
   const rs = m.ringShadow
   /* The square's 1.6-unit linear edge as a Gaussian of the same variance (a uniform ramp: width / sqrt 12). */
   const clipBlur = rs.clipSoft / Math.sqrt(12)
   return (
     <g>
       <defs>
-        <filter id="lm-dot-shadow" {...REGION}>
+        <filter id={`${uid}-dot-shadow`} {...REGION}>
           <feGaussianBlur stdDeviation={m.dotShadow.sigma} />
         </filter>
-        <filter id="lm-ring-shadow" {...REGION}>
+        <filter id={`${uid}-ring-shadow`} {...REGION}>
           <feGaussianBlur stdDeviation={rs.sigma} />
         </filter>
-        <filter id="lm-clip-edge" {...REGION}>
+        <filter id={`${uid}-clip-edge`} {...REGION}>
           <feGaussianBlur stdDeviation={clipBlur} />
         </filter>
-        <mask id="lm-ring-clip" maskUnits="userSpaceOnUse" {...{ x: REGION.x, y: REGION.y, width: REGION.width, height: REGION.height }}>
+        <mask id={`${uid}-ring-clip`} maskUnits="userSpaceOnUse" {...{ x: REGION.x, y: REGION.y, width: REGION.width, height: REGION.height }}>
           <rect
             x={-rs.clipHalfW}
             y={-rs.clipHalfH}
             width={2 * rs.clipHalfW}
             height={2 * rs.clipHalfH}
             fill="#FFFFFF"
-            filter="url(#lm-clip-edge)"
+            filter={`url(#${uid}-clip-edge)`}
           />
         </mask>
       </defs>
@@ -188,14 +217,14 @@ function Marker({ frame }: { frame: number }): ReactNode {
             r={m.dotRadius}
             fill="#000000"
             opacity={m.dotShadow.opacity}
-            filter="url(#lm-dot-shadow)"
+            filter={`url(#${uid}-dot-shadow)`}
           />
-          <circle cx={0} cy={0} r={m.dotRadius} fill={m.colour} />
+          <circle cx={0} cy={0} r={m.dotRadius} fill={m.colour} filter={soft} />
         </g>
       )}
       {sweep > 0 && (
         <>
-          <g mask="url(#lm-ring-clip)" opacity={rs.opacity}>
+          <g mask={`url(#${uid}-ring-clip)`} opacity={rs.opacity}>
             <circle
               cx={rs.dx}
               cy={rs.dy}
@@ -204,7 +233,7 @@ function Marker({ frame }: { frame: number }): ReactNode {
               stroke="#000000"
               strokeWidth={m.ringStroke}
               strokeDasharray={dash}
-              filter="url(#lm-ring-shadow)"
+              filter={`url(#${uid}-ring-shadow)`}
             />
           </g>
           <circle
@@ -215,6 +244,7 @@ function Marker({ frame }: { frame: number }): ReactNode {
             stroke={m.colour}
             strokeWidth={m.ringStroke}
             strokeDasharray={dash}
+            filter={soft}
           />
         </>
       )}
@@ -223,26 +253,26 @@ function Marker({ frame }: { frame: number }): ReactNode {
 }
 
 /** The white line: a linear opacity gradient, scaled out from its left end (the gradient squeezed with it). */
-function Line({ frame }: { frame: number }): ReactNode {
+function Line({ frame, uid }: { frame: number; uid: string }): ReactNode {
   const l = LOCATION_MAP.line
   const s = locationMapLineScale(frame)
-  if (s <= 0) return null
   const length = (l.xFade - l.x0) * s
+  if (length < l.minDrawn) return null
   return (
     <g>
       <defs>
-        <linearGradient id="lm-line-fade" gradientUnits="userSpaceOnUse" x1={l.x0} y1={0} x2={l.x0 + length} y2={0}>
+        <linearGradient id={`${uid}-line-fade`} gradientUnits="userSpaceOnUse" x1={l.x0} y1={0} x2={l.x0 + length} y2={0}>
           <stop offset={0} stopColor={l.colour} stopOpacity={l.opacity} />
           <stop offset={1} stopColor={l.colour} stopOpacity={0} />
         </linearGradient>
       </defs>
-      <rect x={l.x0} y={l.yCentre - l.thickness / 2} width={length} height={l.thickness} fill="url(#lm-line-fade)" />
+      <rect x={l.x0} y={l.yCentre - l.thickness / 2} width={length} height={l.thickness} fill={`url(#${uid}-line-fade)`} />
     </g>
   )
 }
 
 /** The name: slides up and fades in, holds, fades before the cut. Shadow and type are one group, as his fade them. */
-function Label({ frame, durationFrames, label }: { frame: number; durationFrames: number; label: string }): ReactNode {
+function Label({ frame, durationFrames, label, uid }: { frame: number; durationFrames: number; label: string; uid: string }): ReactNode {
   const L = LOCATION_MAP.label
   const p = locationMapLabelIn(frame)
   const opacity = p * locationMapLabelOut(frame, durationFrames)
@@ -279,7 +309,7 @@ function Label({ frame, durationFrames, label }: { frame: number; durationFrames
     <g opacity={opacity} transform={`translate(0 ${L.entrance.slide * (1 - p)})`}>
       <defs>
         <filter
-          id="lm-label-shadow"
+          id={`${uid}-label-shadow`}
           filterUnits="userSpaceOnUse"
           x={LABEL_BOX.x0}
           y={LABEL_BOX.y0}
@@ -292,7 +322,7 @@ function Label({ frame, durationFrames, label }: { frame: number; durationFrames
       <g
         transform={`translate(${L.shadow.dx} ${L.shadow.dy})`}
         opacity={L.shadow.opacity}
-        filter="url(#lm-label-shadow)"
+        filter={`url(#${uid}-label-shadow)`}
       >
         {text(L.shadow.colour)}
       </g>

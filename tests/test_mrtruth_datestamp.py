@@ -29,6 +29,9 @@ class Planner(unittest.TestCase):
         self.assertFalse(on)                                   # the table's never-placed mark
         self.assertIn("date-stamp", M.AWAITING_RULINGS)
         self.assertEqual((pics, chain, cap), (1, [], None))
+        self.assertEqual((lo, hi), (3.5, 8.0))                 # his 45-frame build, then 2 s of the settled date
+        self.assertAlmostEqual(M._need_s("date-stamp"), 3.8)
+        self.assertIn("date-stamp", M.HARD_CUT_DEVICES)        # his clip cuts in and out hard
         self.assertEqual(M.BUILD_FRAMES["date-stamp"], 45)     # his entrance: 45 frames from the shot's first
         row = next(p for p in M.PREVIEW if p[0] == "date-stamp")
         self.assertEqual(row[2], 123)                          # his clip's length on screen
