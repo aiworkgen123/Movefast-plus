@@ -1,6 +1,12 @@
 import { useLayoutEffect } from 'react'
 import { continueRender, delayRender, staticFile } from 'remotion'
-import { DATE_STAMP_DATE_FAMILY, DATE_STAMP_YEAR_FAMILY, FONT_FAMILY, SERIF_FAMILY } from './constants.js'
+import {
+  DATE_STAMP_DATE_FAMILY,
+  DATE_STAMP_YEAR_FAMILY,
+  FONT_FAMILY,
+  LOCATION_MAP_LABEL_FAMILY,
+  SERIF_FAMILY,
+} from './constants.js'
 
 /**
  * Fonts must be BUNDLED and LOADED BEFORE THE FIRST FRAME.
@@ -370,6 +376,84 @@ export function useDateStampFonts(): void {
       dateStampSettled = true
     })
     void dateStampPromise.then(release, release)
+    return release
+  }, [])
+}
+
+/*
+ * ####################################################################
+ * # THE LOCATION MAP'S LABEL FACE, LOADED ONLY WHERE THE MAP IS      #
+ * # DRAWN, EXACTLY AS THE DATE STAMP'S TWO ABOVE.                    #
+ * #                                                                   #
+ * # The owner's map animation (2026-10-11) sets the place's name in   #
+ * # Bebas Neue, matched off his reference. It is not in `FACES`, so   #
+ * # every other shot keeps the load it has always had and only a      #
+ * # `location-map` shot opens this gate. Same bounded budget, same    #
+ * # soft fallback (a narrow sans, under the same family name).       #
+ * #                                                                   #
+ * # TTF, THE FILE THE MATCH WAS MADE AGAINST: google/fonts' own       #
+ * # ofl/bebasneue/BebasNeue-Regular.ttf, unmodified (sha256 in        #
+ * # public/fonts/README.md).                                         #
+ * ####################################################################
+ */
+const LOCATION_MAP_FACE: FaceSpec = {
+  file: 'fonts/BebasNeue-Regular.ttf',
+  weight: '400',
+  family: LOCATION_MAP_LABEL_FAMILY,
+  format: 'truetype',
+}
+
+const NARROW_FALLBACK_SOURCE =
+  "local('Liberation Sans Narrow'), local('Arial Narrow'), local('DejaVu Sans Condensed'), local('Liberation Sans'), local('Arial')"
+
+let locationMapPromise: Promise<void> | null = null
+let locationMapSettled = false
+
+async function loadLocationMapFace(): Promise<void> {
+  if (typeof document === 'undefined') return
+  try {
+    await withBudget(loadFace(LOCATION_MAP_FACE), PRIMARY_BUDGET_MS, LOCATION_MAP_LABEL_FAMILY)
+    return
+  } catch (error) {
+    console.warn(
+      `the location map's label face failed to load - see public/fonts/README.md. Falling back to a narrow sans; ` +
+        `this frame does not match the owner's reference and must not be sent. Cause: ${String(error)}`,
+    )
+  }
+  try {
+    await withBudget(
+      new FontFace(LOCATION_MAP_LABEL_FAMILY, NARROW_FALLBACK_SOURCE, {
+        weight: '400',
+        style: 'normal',
+        display: 'block',
+      })
+        .load()
+        .then((loaded) => {
+          document.fonts.add(loaded)
+        }),
+      FALLBACK_BUDGET_MS,
+      `${LOCATION_MAP_LABEL_FAMILY} fallback`,
+    )
+  } catch (error) {
+    console.warn(`no fallback face registered for the location map: ${String(error)}`)
+  }
+}
+
+/** Hold the first frame until the location map's label face is really available. Bounded and never fatal. */
+export function useLocationMapFont(): void {
+  useLayoutEffect(() => {
+    if (locationMapSettled || typeof document === 'undefined') return
+    const handle = delayRender('loading the location map face')
+    let cleared = false
+    const release = (): void => {
+      if (cleared) return
+      cleared = true
+      continueRender(handle)
+    }
+    locationMapPromise ??= loadLocationMapFace().then(() => {
+      locationMapSettled = true
+    })
+    void locationMapPromise.then(release, release)
     return release
   }, [])
 }

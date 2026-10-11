@@ -211,6 +211,14 @@ export const DEVICE_IDS = [
    * entry. His placement rulings are not written yet.
    */
   'date-stamp',
+  /*
+   * The owner's map animation of 2026-10-11: the place's satellite map in
+   * perspective, the camera pulling back to top-down while a yellow ring draws
+   * round the place and its name slides up beside a white line. APPENDED, for
+   * the same reason. Drawable and previewable, never chosen: see
+   * `PLACED_BY_OPERATOR_ONLY` and its registry entry.
+   */
+  'location-map',
 ] as const
 
 export const DeviceIdSchema = z.enum(DEVICE_IDS)
@@ -324,6 +332,15 @@ export const P05_IMAGE_LABEL_MAX_CHARS = 60
  */
 export const DATE_STAMP_DATE_MAX_CHARS = 24
 export const DATE_STAMP_YEAR_MAX_CHARS = 12
+
+/**
+ * The location map's place name. Its WIDTH is the real gate,
+ * `locationMapLabelFits` in `remotion/animations/locationMapClock.ts` (mirrored
+ * by `mrtruth_map.label_layout`): set smaller, then on two lines, then refused.
+ * 32 is only the ceiling a string may reach before that measurement is worth
+ * running ('LAKE TEXOMA, TEXAS' is 18).
+ */
+export const LOCATION_MAP_LABEL_MAX_CHARS = 32
 
 /**
  * P14's YEAR: FOUR DIGITS, NOTHING BEFORE THEM AND NOTHING AFTER.
@@ -859,6 +876,13 @@ export const SceneDeviceSchema = z.discriminatedUnion('id', [
     date: deviceText(DATE_STAMP_DATE_MAX_CHARS),
     year: z.union([z.literal(''), deviceText(DATE_STAMP_YEAR_MAX_CHARS)]).default(''),
   }),
+  /*
+   * The owner's map animation (2026-10-11). `label` is the place's name as the
+   * film writes it; the component sets it in capitals. The map itself is the
+   * scene's own picture: the place's satellite plate, made at planning time
+   * (`mrtruth_map.py`) centred on the place, never fetched at render time.
+   */
+  z.object({ id: z.literal('location-map'), label: deviceText(LOCATION_MAP_LABEL_MAX_CHARS) }),
 
   /* ---- registered but never chosen; see `enabled` in the registry ---- */
   z.object({ id: z.literal('pointer-label'), label: deviceText(32) }),
@@ -4217,6 +4241,55 @@ export const DEVICE_REGISTRY: Record<DeviceId, DeviceSpec> = {
     /* It mounts the scene's grade itself, UNDER the type, so his pure white survives (TopTitle's way). */
     carriesOwnGrade: true,
   },
+
+  /**
+   * The owner's map animation of 2026-10-11 ('LAKE MONOUN'), copied 1:1 off his
+   * reference: the place's satellite plate as a plane in perspective, his camera
+   * (pull-back, tilt up to top-down, a 34-degree turn, easeInOutCubic over the
+   * shot), a #F7E440 ring and dot, a white line and the name in Bebas Neue, all
+   * in the map's plane, under his screen vignette. His sound (sfx/
+   * map_location.wav) is mixed by the planner, 0.113 s after the first frame.
+   * Every number is in `remotion/animations/locationMapClock.ts`.
+   *
+   * ##########################################################################
+   * # ENABLED, SO IT DRAWS AND PREVIEWS, AND NEVER CHOSEN, as `date-stamp`.  #
+   * # His message: "add it to our library"; the rulings on where it goes     #
+   * # come later. So it sits in `PLACED_BY_OPERATOR_ONLY` and Mr Truth's own #
+   * # planner has no rule that seats it. Every cap and bound here is OURS    #
+   * # (`capSource: 'unstated'`).                                             #
+   * ##########################################################################
+   */
+  'location-map': {
+    id: 'location-map',
+    origin: 'client',
+    enabled: true,
+    disabledReason: null,
+    supersededBy: null,
+    officialFileName: null,
+    fallbackTemplateIds: [],
+    /* A place the narration names. Never chosen today, so it moves no score. */
+    job: 'one_named_detail',
+    /* ONE picture, and it is the map: the place's satellite plate, made at planning time. */
+    pictures: 1,
+    /* The name has settled at frame 51 (the line is done at 39.91). */
+    buildEndFrames: 51,
+    /* His shot: 240 frames, the camera moving to the last one. */
+    holdsWellFrames: 240,
+    defaultDurationFrames: 240,
+    maxPerFilm: null,
+    capSource: 'unstated',
+    positionRule: 'none',
+    pictureSource: 'ownScene',
+    mandatoryOnce: false,
+    /* White type straight on the map with a drop shadow on the glyphs, no plate. */
+    typeOverPicture: 'shadowOnly',
+    scrimAlpha: 0,
+    /* The plate is made and graded by us; there is no picture to be too bright. */
+    maxMeanLuma: null,
+    minMeanLuma: null,
+    /* His look is baked into the plate and his vignette drawn by the component: the house grade never goes on. */
+    carriesOwnGrade: true,
+  },
 }
 
 /* ------------------------------------------------------------------------- */
@@ -4328,10 +4401,15 @@ export function enabledDevices(): DeviceSpec[] {
  * added to the library and has not yet ruled where it goes. It leaves this set
  * with his ruling.
  */
+/*
+ * `location-map` JOINED THE SAME DAY for the same reason: in the library, his
+ * rulings on where it goes still to come.
+ */
 export const PLACED_BY_OPERATOR_ONLY: ReadonlySet<DeviceId> = new Set<DeviceId>([
   'chapter-title',
   'highlight-page',
   'date-stamp',
+  'location-map',
 ])
 
 /** May the chooser return this device on its own? G1's question. */

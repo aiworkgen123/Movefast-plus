@@ -15,7 +15,8 @@ Owner rules (2026-10-06): photos only; only Mr Truth's own templates; the switch
 pointer-label, name-card, name-plate) exist but are never placed; checks stay loose — a template that does not
 fit falls back or the shot stays a plain photograph, and nothing stops the run.
 The date stamp (date-stamp, owner 2026-10-11: his date overlay, copied 1:1) is in the library and in the previews,
-and is not placed by the planner until he sends its rulings.
+and is not placed by the planner until he sends its rulings. So is his map animation (location-map, the same day,
+copied 1:1 with his own sound; its satellite plate is made at planning time by mrtruth_map.py).
 
     python mrtruth.py preview all            # every template, labelled, into preview/mrtruth/
     python mrtruth.py preview P03,P14        # just these
@@ -93,13 +94,21 @@ LIBRARY = {
     # previewable, NOT placed yet - his placement rulings come later. Off here is the table's never-placed mark (as for
     # the switched-off ones above); the preview labels it as waiting for its rulings, not as switched off
     "date-stamp":     (False, 1, 2.0, 8.0, None, "any", [], {}),
+    # the owner's map animation (2026-10-11, renderer LocationMap.tsx, planning half mrtruth_map.py), copied 1:1 with
+    # his sound (MAP_SFX): in the library and previewable, NOT placed yet, the same way. His shot is 8.0 s; on 5-8 s the
+    # camera move fills the shot and the ring and name keep his frames. Its one picture is the place's satellite plate.
+    # FOR THE PLANNER, when his rulings come: the place's name as the narration says it (mrtruth_map.label_fits), its
+    # coordinates from the dossier or Claude, and the shot whose words name it (5-8 s); then at planning time
+    # pick = mrtruth_map.build_place(name, lat, lon, <job>/mrtruth/maps, <output>/_shared) - None (the geocoder unsure,
+    # no imagery) keeps the photograph - and row["device"] = {"id": "location-map", "label": name}
+    "location-map":   (False, 1, 5.0, 8.0, None, "any", [], {"label": 32}),
 }
-AWAITING_RULINGS = {"date-stamp"}     # drawn and previewed, never placed, until the owner rules where they go
+AWAITING_RULINGS = {"date-stamp", "location-map"}     # drawn and previewed, never placed, until the owner rules where they go
 # frames each template needs to finish building (the repo's DEVICE_REGISTRY buildEndFrames) — never seated on a shorter shot
 BUILD_FRAMES = {"P12": 36, "P17": 42, "P03": 55, "P22": 123, "P19": 76, "gallery-strip": 131, "framed-card": 25,
                 "photo-pop": 61, "shadow-up": 60, "P08": 60, "P04": 60, "P02": 90, "P09": 90, "P05": 120, "P14": 71,
                 "chapter-title": 120, "two-photo-zoom": 80, "highlight-page": 87, "bullet-checklist": 119,
-                "chapter-plate": 75, "top-title": 94, "corner-label": 101, "date-stamp": 45}
+                "chapter-plate": 75, "top-title": 94, "corner-label": 101, "date-stamp": 45, "location-map": 51}
 # where each template writes over the photograph (x0, y0, x1, y1 as fractions) and how bright that strip may be;
 # the repo reads the ground under the letters (T-26), not the whole picture's average
 TYPE_BAND = {"shadow-up": ((0.12, 0.80, 0.88, 0.97), 0.50), "top-title": ((0.02, 0.04, 0.62, 0.32), 0.55),
@@ -178,6 +187,22 @@ TURN_MAX_S, LEAK_MAX_S = 5.0, 4.5      # the turn's move lasts ~3.7 s and the le
 DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.13, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
+# the owner's map animation (location-map, 2026-10-11) carries HIS OWN sound, cut losslessly from his reference (a ping,
+# a boom as the ring draws, a riser, a rumble and a whoosh with the camera): mrtruth_renderer/sfx/map_location.wav,
+# 48 kHz stereo. It starts MAP_SFX_OFFSET_S after the map shot's first frame (5431 samples, as in his file) at his
+# level - the file as cut, 0 dB: it peaks at 0 dBFS and is -13.6 LUFS over its 7.9 s; his reference has no voice there,
+# and Mr Truth's narration (-19..-21 LUFS mono, -16..-18 as the stereo it is played as) sits where the narration of his
+# reference films does (-18..-20 LUFS), so the file's own level keeps his balance; the voice runs under it unchanged.
+# Stereo, as his (it is wide: folded to mono it loses 6 LU). Never thinned by SFX_MIN_GAP_S; a transition sound that
+# would land on the map shot is left out, so his plays as it is. On a shot shorter than his 8 s it is cut
+# MAP_SFX_TAIL_S after the shot's last frame (his own cut) with a MAP_SFX_FADE_S fade; on a longer one it simply ends.
+# A limiter at full scale catches only the overs of voice + boom. After the film's AAC encode it measures -14.3 LUFS: the
+# native encoder trims his 0 dBFS boom by 0.3 dB (his own encode measured -13.6 decoded); limiting it to -1 dBFS first
+# would cost 1.1 LU, so it is not done.
+MAP_SFX, MAP_SFX_DB = "map_location.wav", 0.0
+MAP_SFX_RATE, MAP_SFX_OFFSET_SAMPLES, MAP_SFX_SAMPLES = 48000, 5431, 380899
+MAP_SFX_OFFSET_S = MAP_SFX_OFFSET_SAMPLES / MAP_SFX_RATE          # 0.113146 s
+MAP_SFX_TAIL_S, MAP_SFX_FADE_S = 0.0485, 0.04
 
 # P03's headline is set at 92px in a 1120px column, two lines at most (devices.ts p03HeadlineFits)
 _P03_EM = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -.,:;!?&/()'\"",
@@ -7296,28 +7321,74 @@ def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
     engine.log(f"  rendered in {time.time() - t0:.0f}s")
 
 
+def _map_sounds(sc_list: list) -> list:
+    """(start s, length s, shot start s, shot end s) of the owner's map sound for each location-map shot (MAP_SFX)."""
+    out = []
+    for sc in sc_list:
+        if (sc.get("device") or {}).get("id") == "location-map":
+            a, n = sc["startFrame"] / FPS, sc["durationFrames"] / FPS
+            keep = min(MAP_SFX_SAMPLES / MAP_SFX_RATE, n + MAP_SFX_TAIL_S - MAP_SFX_OFFSET_S)
+            if keep > 0:
+                out.append((a + MAP_SFX_OFFSET_S, keep, a, a + n))
+    return out
+
+
+def _map_sound_chain(k: int, t: float, keep: float) -> str:
+    """The filter for one map sound on input k: cut (and faded) when the shot is shorter than his, placed to the sample."""
+    cut = ""
+    if keep < MAP_SFX_SAMPLES / MAP_SFX_RATE - 1e-3:
+        cut = f"atrim=end={keep:.6f},afade=t=out:st={max(0.0, keep - MAP_SFX_FADE_S):.6f}:d={MAP_SFX_FADE_S},"
+    return (f"[{k}:a]aresample={MAP_SFX_RATE},aformat=channel_layouts=stereo,{cut}volume={MAP_SFX_DB}dB,"
+            f"adelay={round(t * MAP_SFX_RATE)}S:all=1")
+
+
+def _channels(path: Path) -> int:
+    try:
+        got = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+                              "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60).stdout.strip()
+        return int(got.split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return 1
+
+
 def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
-    """The voice with the repo's two live sounds under it: a shutter on each flash, a thud on each dip."""
+    """The voice with the repo's two live sounds under it (a shutter on each flash, a thud on each dip) and the owner's
+    map sound on each location-map shot (MAP_SFX: his level, his offset, stereo, never thinned by the gap rule)."""
+    maps = _map_sounds(sc_list)
     cues, last = [], -1e9
     for sc in sc_list:
         kind = sc["transitionIn"]["type"]
         if kind in SFX:
             t = sc["startFrame"] / FPS
+            if any(a <= t < b for _, _, a, b in maps):     # the map shot plays his sound alone
+                continue
             if t - last >= SFX_MIN_GAP_S:
                 cues.append((t, *SFX[kind]))
                 last = t
-    if not cues:
+    if not cues and not maps:
         return mp3
-    out = job / "voice_sfx.m4a"          # beside audio.mp3: the final mux runs in the job folder and reads names
+    # beside audio.mp3: the final mux runs in the job folder and reads names. With a map sound it is FLAC, so the film's
+    # one AAC encode is the final mux's (a second one costs his boom another 0.1 LU and the whole voice a generation)
+    out = job / ("voice_sfx.flac" if maps else "voice_sfx.m4a")
     args = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(mp3)]
     for _, f, _, _ in cues:
         args += ["-i", str(RENDERER / "sfx" / f)]
-    chains = [f"[{k + 1}:a]aresample=48000,volume={g}dB,adelay={int(max(0.0, t - att) * 1000)}:all=1[s{k}]"
-              for k, (t, f, g, att) in enumerate(cues)]
-    mix = "".join(f"[s{k}]" for k in range(len(cues)))
-    fc = ";".join(chains + [f"[0:a]aresample=48000[v];[v]{mix}amix=inputs={len(cues) + 1}:normalize=0:duration=first[a]"])
-    subprocess.run(args + ["-filter_complex", fc, "-map", "[a]", "-c:a", "aac", "-b:a", "192k", str(out)], check=True)
-    engine.log(f"  sound: {len(cues)} cue(s) (shutter on a flash, impact on a dip)")
+    for _ in maps:
+        args += ["-i", str(RENDERER / "sfx" / MAP_SFX)]
+    # with a map sound the mix is stereo (his sound is): a mono voice and the mono cues go to both sides at full level,
+    # as a mono track plays; a peak limiter keeps the sum (his boom clips at 0 dBFS on its own) under full scale
+    up = "" if not maps else (",pan=stereo|c0=c0|c1=c0" if _channels(mp3) == 1 else ",aformat=channel_layouts=stereo")
+    chains = [f"[{k + 1}:a]aresample=48000{',pan=stereo|c0=c0|c1=c0' if maps else ''},volume={g}dB,"
+              f"adelay={int(max(0.0, t - att) * 1000)}:all=1[s{k}]" for k, (t, f, g, att) in enumerate(cues)]
+    chains += [_map_sound_chain(len(cues) + 1 + j, t, keep) + f"[m{j}]" for j, (t, keep, _, _) in enumerate(maps)]
+    mix = "".join(f"[s{k}]" for k in range(len(cues))) + "".join(f"[m{j}]" for j in range(len(maps)))
+    tail = ",alimiter=limit=1:attack=1:release=50:level=0:latency=1" if maps else ""     # touches only overs
+    fc = ";".join(chains + [f"[0:a]aresample=48000{up}[v];[v]{mix}amix=inputs={len(cues) + len(maps) + 1}:normalize=0:"
+                            f"duration=first{tail}[a]"])
+    codec = ["-c:a", "flac"] if maps else ["-c:a", "aac", "-b:a", "192k"]
+    subprocess.run(args + ["-filter_complex", fc, "-map", "[a]", *codec, str(out)], check=True)
+    engine.log(f"  sound: {len(cues)} cue(s) (shutter on a flash, impact on a dip)"
+               + (f", the map sound on {len(maps)} map shot(s)" if maps else ""))
     return out
 
 
@@ -8801,6 +8872,8 @@ def check(job: Path) -> list:
 
 
 # ── 8. previews: every template, labelled, so the owner can watch them (the switched-off ones too) ────────────
+# the map preview's place, as a planner would hand it over: Lake Monoun, Cameroon (his reference), 5.58 N 10.585 E
+PREVIEW_MAP = "map:Lake Monoun:5.58:10.585"
 PREVIEW = [
     ("P03", "Opening title", 150, "qumran_caves", [], {"id": "P03", "kicker": "Qumran, 1947", "headline": "The scrolls in the cave", "highlightWords": ["scrolls"]}),
     ("gallery-strip", "Previews 4 pictures from later", 150, "desert", ["scroll_fragment", "shrine", "jars", "isaiah_scroll"], {"id": "gallery-strip"}),
@@ -8835,6 +8908,9 @@ PREVIEW = [
     ("name-plate", "OFF — name plate", 150, "jerusalem", [], {"src": "jerusalem", "name": "A scroll scholar", "role": "Rockefeller Museum, 1950s"}),
     # the owner's own words from his reference, at his reference's length (123 frames)
     ("date-stamp", "Date stamp", 123, "copper_scroll", [], {"id": "date-stamp", "date": "February", "year": "1994"}),
+    # his map: his place at his length (240 frames) with his sound; the picture is Lake Monoun's satellite plate, made
+    # the way the planner will make one (mrtruth_map.build_place: the coordinates checked, the tiles fetched and cached)
+    ("location-map", "Location map", 240, PREVIEW_MAP, [], {"id": "location-map", "label": "Lake Monoun"}),
 ]
 
 
@@ -8844,13 +8920,21 @@ def preview(which: str = "all") -> Path:
     pics = _load(HERE / "assets" / "mrtruth" / "preview" / "pictures.json", {})
     work = HERE / "preview" / "mrtruth"
     storage = work / "storage"
-    pick = lambda name: {"photo": str(HERE / "assets" / "mrtruth" / "preview" / pics[name]["file"]),
+    pick = lambda name: {"photo": str(HERE / "assets" / "mrtruth" / "preview" / pics[name]["file"]),   # an absolute file stays
                          "title": pics[name]["title"], "url": pics[name]["page"], "license": pics[name]["license"]}
     tasks, labels = [], []
     for k, (tid, what, frames, img, comp, fields) in enumerate(PREVIEW):
         if want and tid not in want:
             continue
         out = work / "segments" / f"{k:02d}_{tid}.mp4"
+        if img.startswith("map:"):                       # the place's satellite plate, made as at planning time
+            import mrtruth_map
+            _, name, lat, lon = img.split(":")
+            got = mrtruth_map.build_place(name, lat, lon, work / "maps", Path(engine.OUTPUT_ROOT) / "_shared")
+            if not got:
+                print(f"Mr Truth preview: {tid} left out - no map plate for {name} (see above)")
+                continue
+            pics[img] = {"file": got["photo"], "title": got["title"], "page": got["url"], "license": got["license"]}
         if tid in ("P13", "P16", "pointer-label", "name-card", "name-plate"):
             res = lambda v: (f"/storage/{_stage(storage, pick(v)['photo'])}" if isinstance(v, str) and v in pics else
                              [res(x) for x in v] if isinstance(v, list) else v)
@@ -8863,23 +8947,41 @@ def preview(which: str = "all") -> Path:
             tasks.append({"id": "Segment", "props": _props(sc), "output": str(out)})
         on = LIBRARY[tid][0]
         labels.append((out, f"{tid}  ·  {what}" + ("" if on else "  (not placed yet)" if tid in AWAITING_RULINGS
-                                                   else "  (switched off)"), frames))
+                                                   else "  (switched off)"), frames, tid))
     render(engine, work, tasks, workers=1)
     reel = work / ("templates.mp4" if not want else f"templates_{'_'.join(sorted(want))[:60]}.mp4")
-    parts = []
-    for k, (seg, label, frames) in enumerate(labels):
+    parts, at, sounds = [], 0, []
+    for k, (seg, label, frames, tid) in enumerate(labels):
         lab = seg.with_name(seg.stem + "_lab.mp4")
         txt = label.replace("\\", "\\\\").replace(":", "\\:").replace("'", "’").replace(",", "\\,")
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(seg), "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(seg),
                         "-vf", f"scale=1728:972,pad=1920:1080:96:0:color=0x0b0b0b,drawtext=fontfile='/System/Library/Fonts/Supplemental/Arial Bold.ttf':"
                                f"text='{txt}':x=96:y=1010:fontsize=34:fontcolor=0xE8C468",
                         "-t", f"{frames / FPS:.4f}", "-r", "30", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-                        "-c:a", "aac", "-shortest", str(lab)], check=True)
+                        "-an", str(lab)], check=True)
         parts.append(lab)
+        if tid == "location-map":                        # his sound on the map's preview, as _sfx_audio cues it in a film
+            sounds += _map_sounds([{"startFrame": at, "durationFrames": frames, "device": {"id": tid}}])
+        at += frames
     lst = work / "list.txt"
     lst.write_text("".join(f"file '{p}'\n" for p in parts), encoding="utf-8")
+    silent = work / "reel_video.mp4"
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
+                    str(silent)], check=True)
+    # the reel's one sound track, built to the sample (joining each part's own AAC would put a part's sound late by
+    # its AAC lead-in and frame padding): silence, and the map's sound at its offset in each map part
+    total = at / FPS
+    ins, chains = [], []
+    for j, (t, keep, _, _) in enumerate(sounds):
+        ins += ["-i", str(RENDERER / "sfx" / MAP_SFX)]
+        chains.append(_map_sound_chain(j + 1, t, keep) + f"[m{j}]")
+    mix = "".join(f"[m{j}]" for j in range(len(sounds)))
+    graph = ";".join(chains + [f"anullsrc=r={MAP_SFX_RATE}:cl=stereo,atrim=end={total:.6f}[z]",
+                               f"[z]{mix}amix=inputs={len(sounds) + 1}:normalize=0:duration=first[a]"])
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(silent), *ins, "-filter_complex", graph,
+                    "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.6f}",
                     "-movflags", "+faststart", str(reel)], check=True)
+    silent.unlink(missing_ok=True)
     for lab in parts:                                    # the labelled copies were only for the join
         lab.unlink(missing_ok=True)
     print(f"Mr Truth preview -> {reel}")

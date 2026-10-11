@@ -72,6 +72,34 @@ ones that were matched and the OFL's Reserved Font Name clause never comes up.
 
 Their licences are beside them (`OFL-*.txt`, from github.com/google/fonts).
 
+## The location map's label face (added 2026-10-11)
+
+One more file, loaded ONLY on a `location-map` shot by `useLocationMapFont()` in
+`src/remotion/fonts.ts`:
+
+```
+BebasNeue-Regular.ttf          the place's name   (OFL-BebasNeue.txt)
+```
+
+It is the face of the owner's own map animation ('LAKE MONOUN'), matched off his
+reference: letter widths and places within 0.10 units rms, IoU 0.91; Oswald,
+Anton, League Gothic and the other condensed faces tried were clearly worse.
+SIL OFL 1.1 (Dharma Type). The file is google/fonts' own
+`ofl/bebasneue/BebasNeue-Regular.ttf`, unmodified - the exact file the match was
+made against (the CSS API serves a smaller build of the same outlines).
+
+| file | sha256 |
+|---|---|
+| BebasNeue-Regular.ttf | `08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73` |
+
+Its advance and kerning tables for the label's width fit are generated from this
+file into `src/remotion/animations/locationMapFaceData.ts` (and mirrored in
+`mrtruth_map.py`); replace the file and regenerate both.
+
+The box below on why this project does not use Bebas Neue is about faces WE
+choose for our own type. This one is his, copied 1:1, and is drawn on his map
+template and nowhere else.
+
 ## Where to get them
 
 **Libre Franklin**, SIL Open Font License 1.1 — a Franklin Gothic revival, the

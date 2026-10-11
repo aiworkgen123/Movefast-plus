@@ -11,6 +11,7 @@ import { DateStamp } from './animations/DateStamp.js'
 import { FramedCard } from './animations/FramedCard.js'
 import { GalleryStrip } from './animations/GalleryStrip.js'
 import { HighlightPage } from './animations/HighlightPage.js'
+import { LocationMap } from './animations/LocationMap.js'
 import { PhotoPop } from './animations/PhotoPop.js'
 import { TopTitle } from './animations/TopTitle.js'
 import { TwoPhotoZoom } from './animations/TwoPhotoZoom.js'
@@ -431,6 +432,17 @@ export function DeviceFrame({ device, src, companionSrcs, grade, pictureMove }: 
      */
     case 'date-stamp':
       return <DateStamp src={src} grade={grade} date={device.date} year={device.year} pictureMove={pictureMove} />
+
+    /*
+     * The owner's map animation of 2026-10-11. `src` is the place's satellite
+     * plate (made at planning time), drawn as his camera sees it; neither the
+     * scene's grade nor the plan's picture move applies: his camera IS the move
+     * and his look is baked into the plate (`carriesOwnGrade: true`). Never
+     * chosen today (`PLACED_BY_OPERATOR_ONLY`); it draws for previews and for
+     * any plan that carries one.
+     */
+    case 'location-map':
+      return <LocationMap src={src} label={device.label} />
 
     /* ---- registered, disabled, and refused by the chooser before here ---- */
     case 'pointer-label':

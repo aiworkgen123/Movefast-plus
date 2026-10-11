@@ -71,6 +71,15 @@ export const SERIF_FAMILY = 'VG Documentary Serif'
 export const DATE_STAMP_DATE_FAMILY = 'VG Date Stamp Display'
 export const DATE_STAMP_YEAR_FAMILY = 'VG Date Stamp Year'
 
+/**
+ * The location map's label face, registered by `useLocationMapFont` in fonts.ts
+ * only on a `location-map` shot. Bebas Neue Regular (Dharma Type, SIL OFL 1.1),
+ * matched off the owner's 2026-10-11 map reference ('LAKE MONOUN': letter widths
+ * and places within 0.1 units). The house rule against Bebas (fonts.ts,
+ * public/fonts/README.md) is about faces WE choose; this one is his, copied 1:1.
+ */
+export const LOCATION_MAP_LABEL_FAMILY = 'VG Location Map Label'
+
 /* ------------------------------------------------------------- captions -- */
 
 export const SAFE_AREA_X = 96

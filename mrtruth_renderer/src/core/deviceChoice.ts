@@ -6090,6 +6090,8 @@ export function copyNamesThePicture(copy: SceneDevice): boolean {
     case 'top-title':
     case 'corner-label':
     case 'name-plate':
+    /* The owner's map: the name labels the place the map shows, which is the picture itself. */
+    case 'location-map':
       return true
     /*
      * ########################################################################
