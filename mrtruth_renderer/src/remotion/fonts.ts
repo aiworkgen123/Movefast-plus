@@ -1,6 +1,6 @@
 import { useLayoutEffect } from 'react'
 import { continueRender, delayRender, staticFile } from 'remotion'
-import { FONT_FAMILY, SERIF_FAMILY } from './constants.js'
+import { DATE_STAMP_DATE_FAMILY, DATE_STAMP_YEAR_FAMILY, FONT_FAMILY, SERIF_FAMILY } from './constants.js'
 
 /**
  * Fonts must be BUNDLED and LOADED BEFORE THE FIRST FRAME.
@@ -71,7 +71,8 @@ import { FONT_FAMILY, SERIF_FAMILY } from './constants.js'
  * ####################################################################
  */
 
-type FaceSpec = { file: string; weight: string; family: string }
+/** `format` is the CSS font format hint; absent means woff2, which every face but the date stamp's two is. */
+type FaceSpec = { file: string; weight: string; family: string; format?: 'woff2' | 'truetype' }
 
 /**
  * Four weights from three files, and the mismatch is deliberate.
@@ -270,7 +271,7 @@ async function withBudget<T>(work: Promise<T>, budgetMs: number, what: string): 
 async function loadFace(face: FaceSpec): Promise<void> {
   const loaded = await new FontFace(
     face.family,
-    `url(${staticFile(face.file)}) format('woff2')`,
+    `url(${staticFile(face.file)}) format('${face.format ?? 'woff2'}')`,
     { weight: face.weight, style: 'normal', display: 'block' },
   ).load()
   document.fonts.add(loaded)
@@ -293,4 +294,82 @@ async function loadFallback(): Promise<void> {
     // legible glyphs, which beats a cancelled render.
     console.warn(`no fallback face matched for ${FONT_FAMILY}: ${String(error)}`)
   }
+}
+
+/*
+ * ####################################################################
+ * # THE DATE STAMP'S TWO FACES, LOADED ONLY WHERE THE DATE STAMP IS  #
+ * # DRAWN, THE SAME WAY AS EVERYTHING ABOVE.                         #
+ * #                                                                   #
+ * # The owner's date overlay (2026-10-11) sets its month in DM Serif  #
+ * # Display and its year in Libre Baskerville, both matched glyph by  #
+ * # glyph off his reference. Neither is any other template's face, so #
+ * # they are NOT in `FACES`: every other shot of the film keeps the   #
+ * # exact load it has always had, and only a `date-stamp` shot opens  #
+ * # this gate. Same bounded budget, same soft fallback (the serif     #
+ * # stack, registered under the same family names), same layout-      #
+ * # effect rule as `useDocumentaryFont`.                              #
+ * #                                                                   #
+ * # TTF, NOT WOFF2, ON PURPOSE. They are the exact files the match    #
+ * # was made against (sha256 in public/fonts/README.md), served as    #
+ * # Google Fonts serves them: no subsetting or conversion, so no      #
+ * # question under the OFL's Reserved Font Name clause either.        #
+ * ####################################################################
+ */
+const DATE_STAMP_FACES: readonly FaceSpec[] = [
+  { file: 'fonts/DMSerifDisplay-Regular.ttf', weight: '400', family: DATE_STAMP_DATE_FAMILY, format: 'truetype' },
+  { file: 'fonts/LibreBaskerville-Regular.ttf', weight: '400', family: DATE_STAMP_YEAR_FAMILY, format: 'truetype' },
+]
+
+let dateStampPromise: Promise<void> | null = null
+let dateStampSettled = false
+
+async function loadDateStampFaces(): Promise<void> {
+  if (typeof document === 'undefined') return
+  try {
+    await withBudget(Promise.all(DATE_STAMP_FACES.map(loadFace)), PRIMARY_BUDGET_MS, DATE_STAMP_DATE_FAMILY)
+    return
+  } catch (error) {
+    console.warn(
+      `the date stamp's faces failed to load - see public/fonts/README.md. Falling back to the serif stack; ` +
+        `this frame does not match the owner's reference and must not be sent. Cause: ${String(error)}`,
+    )
+  }
+  try {
+    await withBudget(
+      Promise.all(
+        DATE_STAMP_FACES.map(async (face) => {
+          const loaded = await new FontFace(face.family, SERIF_FALLBACK_SOURCE, {
+            weight: face.weight,
+            style: 'normal',
+            display: 'block',
+          }).load()
+          document.fonts.add(loaded)
+        }),
+      ),
+      FALLBACK_BUDGET_MS,
+      `${DATE_STAMP_DATE_FAMILY} fallback`,
+    )
+  } catch (error) {
+    console.warn(`no fallback face registered for the date stamp: ${String(error)}`)
+  }
+}
+
+/** Hold the first frame until the date stamp's two faces are really available. Bounded and never fatal. */
+export function useDateStampFonts(): void {
+  useLayoutEffect(() => {
+    if (dateStampSettled || typeof document === 'undefined') return
+    const handle = delayRender('loading the date stamp faces')
+    let cleared = false
+    const release = (): void => {
+      if (cleared) return
+      cleared = true
+      continueRender(handle)
+    }
+    dateStampPromise ??= loadDateStampFaces().then(() => {
+      dateStampSettled = true
+    })
+    void dateStampPromise.then(release, release)
+    return release
+  }, [])
 }

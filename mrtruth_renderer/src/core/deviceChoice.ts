@@ -6143,6 +6143,8 @@ export function copyNamesThePicture(copy: SceneDevice): boolean {
       return true
     /* A date. It names the moment, not the photograph. */
     case 'P12':
+    /* The owner's date overlay: a month and a year, the same claim as P12's. */
+    case 'date-stamp':
     /*
      * ########################################################################
      * # AND P14, WHICH IS THE SAME DATE AT A DIFFERENT TEMPO. It draws four   #

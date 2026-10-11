@@ -62,6 +62,15 @@ export const FONT_FAMILY = 'VG Documentary'
  */
 export const SERIF_FAMILY = 'VG Documentary Serif'
 
+/**
+ * The date stamp's two families (its month line and its year line), registered
+ * by `useDateStampFonts` in fonts.ts only on a `date-stamp` shot. Own names, so
+ * nothing else can pick them up: DM Serif Display and Libre Baskerville, both
+ * SIL OFL 1.1, matched off the owner's 2026-10-11 reference.
+ */
+export const DATE_STAMP_DATE_FAMILY = 'VG Date Stamp Display'
+export const DATE_STAMP_YEAR_FAMILY = 'VG Date Stamp Year'
+
 /* ------------------------------------------------------------- captions -- */
 
 export const SAFE_AREA_X = 96

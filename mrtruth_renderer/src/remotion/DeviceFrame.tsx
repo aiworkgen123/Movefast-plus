@@ -7,6 +7,7 @@ import { BulletChecklist } from './animations/BulletChecklist.js'
 import { ChapterPlate } from './animations/ChapterPlate.js'
 import { ChapterTitle } from './animations/ChapterTitle.js'
 import { CornerLabel } from './animations/CornerLabel.js'
+import { DateStamp } from './animations/DateStamp.js'
 import { FramedCard } from './animations/FramedCard.js'
 import { GalleryStrip } from './animations/GalleryStrip.js'
 import { HighlightPage } from './animations/HighlightPage.js'
@@ -420,6 +421,16 @@ export function DeviceFrame({ device, src, companionSrcs, grade, pictureMove }: 
 
     case 'corner-label':
       return <CornerLabel src={src} label={device.label} kicker={device.kicker} pictureMove={pictureMove} />
+
+    /*
+     * The owner's date overlay of 2026-10-11, over the scene's own picture. It
+     * mounts the scene's grade itself, under its type, so his pure white is not
+     * greyed by the house grade on top (`carriesOwnGrade: true`, as top-title).
+     * Never chosen today (`PLACED_BY_OPERATOR_ONLY`); it draws for previews and
+     * for any plan that carries one.
+     */
+    case 'date-stamp':
+      return <DateStamp src={src} grade={grade} date={device.date} year={device.year} pictureMove={pictureMove} />
 
     /* ---- registered, disabled, and refused by the chooser before here ---- */
     case 'pointer-label':

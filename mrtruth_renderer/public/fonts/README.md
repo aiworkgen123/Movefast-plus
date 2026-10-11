@@ -47,6 +47,31 @@ Which weight sets what:
 | 500 | Variable | the name plate's role line |
 | 700 | Variable | the chapter plate's heading, the name plate's name |
 
+## The date stamp's two faces (added 2026-10-11)
+
+Two more files, loaded ONLY on a `date-stamp` shot by `useDateStampFonts()` in
+`src/remotion/fonts.ts` (every other shot keeps the four faces above and nothing
+else):
+
+```
+DMSerifDisplay-Regular.ttf     the month line   (OFL-DMSerifDisplay.txt)
+LibreBaskerville-Regular.ttf   the year line    (OFL-LibreBaskerville.txt)
+```
+
+They are the faces of the owner's own date overlay, matched glyph by glyph off
+his reference (per-glyph IoU 0.939 and 0.925; every runner-up at or below
+0.906). Both are SIL OFL 1.1 and are the exact files Google Fonts serves
+(`fonts.googleapis.com/css2?family=DM+Serif+Display` and `...family=Libre+Baskerville`),
+**TTF and unmodified**: no subsetting and no conversion, so the pixels are the
+ones that were matched and the OFL's Reserved Font Name clause never comes up.
+
+| file | version | sha256 |
+|---|---|---|
+| DMSerifDisplay-Regular.ttf | 5.200 | `c03775f8cc3db88cfea259b231abe13f94e6a3d3cb01c09477a2e42a1f5919e1` |
+| LibreBaskerville-Regular.ttf | 2.005 | `f5bc4341f15de5e877d8d95b6b14b33e9a3da1f8fef4ed0700ed407f096cffb6` |
+
+Their licences are beside them (`OFL-*.txt`, from github.com/google/fonts).
+
 ## Where to get them
 
 **Libre Franklin**, SIL Open Font License 1.1 — a Franklin Gothic revival, the

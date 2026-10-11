@@ -203,6 +203,14 @@ export const DEVICE_IDS = [
    * the question that would settle it.
    */
   'name-plate',
+  /*
+   * The owner's date overlay of 2026-10-11: a big serif month over a smaller
+   * year, top right, rising into place. APPENDED, for the reason every append
+   * above gives: no existing tie-break or fallback seed moves. Drawable and
+   * previewable, never chosen: see `PLACED_BY_OPERATOR_ONLY` and its registry
+   * entry. His placement rulings are not written yet.
+   */
+  'date-stamp',
 ] as const
 
 export const DeviceIdSchema = z.enum(DEVICE_IDS)
@@ -304,6 +312,18 @@ export const P05_HEADLINE_MAX_CHARS = 48
 export const P05_EYEBROW_MAX_CHARS = 48
 export const P05_SUPPORT_LINE_MAX_CHARS = 96
 export const P05_IMAGE_LABEL_MAX_CHARS = 60
+
+/**
+ * The date stamp's two lines, as the schema bounds them.
+ *
+ * The big line is a month ("February") or a short date ("17 February"); its
+ * WIDTH is the real gate, `dateStampFits` in `remotion/animations/
+ * dateStampClock.ts`, which sets a long line smaller down to a floor. 24 is
+ * only the ceiling a string may reach before that measurement is worth running.
+ * The year line is short by nature ("1994", "c. 1200", "1947-1956").
+ */
+export const DATE_STAMP_DATE_MAX_CHARS = 24
+export const DATE_STAMP_YEAR_MAX_CHARS = 12
 
 /**
  * P14's YEAR: FOUR DIGITS, NOTHING BEFORE THEM AND NOTHING AFTER.
@@ -828,6 +848,17 @@ export const SceneDeviceSchema = z.discriminatedUnion('id', [
    * same bounds, because it answers the same job with a different design.
    */
   z.object({ id: z.literal('name-plate'), name: deviceText(32), role: deviceText(48) }),
+  /*
+   * The owner's date overlay (2026-10-11). `date` is the big line, `year` the
+   * small one under it; an empty year omits its block, as P04's support line
+   * does. A date names the moment, not the photograph, so it is P12's case in
+   * `copyNamesThePicture`.
+   */
+  z.object({
+    id: z.literal('date-stamp'),
+    date: deviceText(DATE_STAMP_DATE_MAX_CHARS),
+    year: z.union([z.literal(''), deviceText(DATE_STAMP_YEAR_MAX_CHARS)]).default(''),
+  }),
 
   /* ---- registered but never chosen; see `enabled` in the registry ---- */
   z.object({ id: z.literal('pointer-label'), label: deviceText(32) }),
@@ -4138,6 +4169,54 @@ export const DEVICE_REGISTRY: Record<DeviceId, DeviceSpec> = {
     minMeanLuma: null,
     carriesOwnGrade: false,
   },
+
+  /**
+   * The owner's date overlay of 2026-10-11 ("February" / "1994"), copied 1:1
+   * off his reference: DM Serif Display 130 px over Libre Baskerville 65 px,
+   * right-aligned at x = 1840, a black shadow and a white glow and nothing
+   * under them, the block rising 60 px into place over 45 frames. No sound.
+   * Every number is in `remotion/animations/dateStampClock.ts`.
+   *
+   * ##########################################################################
+   * # ENABLED, SO IT DRAWS AND PREVIEWS, AND NEVER CHOSEN. His message:      #
+   * # "add it to our library"; the placement rulings come later. So it sits  #
+   * # in `PLACED_BY_OPERATOR_ONLY` (G1 refuses it exactly as a disabled      #
+   * # device, it is never offered to the visual planner) and Mr Truth's own  #
+   * # planner has no rule that seats it. Every cap and bound here is OURS    #
+   * # (`capSource: 'unstated'`), never quoted back to him as his.            #
+   * ##########################################################################
+   */
+  'date-stamp': {
+    id: 'date-stamp',
+    origin: 'client',
+    enabled: true,
+    disabledReason: null,
+    supersededBy: null,
+    officialFileName: null,
+    fallbackTemplateIds: [],
+    /* A date the narration speaks: P12's job. Never chosen today, so it moves no score. */
+    job: 'single_historical_date',
+    pictures: 1,
+    /* His entrance settles 45 frames after the shot's first frame (1.50 s at 30 fps). */
+    buildEndFrames: 45,
+    /* His hold is 78 frames after the build; a little more still reads well on a still picture. */
+    holdsWellFrames: 150,
+    /* His clip: 123 frames on screen (4.1 s). */
+    defaultDurationFrames: 123,
+    maxPerFilm: null,
+    capSource: 'unstated',
+    positionRule: 'none',
+    pictureSource: 'ownScene',
+    mandatoryOnce: false,
+    /* White type straight on the photograph with a shadow and a glow on the glyphs, no plate. */
+    typeOverPicture: 'shadowOnly',
+    scrimAlpha: 0,
+    /* His footage is a dim, cool shot; a bright picture behind white type is the one way it fails. */
+    maxMeanLuma: 0.55,
+    minMeanLuma: null,
+    /* It mounts the scene's grade itself, UNDER the type, so his pure white survives (TopTitle's way). */
+    carriesOwnGrade: true,
+  },
 }
 
 /* ------------------------------------------------------------------------- */
@@ -4244,7 +4323,16 @@ export function enabledDevices(): DeviceSpec[] {
  * # passage, for a3 an admission path fed only from headings he approved.  #
  * ##########################################################################
  */
-export const PLACED_BY_OPERATOR_ONLY: ReadonlySet<DeviceId> = new Set<DeviceId>(['chapter-title', 'highlight-page'])
+/*
+ * `date-stamp` JOINED ON 2026-10-11, for a third reason: the owner sent it to be
+ * added to the library and has not yet ruled where it goes. It leaves this set
+ * with his ruling.
+ */
+export const PLACED_BY_OPERATOR_ONLY: ReadonlySet<DeviceId> = new Set<DeviceId>([
+  'chapter-title',
+  'highlight-page',
+  'date-stamp',
+])
 
 /** May the chooser return this device on its own? G1's question. */
 export function chooserMaySelect(spec: DeviceSpec): boolean {

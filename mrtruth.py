@@ -14,6 +14,8 @@ A visuals plugin (`look.visuals: "mrtruth"`): make_video hands it the script, th
 Owner rules (2026-10-06): photos only; only Mr Truth's own templates; the switched-off templates (P13, P16,
 pointer-label, name-card, name-plate) exist but are never placed; checks stay loose — a template that does not
 fit falls back or the shot stays a plain photograph, and nothing stops the run.
+The date stamp (date-stamp, owner 2026-10-11: his date overlay, copied 1:1) is in the library and in the previews,
+and is not placed by the planner until he sends its rulings.
 
     python mrtruth.py preview all            # every template, labelled, into preview/mrtruth/
     python mrtruth.py preview P03,P14        # just these
@@ -87,12 +89,17 @@ LIBRARY = {
     "pointer-label":  (False, 1, 3.0, 5.0, None, "any", [], {}),
     "name-card":      (False, 2, 3.0, 5.0, 3, "any", [], {}),
     "name-plate":     (False, 1, 3.0, 5.0, 3, "any", [], {}),
+    # the owner's date overlay (2026-10-11, renderer DateStamp.tsx), copied 1:1 off his reference: in the library and
+    # previewable, NOT placed yet - his placement rulings come later. Off here is the table's never-placed mark (as for
+    # the switched-off ones above); the preview labels it as waiting for its rulings, not as switched off
+    "date-stamp":     (False, 1, 2.0, 8.0, None, "any", [], {}),
 }
+AWAITING_RULINGS = {"date-stamp"}     # drawn and previewed, never placed, until the owner rules where they go
 # frames each template needs to finish building (the repo's DEVICE_REGISTRY buildEndFrames) — never seated on a shorter shot
 BUILD_FRAMES = {"P12": 36, "P17": 42, "P03": 55, "P22": 123, "P19": 76, "gallery-strip": 131, "framed-card": 25,
                 "photo-pop": 61, "shadow-up": 60, "P08": 60, "P04": 60, "P02": 90, "P09": 90, "P05": 120, "P14": 71,
                 "chapter-title": 120, "two-photo-zoom": 80, "highlight-page": 87, "bullet-checklist": 119,
-                "chapter-plate": 75, "top-title": 94, "corner-label": 101}
+                "chapter-plate": 75, "top-title": 94, "corner-label": 101, "date-stamp": 45}
 # where each template writes over the photograph (x0, y0, x1, y1 as fractions) and how bright that strip may be;
 # the repo reads the ground under the letters (T-26), not the whole picture's average
 TYPE_BAND = {"shadow-up": ((0.12, 0.80, 0.88, 0.97), 0.50), "top-title": ((0.02, 0.04, 0.62, 0.32), 0.55),
@@ -8826,6 +8833,8 @@ PREVIEW = [
     ("pointer-label", "OFF — pointer label", 150, "jars", [], {"src": "jars", "label": "Ruins of Qumran", "anchor": {"x": 0.5, "y": 0.55}}),
     ("name-card", "OFF — name card", 150, "rockefeller", [], {"srcs": ["rockefeller", "jerusalem"], "captions": ["A scroll scholar", "Jerusalem, 1950s"]}),
     ("name-plate", "OFF — name plate", 150, "jerusalem", [], {"src": "jerusalem", "name": "A scroll scholar", "role": "Rockefeller Museum, 1950s"}),
+    # the owner's own words from his reference, at his reference's length (123 frames)
+    ("date-stamp", "Date stamp", 123, "copper_scroll", [], {"id": "date-stamp", "date": "February", "year": "1994"}),
 ]
 
 
@@ -8853,7 +8862,8 @@ def preview(which: str = "all") -> Path:
             sc = scenes([row], storage)[0]
             tasks.append({"id": "Segment", "props": _props(sc), "output": str(out)})
         on = LIBRARY[tid][0]
-        labels.append((out, f"{tid}  ·  {what}" + ("" if on else "  (switched off)"), frames))
+        labels.append((out, f"{tid}  ·  {what}" + ("" if on else "  (not placed yet)" if tid in AWAITING_RULINGS
+                                                   else "  (switched off)"), frames))
     render(engine, work, tasks, workers=1)
     reel = work / ("templates.mp4" if not want else f"templates_{'_'.join(sorted(want))[:60]}.mp4")
     parts = []
