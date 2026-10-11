@@ -1764,6 +1764,7 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
         with _SPEND_LOCK:
             GEMINI_PICKS["fallback"] += 1
     if labels is not None:                       # Claude sees the pictures in order, their labels in the text
+        image_paths = list(image_paths)[:10]     # claude_vision's own cap: no label for a picture it does not send
         prompt = "\n".join([lead] + [f"Image {i + 1}: {str(labels[i]) if i < len(labels) else ''}"
                                       for i in range(len(image_paths))] + [prompt])
     info.update(via="claude", model="claude")

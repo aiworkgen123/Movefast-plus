@@ -871,11 +871,20 @@ def _stop(engine, msg: str) -> None:
 SHOT_WORKERS = int(os.environ.get("MRTRUTH_SHOT_WORKERS", "10"))    # shots searched and judged at the same time
 JUDGE = {"asks": 0, "failed": 0}       # picture-judge calls this run; failed = no answer after the retry
 _JUDGE_LOCK = threading.Lock()
+# Claude's fallback look (make_video.claude_vision) sends only the first ten pictures: an answer about a picture after
+# them was given without seeing it, and is dropped - that picture counts as not looked at (review 2026-10-11: a card
+# batch of 12 had two labels "checked" blind)
+CLAUDE_EYES = 10
 
 
-def _judge_guard(engine) -> None:
+def _judge_guard(engine, before: bool = False) -> None:
     """Stop when the picture judge keeps failing or keeps handing pictures to Claude (the $3.92 run: Gemini dry,
-    96 calls quietly went to Claude). Small numbers are tolerated; a share above 5% is not."""
+    96 calls quietly went to Claude). Small numbers are tolerated; a share above 5% is not. Asked after each check
+    and, `before`, ahead of each paid one too (review 2026-10-11: once tripped, every shot worker still running paid
+    one more Claude look before it stopped - 54 of 60 in the test); its counts only grow, so a tripped guard stops
+    every later check unpaid. MRTRUTH_ALLOW_DEGRADED=1: the check after the call says it, once a call."""
+    if before and os.environ.get("MRTRUTH_ALLOW_DEGRADED") == "1":
+        return
     g = getattr(engine, "GEMINI_PICKS", None) or {}
     asks, failed, claude = JUDGE["asks"], JUDGE["failed"], int(g.get("fallback", 0))
     if failed > max(5, 0.05 * asks):
@@ -2154,6 +2163,7 @@ def judge_score(engine, row: dict, cands: list, dossier: dict, before: str = "",
              + "\n".join(f"candidate {k + 1}: {c.get('title', '')[:120]}" for k, (c, _) in enumerate(cands))
              + JUDGE_TAIL.replace("[PERIOD]", str(dossier.get("period") or "the period the narration describes")))
     items = []
+    _judge_guard(engine, before=True)
     for _ in range(2):                             # one retry: a dropped answer must not cost a shot its pictures
         try:
             with _timed("judging"):
@@ -2602,9 +2612,11 @@ def _ask_pictures(engine, lead: str, prompt: str, items: list, era: bool, ai: bo
             break
         info = {}
         labels = [f"Picture {n} - caption: {str(it[1].get('title') or '')[:120]}" for n, it in enumerate(todo, 1)]
+        small = [str(_small(it[2], px)) for it in todo]
+        _judge_guard(engine, before=True)        # a tripped guard stops this check before it is paid for
         try:
             with _timed("AI checks" if ai else "judging"):
-                raw = engine.pick_vision(prompt, [str(_small(it[2], px)) for it in todo], max_tokens=4000,
+                raw = engine.pick_vision(prompt, small, max_tokens=4000,
                                          model=JUDGE_MODEL, thinking=JUDGE_THINKING, purpose=purpose, media=media,
                                          lead=lead, labels=labels, info=info)
         except Exception:                                            # noqa: BLE001 - asked once more
@@ -2613,7 +2625,8 @@ def _ask_pictures(engine, lead: str, prompt: str, items: list, era: bool, ai: bo
         _vcount("calls")
         _vcount("sent", len(todo))
         for j, a in _answers(raw, len(todo), era, ai).items():
-            got[todo[j][-1]] = a
+            if info.get("via") != "claude" or j < CLAUDE_EYES:
+                got[todo[j][-1]] = a
         if info.get("via") == "claude":          # Claude's answer is used once, never asked of it twice
             break
     with _JUDGE_LOCK:
@@ -4734,6 +4747,8 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
                         why, v = "border cropped — " + why2, v2
                     else:
                         crop.unlink(missing_ok=True)
+                except (PlanningStopped, OutOfCredit):               # the judge guard's stop reaches the run
+                    raise
                 except Exception:                                    # noqa: BLE001 - the refusal stands
                     pass
             got = {"ok": ok, "why": why, "v": CHECK_V, "check": v, "nobody": nobody, "mode": mode}
@@ -5140,6 +5155,21 @@ def _chapter_back(rows: list, k: int, sentences: set, latest: int = None):
     return None
 
 
+def _chapter_fwd(rows: list, k: int, sentences: set):
+    """The shot after rows[k], when a chapter on rows[k] has no sentence start near it nor behind it (review 2026-10-11:
+    a chapter on the tail of a long sentence): plain, its own line opening the next sentence within CHAPTER_SHIFT_MS,
+    at least 30 s before the chapter after it. The index, or None."""
+    j = k + 1
+    if j >= len(rows):
+        return None
+    y = rows[j]
+    if y.get("device") or y.get("typedCaption") or y.get("section_turn") or y.get("hold") or y.get("overlay"):
+        return None
+    s = y["_said"][0]
+    nxt = min((x["_said"][0] for x in rows[j + 1:] if x.get("section_turn")), default=10 ** 12)
+    return j if s in sentences and s - rows[k]["_said"][0] <= CHAPTER_SHIFT_MS and nxt - s >= 30000 else None
+
+
 def _chapter_to(rows: list, k: int, j: int) -> None:
     """The chapter plate (and its section turn) on rows[k] moves to rows[j]."""
     x, y = rows[k], rows[j]
@@ -5254,6 +5284,17 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
             anchors.append([r, 0])
         elif tid(r) == "chapter-plate":              # its sentence start, never its heading's words
             near = [s for s in sentences if abs(s - s0) <= CHAPTER_SNAP_MS]
+            j = None if near else _chapter_back(rows, k, set(sentences))
+            if j is not None:                        # none that close (its shot opens mid-sentence, review 2026-10-11):
+                _chapter_to(rows, k, j)              # it steps back onto the shot its sentence opens on, else to a
+                r = rows[j]                          # sentence start later inside its own line, else onto the next
+                anchors.append([r, r["_said"][0]])   # shot when that one opens the next sentence (seated there when
+                continue                             # the loop reaches it), all within CHAPTER_SHIFT_MS
+            near = near or [s for s in sentences if s0 < s <= min(s0 + CHAPTER_SHIFT_MS, e0 - _need_ms(r))]
+            j = None if near else _chapter_fwd(rows, k, set(sentences))
+            if j is not None:
+                _chapter_to(rows, k, j)
+                continue
             anchors.append([r, min(near, key=lambda s: (abs(s - s0), s)) if near else s0])
         else:
             at = _spoken_at(_overlay_words(r), heard, s0 - 12000, e0 + 12000)
@@ -6324,13 +6365,25 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
                                "shadow": DUST_SHADOW if lum >= DUST_SHADOW_MIN_LUMA else 0}
         took.add(at)
     # the light leak (owner 2026-10-09): about LEAK_SHARE of ALL shots, only on EMPTY pictures - no template, no
-    # typed caption, no dust, no text card - of 2 s or more, the 3 s+ ones first, spread across the film
+    # typed caption, no beat overlay, no dust, no text card - of 2 s or more, the 3 s+ ones first, spread across the film
     for sc in out:
         if (sc.get("device") or {}).get("id") in ANIMATIONS:
             sc["grade"] = {k: v for k, v in sc["grade"].items() if k != "shadow"}
+    led = []                                 # the film's showings, read only when a hold is weighed
+
+    def too_soon(j, frames):
+        """Shot j starting `frames` later would bring its photo within REUSE_GAP_S of its next showing (start to
+        start, as the reuse guard measures; review 2026-10-11: a 90.4 s repeat was drawn 89.6 s apart)."""
+        p = (rows[j].get("pick") or {}).get("photo") if j < len(rows) else None
+        if not p or _covered(rows[j]):
+            return False
+        if not led:
+            led.append(_final_ledger(rows))
+        t = rows[j]["startMs"]
+        return any(t < u < t + frames * 1000 / FPS + REUSE_GAP_S * 1000 for u in led[0].times(p))
     want = round(LEAK_SHARE * len(out))
     empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
-             and not sc.get("ambience") and not sc.get("textCard")
+             and not sc.get("ambience") and not sc.get("textCard") and not sc.get("overlay")
              and LEAK_MIN_S * FPS <= sc["durationFrames"] <= LEAK_MAX_S * FPS]
     empty.sort(key=lambda k: (out[k]["durationFrames"] < LEAK_PREFER_S * FPS, _content_draw(str(k) + "leak")))
     took, gap = set(), max(2, len(out) // max(1, 2 * want))
@@ -6343,7 +6396,9 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
         if short > 0:                     # a 2-3 s shot is held to 3 s: the time comes from the next plain shot,
             nxt = out[k + 1] if k + 1 < len(out) else None    # never making it a quick one (a run of five, 2026-10-10)
             if (nxt is None or nxt.get("device") or nxt.get("typedCaption") or nxt.get("textCard")
-                    or nxt["durationFrames"] - short < (SHORT_S * FPS if nxt["durationFrames"] >= SHORT_S * FPS else 2 * FPS)):
+                    or nxt.get("overlay")         # an overlay starts on its words: its shot never starts later
+                    or nxt["durationFrames"] - short < (SHORT_S * FPS if nxt["durationFrames"] >= SHORT_S * FPS else 2 * FPS)
+                    or too_soon(k + 1, short)):
                 continue
             out[k]["durationFrames"] += short
             nxt["startFrame"] += short
@@ -6356,7 +6411,7 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
     # them, the light leak included); its own measured move replaces the Ken Burns one
     want = round(TURN_SHARE * len(out))
     empty = [k for k, sc in enumerate(out) if sc.get("asset") and not sc.get("device") and not sc.get("typedCaption")
-             and not sc.get("ambience") and not sc.get("textCard")
+             and not sc.get("ambience") and not sc.get("textCard") and not sc.get("overlay")
              and TURN_MIN_S * FPS <= sc["durationFrames"] <= TURN_MAX_S * FPS]
     empty.sort(key=lambda k: (out[k]["durationFrames"] < TURN_PREFER_S * FPS, _content_draw(str(k) + "turn")))
     took, gap = set(), max(2, len(out) // max(1, 2 * want))
@@ -6832,6 +6887,7 @@ def _gate_ctx(job: Path, rows: list, dossier: dict, cues: list, title: str = "",
     minutes = rows[-1]["endMs"] / 60000 if rows else 0
     planning = mode == "gate" and BUDGET.get("reuse_cap") is not None
     return {"heard": heard, "heard_ms": [m for m, _ in heard], "vocab": vocab, "dossier": dossier or {},
+            "sentences": _sentence_starts(cues) if cues else [],
             "title": title, "mode": mode, "cards": {}, "resynced": set(), "ask": mode == "gate",
             "cap": BUDGET.get("cap", 0) if planning else round(AI_PER_MIN * minutes),
             "reuse_cap": BUDGET.get("reuse_cap", 0) if planning else round(REUSE_PER_MIN * minutes)}
@@ -6940,6 +6996,11 @@ def _gate_find(rows: list, ctx: dict) -> list:
         if k and _year_in(r.get("text", "")) and not dev and not r.get("overlay") and not r.get("typedCaption") \
                 and (rows[k - 1].get("device") or {}).get("id") not in ("P12", "P14"):
             ctx["notes"].append(f"shot {k} ({r['startMs'] / 1000:.0f}s) says {_year_in(r['text'])} with no date on screen")
+        off = min((abs(r["startMs"] - s) for s in ctx.get("sentences") or []), default=0)
+        if k and (dev or {}).get("id") == "chapter-plate" and len(ctx.get("sentences") or []) > 1 and off > 250:
+            ctx["warnings"].append(f"the chapter at {r['startMs'] / 1000:.1f}s opens mid-sentence ({off / 1000:.1f}s "
+                                   f"from the nearest sentence start; sync seats it on one within "
+                                   f"{CHAPTER_SHIFT_MS / 1000:.0f}s when a plain shot opens there)")
         if r.get("typedCaption"):
             for f, why, fix in _caption_problems(r, ctx):
                 add("text", k, f"typed caption line {f} {why}" if f != "lines" else f"typed caption {why}",
@@ -7135,7 +7196,8 @@ def _ask_cards(engine, lead: str, items: list) -> tuple:
         GATE["card_calls"] = GATE.get("card_calls", 0) + 1
         GATE["card_sent"] = GATE.get("card_sent", 0) + len(todo)
         for j, a in _card_answers(raw, len(todo)).items():
-            got[todo[j][-1]] = a
+            if info.get("via") != "claude" or j < CLAUDE_EYES:   # a label Claude never saw: "failed", the safe repair
+                got[todo[j][-1]] = a
         if info.get("via") == "claude":          # Claude's answer is used once, never asked of it twice
             break
     return got, via
@@ -7807,7 +7869,7 @@ def _gate_scenes(engine, job: Path, rows: list, sc_list: list) -> list:
     fixed, broken = [], []
     for i, sc in enumerate(sc_list):
         n, dev = sc["durationFrames"], sc.get("device")
-        words = bool(dev or sc.get("typedCaption") or sc.get("textCard"))
+        words = bool(dev or sc.get("typedCaption") or sc.get("textCard") or sc.get("overlay"))   # a beat overlay too
         amb = sc.get("ambience") or {}
         if amb.get("clip") == "leak" and (words or not LEAK_MIN_S * FPS <= n <= LEAK_MAX_S * FPS):
             sc.pop("ambience", None)
