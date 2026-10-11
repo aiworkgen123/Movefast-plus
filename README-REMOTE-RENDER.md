@@ -70,30 +70,32 @@ PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
    own identity), only for a shot with no other usable picture, and only when the crop is still 800 px wide and
    1.0-2.5 in shape; at most MRTRUTH_CROP_MAX (25) a film. Counted in "picture checks (...)" (frame rechecks, their
    cost), verdicts.json, timing.json and pick_audit.json; shots.json marks a cropped picture.
-   The Flash-Lite fixes (2026-10-11, question set CHECK_V 2 - older answers stay in the store, unused): every answer
-   first names when and in what tradition the thing shown was made ("made"); with the era question comes a yes/no
-   "other_era" - another century's or tradition's version of the thing - that the code turns into "no" (replaced in
-   round 2, below). The frame question walks all four edges; a print's margin
-   title is added text; every field up to studio is always given, and a refusal that leaves out "shows" counts as a
-   refusal for its reason. Free pixel tests run before any question: uniform bands along the edges (bars, a mount,
-   a margin) or a flat line splitting the picture (strips stacked, side by side) refuse it as framed without asking
-   - the frame crop then cuts it to the box inside the bands or to its largest part; an over-saturated HDR look is
-   refused as glossy on a shot whose time matters, a merely glossy one ranked below a plain one. Logged in
-   "picture checks (...)" ("framed and glossy by the pixel test"). For Flash-Lite at LOW:
-   MRTRUTH_JUDGE_MODEL=gemini-3.5-flash-lite MRTRUTH_JUDGE_MEDIA=LOW (the default stays gemini-3.8-flash, MEDIUM).
-   Round 2 (2026-10-11, CHECK_V 3): the century is decided in code. "made" names the thing's date first (at most 5
-   words); the code reads it as years and compares it with the line's OWN time - the beat's era, the dates in its
-   sentence, else the dossier notes of what it names - never the film's catch-all period, only on a SPECIFIC line (it
-   names something, is about a person, or gives a date), never against the very place or object the shot names (a
-   1794 view or a modern photo of the Vatican Library is the Vatican Library), and with a margin; an undated,
-   catch-all or abstract line is never refused on its date. The yes/no "other_era" is gone; a specific line is asked
-   instead whether the picture is the line's kind of thing ("same": a codex for a codex, not a library hall), and no
-   becomes "no". A 20th-century shot's era question asks only for what did not exist yet then. The default century
-   rule (the owner has not ruled yet) lives in WORLD_RULE and _date_off. The AI-picture checks stay on
-   MRTRUTH_AI_CHECK_MODEL (gemini-3.8-flash; MRTRUTH_AI_CHECK_THINKING, default "low" when it is not the judge's model)
-   when the candidates' checks move to Flash-Lite, and a defect answered in words ("a collage") counts. More free
-   frame tests: a thin border all round, a narrow gap between two scans, a transparency checkerboard. Ticket and tour
-   sellers and facsimile shops are refused before download, as stock is.
+   The checks' questions (2026-10-11, impl-q): CHECK_V 1 - the questions of the 11-minute render full-05f3c0
+   (6f07aab) word for word, question sets 09ba59cf9af8 (candidates) and 6e48a6a6e3c7 (AI drawings), so that render's
+   stored answers are used again. The Flash-Lite rounds (CHECK_V 2 and 3: "made" and the century decided in code,
+   "same", the 20th-century era question, the four-edge frame list) were only for Flash-Lite and are gone with it;
+   the checks stay on gemini-3.8-flash. Kept from those rounds, as they change no question: a refusal that leaves out
+   "shows" counts as a refusal for its reason (3.8 did that on 6f07aab's FORMAT and the call was asked again), a
+   defect answered in words ("a collage") counts, the free pixel tests run before any question (bars, a mount, a
+   margin, a thin border all round, a gap or flat line splitting the picture, a transparency checkerboard: refused
+   as framed unsent, the frame crop cut to the box inside; an over-saturated HDR look refused as glossy on a shot
+   whose time matters, a merely glossy one ranked below a plain one), ticket and tour sellers and facsimile shops are
+   refused before download, and the AI-picture checks have their own model knob (MRTRUTH_AI_CHECK_MODEL,
+   gemini-3.8-flash; MRTRUTH_AI_CHECK_THINKING, "low" when it is not the judge's model).
+   Cost switches (owner 2026-10-11: "keep costs at 2 usd per 20 minute video"), each off unless set, none changes a
+   question: MRTRUTH_JUDGE_CACHE=1 keeps the fixed head of every check (the rules and the <film> block, the same in
+   every call of a film) in an explicit Gemini cache, named by each call (a cached token costs a tenth; 3.8's
+   implicit cache needs 4,096 shared tokens and the checks share ~1,700); MRTRUTH_JUDGE_TERSE=1 asks for the answers in
+   short keys (r t f b m s p o j x y, 1/0, shows as e/k/g/n), read back into the same answers, filed under their
+   own question set and reading the plain answers first; MRTRUTH_JUDGE_LEAN=1 asks no further batch once a usable
+   exact picture is found; MRTRUTH_JUDGE_TIER=flex (MRTRUTH_AI_CHECK_TIER for the drawings, the judge's tier unless
+   set) asks Gemini's Flex tier - half price, best effort: a 503/429 or time-out is retried on Flex with backoff for at
+   most MRTRUTH_JUDGE_FLEX_WAIT seconds a call (300), then asked on the standard tier, every fallback counted, and
+   five fallbacks in a row rest Flex for 10 minutes; MRTRUTH_JUDGE_MEDIA=LOW halves the picture tokens (a judgment
+   change); MRTRUTH_JUDGE_MODEL=gemini-3-flash-preview is priced ($0.50 / $3.00 a million) and takes thinking "low"
+   (MRTRUTH_JUDGE_THINKING; "minimal" also works), Flex and the cache. The log's "picture checks (...)" line and
+   verdicts.json name the question set, the switches on, the cached tokens and the Flex record; "Gemini photo picks"
+   adds the Flex fallbacks and their reasons.
 
 PACING, OVERLAYS ON THEIR WORDS, NOTHING OVER 8 S (2026-10-10)
    Claude's shot list is kept as Claude wrote it (mrtruth/beats.json) and paced every time it is loaded: about 4.2 s a
