@@ -25,9 +25,14 @@ FPS = 30
 REF_PAGE = {"id": "highlight-page", "main": 1, "paragraphs": ["a", "b", "c"],
             "phrases": ["highlights specific text", "sequentially through all paragraphs", "exactly match text"]}
 SCRIBBLE_STOP_AFTER_SWEEP_MS = 1014.1        # the scribble's dead stop after the first sweep starts
-SWISH_RISE_AFTER_YELLOW_MS = 60.9            # his second swish rises this long after its highlight's first yellow
 SWISH_RISE_IN_FILE_MS = 10.0                 # the swish file's own audible rise
-GALLERY_ONSETS_L = {"gallery_zoom_out.wav": 5.269, "gallery_pan.wav": 44.309, "gallery_zoom_in.wav": 113.232}
+# where each file's sample 0 sits in his clip, in page frames (L0 = the page's first frame), read on its MP4 edit
+# lists (L = 30 t + 11.453646) by cross-correlating the files against his sound (verify/sfx2f/scripts/xc_ref.py):
+# the scribble, his second highlight's swish, his third's (63984 samples = 1333 ms after it)
+HIS_PAGE_SAMPLE0_L = (11.4536, 41.5649, 81.5549)
+SWISH3_RISE_VS_YELLOW_MS = -338.2            # his third swish rises this long before its highlight's first yellow
+# his three gallery sounds' onsets (first 5 ms RMS rise) in gallery frames, on his clip's edit-list time base
+GALLERY_ONSETS_L = {"gallery_zoom_out.wav": 4.923, "gallery_pan.wav": 43.963, "gallery_zoom_in.wav": 112.886}
 GALLERY_ONSET_IN_FILE_MS = {"gallery_zoom_out.wav": 8.98, "gallery_pan.wav": 10.29, "gallery_zoom_in.wav": 7.75}
 GALLERY = {"id": "gallery-strip"}
 
@@ -56,7 +61,7 @@ class Files(unittest.TestCase):
             with wave.open(str(R / "sfx" / name)) as w:
                 self.assertEqual((w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()),
                                  (48000, 2, 2, n), name)
-        named = {M.HL_SFX_FIRST[0], M.HL_SFX_NEXT[0], *(f for f, _ in M.GALLERY_SFX)}
+        named = {M.HL_SFX_FIRST[0], M.HL_SFX_SECOND[0], M.HL_SFX_THIRD[0], *(f for f, _ in M.GALLERY_SFX)}
         self.assertEqual(named, set(want))
         self.assertEqual(M.TPL_SFX_DB, 0.0)                         # his level, the file as cut
 
@@ -64,6 +69,8 @@ class Files(unittest.TestCase):
         hl = (R / "src/remotion/animations/highlightPageClock.ts").read_text()
         self.assertEqual(int(re.search(r"framesPerWord:\s*(\d+)", hl).group(1)), M.HL_FRAMES_WORD)
         self.assertIn("cursor += span", hl)                           # chained from local 0, no gap
+        # one eased wipe over the whole window: the same share of a sweep is the same share drawn at any length
+        self.assertIn("clamp01((frame - window.from) / (window.to - window.from))", hl)
         gs = (R / "src/remotion/animations/galleryStripClock.ts").read_text()
         zoom_in = gs[gs.index("zoomIn: {"):]
         self.assertEqual(int(re.search(r"endFrame:\s*(\d+)", zoom_in).group(1)), 130)   # the landing his sound ends on
@@ -75,49 +82,81 @@ class Cues(unittest.TestCase):
         got = M._template_sounds([shot(S, 180, dev=REF_PAGE)])
         self.assertEqual([f for _, f, *_ in got], ["highlight_1.wav", "highlight_2.wav", "highlight_2.wav"])
         self.assertEqual([keep for _, _, keep, *_ in got], [None, None, None])   # nothing cut on his page
-        sweeps = [S, S + 39, S + 91]                                  # 13 frames a word: 0-39, 39-91, 91-130
+        for (t, *_), his in zip(got, HIS_PAGE_SAMPLE0_L):              # every file where his clip has it
+            self.assertAlmostEqual((t - S / FPS) * FPS, his, delta=0.002)
         (t1, *_), (t2, *_), (t3, *_) = got
-        stop = (t1 + M.HL_SFX_FIRST_STOP_S - sweeps[0] / FPS) * 1000
+        self.assertAlmostEqual((t3 - t2) * 48000, 63984, delta=1)    # his two swishes 1333 ms apart
+        stop = (t1 + M.HL_SFX_FIRST_STOP_S - S / FPS) * 1000
         self.assertAlmostEqual(stop, SCRIBBLE_STOP_AFTER_SWEEP_MS, delta=0.5)
-        for t, sw in ((t2, sweeps[1]), (t3, sweeps[2])):              # every later highlight: his second's relation
-            rise = (t + SWISH_RISE_IN_FILE_MS / 1000 - (sw + 1) / FPS) * 1000    # first yellow one frame in
-            self.assertAlmostEqual(rise, SWISH_RISE_AFTER_YELLOW_MS, delta=1.0)
-        self.assertAlmostEqual(t2, (S + 39) / FPS + 0.0842, places=6)
-        self.assertAlmostEqual(t3, (S + 91) / FPS + 0.0842, places=6)
+        rise3 = (t3 + SWISH_RISE_IN_FILE_MS / 1000 - (S + 92) / FPS) * 1000   # H3's first yellow one frame in
+        self.assertAlmostEqual(rise3, SWISH3_RISE_VS_YELLOW_MS, delta=1.0)
 
     def test_cues_follow_the_pages_own_words(self):
         got = M._template_sounds([shot(0, 240, dev=page("a b c d e", "f g", "h i j"))])
-        self.assertAlmostEqual(got[0][0], 0.381776, places=6)       # 5 words: his scribble time
-        self.assertAlmostEqual(got[1][0], 65 / FPS + 0.0842, places=6)
-        self.assertAlmostEqual(got[2][0], 91 / FPS + 0.0842, places=6)
+        self.assertAlmostEqual(got[0][0], M.HL_SFX_FIRST_STOP_FRAC * 65 / FPS - M.HL_SFX_FIRST_STOP_S, places=9)
+        self.assertAlmostEqual(got[1][0], 65 / FPS + M.HL_SFX_SECOND[1], places=9)
+        self.assertAlmostEqual(got[2][0], 91 / FPS + M.HL_SFX_THIRD[1], places=9)   # 0.47 s after the second: his
+        self.assertAlmostEqual(got[1][2], got[2][0] - got[1][0] + M.TPL_SFX_FADE_S, places=9)
 
-    def test_a_short_first_phrase_moves_the_scribble_earlier_never_before_the_page(self):
+    def test_a_long_first_phrase_stops_the_scribble_as_far_into_its_sweep_as_his(self):
+        # his stop comes when his 3-word highlight is 97% drawn; 4-8 words were 86% down to 35% with a fixed lead
+        def drawn(x):                                 # the renderer's Material (0.4, 0, 0.2, 1) wipe at share x
+            lo, hi = 0.0, 1.0
+            for _ in range(50):
+                u = (lo + hi) / 2
+                lo, hi = (u, hi) if 3 * (1 - u) ** 2 * u * 0.4 + 3 * (1 - u) * u * u * 0.2 + u ** 3 < x else (lo, u)
+            return 3 * (1 - u) * u * u + u ** 3
+        for n in range(3, M.HL_PHRASE_WORDS + 1):
+            got = M._template_sounds([shot(0, 400, dev=page(" ".join("w" * n), "f g h", "i j k"))])
+            sweep = 13 * n / FPS
+            stop = got[0][0] + M.HL_SFX_FIRST_STOP_S
+            self.assertIsNone(got[0][2], n)                           # the whole scribble, its dead stop included
+            self.assertAlmostEqual(drawn(stop / sweep), 0.969, delta=0.001, msg=n)
+            self.assertLess(stop, sweep)
+        five = M._template_sounds([shot(0, 400, dev=page("a b c d e", "f g h", "i j k"))])
+        self.assertAlmostEqual((five[0][0] + M.HL_SFX_FIRST_STOP_S) * FPS, 50.7, delta=0.05)  # 65-frame sweep
+
+    def test_a_short_first_phrase_never_starts_the_scribble_before_the_page(self):
         one = M._template_sounds([shot(600, 210, dev=page("review", "handwritten notation", "a b c d e f g"))])
         a = 600 / FPS
         self.assertAlmostEqual(one[0][0], a, places=9)                # on the page's first frame
         swish = one[1][0]
-        self.assertAlmostEqual(swish, a + 13 / FPS + 0.0842, places=6)
+        self.assertAlmostEqual(swish, a + 13 / FPS + M.HL_SFX_SECOND[1], places=9)
         self.assertAlmostEqual(one[0][0] + one[0][2], swish + M.TPL_SFX_FADE_S, places=6)   # faded out as it starts
         two = M._template_sounds([shot(0, 210, dev=page("old review", "handwritten notation", "a b c"))])
-        self.assertAlmostEqual(two[0][0] + M.HL_SFX_FIRST_STOP_S, two[1][0], places=6)      # its stop meets the swish
-        self.assertGreaterEqual(two[0][2], M.HL_SFX_FIRST_STOP_S)    # the whole scribble up to its dead stop
+        self.assertAlmostEqual((two[0][0] + M.HL_SFX_FIRST_STOP_S) * FPS, 20.28, delta=0.01)   # 97% of 26 frames
+        self.assertIsNone(two[0][2])                                  # the whole scribble, before the swish
+        self.assertLess(two[0][0] + M._sfx_samples("highlight_1.wav") / 48000, two[1][0])
+
+    def test_a_one_word_second_phrase_keeps_the_swishes_apart(self):
+        # his third swish's timing would start it 1 frame after the second: it waits, at most to his second's timing
+        got = M._template_sounds([shot(0, 300, dev=page("a b", "c", "d e f"))])
+        s3 = 39 / FPS
+        self.assertAlmostEqual(got[2][0], s3 + M.HL_SFX_SECOND[1], places=9)
+        self.assertGreater(got[2][0] - got[1][0], 0.43)               # the second under -60 dBFS before it is cut
+        self.assertAlmostEqual(got[1][2], got[2][0] - got[1][0] + M.TPL_SFX_FADE_S, places=9)
+        for n2 in (2, 3, 8):                                          # two words and up: his third swish's timing
+            got = M._template_sounds([shot(0, 400, dev=page("a b c", " ".join("w" * n2), "d e f"))])
+            self.assertAlmostEqual(got[2][0], (39 + 13 * n2) / FPS + M.HL_SFX_THIRD[1], places=9, msg=n2)
+            self.assertGreaterEqual(got[2][0] - got[1][0], M.HL_SFX_GAP_S)
 
     def test_the_gallery_on_its_fixed_clock(self):
         S = 900
         got = M._template_sounds([shot(S, 135, dev=GALLERY)])
         self.assertEqual([(f, keep) for _, f, keep, *_ in got],
                          [("gallery_zoom_out.wav", None), ("gallery_pan.wav", None), ("gallery_zoom_in.wav", None)])
-        for t, f, *_ in got:
+        for (t, f, *_), (_, frame) in zip(got, M.GALLERY_SFX):
+            self.assertAlmostEqual(t, (S + frame) / FPS - 665 / 57600, places=9)   # his picture 665/57600 s late
             onset_l = (t + GALLERY_ONSET_IN_FILE_MS[f] / 1000) * FPS - S
             self.assertAlmostEqual(onset_l, GALLERY_ONSETS_L[f], delta=0.01, msg=f)
         t, f = got[-1][:2]
         end_l = (t + M._sfx_samples(f) / 48000) * FPS - S
         self.assertLess(end_l, 130)                                   # the whoosh ends on the landing, not after it
-        self.assertGreater(end_l, 129.5)
+        self.assertGreater(end_l, 129.4)                              # 18.5 ms before it, as his
 
     def test_never_past_its_shot(self):
         cut = M._template_sounds([shot(0, 120, dev=GALLERY)])        # shorter than his 131 frames
-        self.assertAlmostEqual(cut[-1][2], 4.0 - 113 / FPS, places=9)  # the whoosh faded onto the shot's last frame
+        self.assertAlmostEqual(cut[-1][2], 4.0 - (113 / FPS - 665 / 57600), places=9)   # faded onto its last frame
         gone = M._template_sounds([shot(0, 112, dev=GALLERY)])
         self.assertEqual([f for _, f, *_ in gone], ["gallery_zoom_out.wav", "gallery_pan.wav"])
         self.assertEqual(M._template_sounds([shot(0, 90), shot(90, 120, dev={"id": "P03"})]), [])
@@ -193,6 +232,16 @@ class Mix(unittest.TestCase):
         self.assertNotIn("shutter.wav", " ".join(cmd))
         self.assertEqual(sum(a.endswith(".wav") for a in cmd), 3)
 
+    def test_the_shot_after_a_template_keeps_its_own_transition_sound(self):
+        # (4 + 140) / 30 is 4.8 but 4 / 30 + 140 / 30 is 4.800000000000001: a float test once took the next shot's dip
+        # for a gallery's own and dropped its thud (1 pair in 9). Only the template's own shot gives way
+        for start, n in ((4, 140), (600, 140), (1200, 150), (7, 135), (33, 180)):
+            for dev in (GALLERY, REF_PAGE):
+                out, cmd = self.graph([shot(0, start), shot(start, n, "cut", dev), shot(start + n, 90, "dipToBlack")])
+                fc = cmd[cmd.index("-filter_complex") + 1]
+                self.assertEqual(sum(a.endswith("impact.wav") for a in cmd), 1, (start, n, dev["id"]))
+                self.assertIn(f"adelay={int((start + n) / FPS * 1000)}:all=1[s0]", fc)
+
     def test_a_film_without_them_mixes_as_before(self):
         sc = [shot(0, 120), shot(120, 60, "dipToBlack"), shot(180, 240, "flash"), shot(420, 210, "cut", {"id": "P03"})]
         out, cmd = self.graph(sc)
@@ -228,7 +277,7 @@ class Mix(unittest.TestCase):
         first = round(cues[0][0] * 48000)
         self.assertEqual(first, 45 * 1600)                          # the scribble on the page's first frame
         self.assertFalse(np.abs(mix[:first]).max())                 # nothing before it: no shutter on the gallery
-        fade = round(M.TPL_SFX_FADE_S * 48000)
+        fade, fade_in = round(M.TPL_SFX_FADE_S * 48000), round(M.HL_SFX_FIRST_FADE_IN_S * 48000)
         for j, (t, f, keep, a, b) in enumerate(cues):
             k, his = round(t * 48000), files[f]
             n = len(his) if keep is None else round(keep * 48000) - fade
@@ -236,9 +285,44 @@ class Mix(unittest.TestCase):
             if nxt:
                 n = min(n, nxt[0] - k)                               # up to where the next one starts
             s = fade if j and cues[j - 1][2] is not None and cues[j - 1][0] + cues[j - 1][2] > t else 0   # under a fade
+            if f == "highlight_1.wav":                               # his trim cut into it: faded in over 40 ms
+                ramp = mix[k:k + fade_in]
+                self.assertTrue((np.abs(ramp) <= np.abs(his[:fade_in]) + 2e-4).all())
+                self.assertLess(np.abs(ramp[:48]).max(), 0.05 * np.abs(his[:fade_in]).max())
+                s = fade_in
             np.testing.assert_allclose(mix[k + s:k + n], his[s:n], atol=2e-4, err_msg=f)
         scribble_end = round((cues[0][0] + cues[0][2]) * 48000)
         self.assertLess(np.abs(mix[scribble_end - 2:scribble_end + 200]).max(), 1e-3)   # faded out, the swish not risen
+
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not installed")
+    def test_a_loud_voice_through_the_limiter(self):
+        # a full voice under his sounds: the limiter adds no delay and touches nothing under full scale; where voice and
+        # his pan hit sum over it, the mix stays at full scale
+        import numpy as np
+        rate, secs = 48000, 9.0
+        k = np.arange(int(rate * secs))
+        for amp, sc in ((0.5, [shot(0, 30), shot(30, 180, "cut", REF_PAGE), shot(210, 60)]),
+                        (0.6, [shot(0, 30), shot(30, 150, "cut", GALLERY), shot(180, 90)])):
+            dec = lambda p: np.frombuffer(subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(p), "-f", "f32le",
+                                                          "-ac", "2", "-ar", "48000", "-"], capture_output=True).stdout,
+                                          np.float32).reshape(-1, 2).astype(np.float64)
+            got = {}
+            for name, level in (("silent", 0.0), ("loud", amp)):     # his sounds alone (as the test above), then voiced
+                with tempfile.TemporaryDirectory() as d:
+                    voice = Path(d) / "audio.wav"
+                    sine = (level * np.sin(2 * np.pi * 220 * k / rate)).astype(np.float32)
+                    subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "f32le", "-ar", str(rate), "-ac", "1", "-i",
+                                    "-", "-c:a", "pcm_f32le", str(voice)], input=sine.tobytes(), check=True)
+                    got[name] = dec(M._sfx_audio(Log(), Path(d), voice, sc))
+            mix = got["loud"]
+            want = got["silent"] + np.repeat(sine.astype(np.float64)[:, None], 2, 1)
+            self.assertEqual(len(mix), len(want))
+            over = np.abs(want).max(1) > 0.98
+            near = np.convolve(over, np.ones(9601), "same") > 0          # 100 ms either side of an over
+            np.testing.assert_allclose(mix[~near], want[~near], atol=2e-4)  # untouched, not one sample late
+            self.assertLessEqual(np.abs(mix).max(), 1.0 + 1e-6)
+            self.assertEqual(bool(over.any()), amp == 0.6, amp)          # the gallery's hit does sum over full scale
 
 
 class Cut(unittest.TestCase):
@@ -251,6 +335,29 @@ class Cut(unittest.TestCase):
         self.assertEqual(rows[3]["tin"], {"type": "cut", "durationFrames": 0})
         self.assertEqual(rows[6]["tin"], {"type": "cut", "durationFrames": 0})
         self.assertIn(rows[1]["tin"]["type"], ("filmBurn", "flash"))
+
+    def test_never_burnt_over_at_their_end_and_a_section_turn_cuts_in_hard(self):
+        # a gallery shot of 135-141 frames ends 5-11 frames after its landing at 130: a 12-frame burn out lay over it
+        rows = [{"startMs": k * 4600, "endMs": (k + 1) * 4600, "text": f"line {k}", "device": None,
+                 "pick": {"photo": f"p{k}.jpg"}} for k in range(10)]
+        rows[2]["device"], rows[6]["device"] = dict(GALLERY), dict(REF_PAGE)
+        with mock.patch.object(M, "_content_draw", lambda text: 0.0):   # every draw a film burn or a flash
+            notes = M.transitions(rows)
+        for k in (2, 6):
+            self.assertIsNone(rows[k]["tout"], k)
+            self.assertNotEqual(rows[k + 1]["tin"]["type"], "filmBurn", k)
+        self.assertEqual(rows[3]["tin"]["type"], "flash")                # the next shot keeps a transition of its own
+        self.assertEqual(notes, [])
+        self.assertTrue(any(r["tin"]["type"] == "filmBurn" for r in rows))   # burns elsewhere, as before
+        rows[2]["section_turn"] = rows[6]["section_turn"] = True
+        rows[8]["section_turn"] = True
+        notes = M.transitions(rows)
+        self.assertEqual(rows[2]["tin"], {"type": "cut", "durationFrames": 0})
+        self.assertEqual(rows[6]["tin"], {"type": "cut", "durationFrames": 0})
+        self.assertEqual(rows[8]["tin"]["type"], "dipToBlack")           # a plain shot's section turn: its dip
+        self.assertEqual(len(notes), 2)
+        self.assertIn("gallery-strip", notes[0])
+        self.assertIn("dip to black and thud left out", notes[1])
 
 
 if __name__ == "__main__":

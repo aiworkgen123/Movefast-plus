@@ -88,6 +88,12 @@ LIBRARY = {
     "name-card":      (False, 2, 3.0, 5.0, 3, "any", [], {}),
     "name-plate":     (False, 1, 3.0, 5.0, 3, "any", [], {}),
 }
+# the owner's templates that cut in and out hard (review 2026-10-11): transitions() gives a shot carrying one a cut in
+# (his page and his gallery open on one; a burn, flash or dip would lie over the first highlight, or over the gallery's
+# zoom-out and its first sound) and never a burn out (on a 131-141 frame gallery shot it would lie over the landing at
+# 130 that his zoom-in whoosh ends on). A section turn that lands on one is a hard cut too, said in the log. impl-m
+# keeps the same set for his map and date: one set of four when the branches meet
+HARD_CUT_DEVICES = {"highlight-page", "gallery-strip"}
 # frames each template needs to finish building (the repo's DEVICE_REGISTRY buildEndFrames) — never seated on a shorter shot
 BUILD_FRAMES = {"P12": 36, "P17": 42, "P03": 55, "P22": 123, "P19": 76, "gallery-strip": 131, "framed-card": 25,
                 "photo-pop": 61, "shadow-up": 60, "P08": 60, "P04": 60, "P02": 90, "P09": 90, "P05": 120, "P14": 71,
@@ -162,26 +168,40 @@ SFX_MIN_GAP_S = 12.0
 # container - gallery strip. Time it right"), cut losslessly from his two reference clips into mrtruth_renderer/sfx/ as
 # 48 kHz stereo 16-bit. His animations run on the renderer's own clocks frame for frame (highlightPageClock.ts,
 # galleryStripClock.ts; a template's frame 0 is its shot's first frame), so each sound is placed on those clocks as his
-# clips place it. The times below are each file's FIRST SAMPLE, after the event it belongs to:
-#  - the highlighted page: the scribble under the FIRST highlight, HL_SFX_FIRST s after that highlight's sweep starts
-#    (his clip holds only its last 0.63 s: it stops dead 1014 ms after the sweep starts, as here); the swish under
-#    EVERY later highlight, HL_SFX_NEXT s after that highlight's sweep starts (his second highlight's timing: it rises
-#    61 ms after the first yellow and peaks 331 ms after it). The sweeps are 13 frames a word, so the cues follow the
-#    page's own words (highlightPageSchedule). His third swish sits on a fixed 40-frame cadence from his second, which
-#    fits 3-word sweeps but lands 12 frames early after his 4-word second phrase; our pages have other word counts and
-#    no such cadence, so every later highlight takes his second highlight's timing. A first phrase of one or two words
-#    would end before his scribble does: then it starts earlier (never before the page) so that its dead stop
-#    (HL_SFX_FIRST_STOP_S into the file) meets the second highlight's swish, and plays under the first highlight.
-#  - the gallery strip: three sounds, sample 0 on frames 5 (the zoom-out's rising sweep, with the chips), 44 (the
-#    strip's pan: clicks, the hit as card #1 arrives, a burst) and 113 (the whoosh that ends on the landing at 130).
+# clips place it. Both clips are read on their MP4 edit lists, which put his picture against his sound as his reel had
+# it (the two lists agree to 0.2 samples; ffmpeg's own frame index moves the picture 18.2 ms / 11.5 ms early). The
+# times below are each file's FIRST SAMPLE, after (or, negative, before) the event it belongs to:
+#  - the highlighted page (sweeps of 13 frames a word, chained from frame 0: highlightPageSchedule):
+#    - the scribble under the FIRST highlight. His clip holds only its last 0.65 s, and it stops dead
+#      (HL_SFX_FIRST_STOP_S into the file) when the highlight is 97% drawn: 1014.1 ms into his 3-word sweep,
+#      HL_SFX_FIRST_STOP_FRAC of it.
+#      Every page puts that stop at the same point of its own first sweep (the sweep is one eased wipe over 13 frames a
+#      word, so that point is 97% drawn at any length), the scribble's start never before the page's first frame;
+#      HL_SFX_FIRST[1] is the start on his 3-word page. Its first HL_SFX_FIRST_FADE_IN_S fade in: his trim cut into it
+#      while it played, so the file starts at full level, mid-stroke
+#    - the swish under the SECOND highlight, HL_SFX_SECOND[1] s after its sweep starts, as his (rises 61 ms after its
+#      first yellow, peaks 331 ms after it)
+#    - the same swish under the THIRD highlight, HL_SFX_THIRD[1] s after its sweep starts, as his: before it, peaking
+#      69 ms before its first yellow (his two swishes are 1333 ms apart, and his third sits 12 frames earlier against
+#      its highlight than his second does). When the second phrase is so short that this would start the third swish
+#      within HL_SFX_GAP_S of the second (one or two words; the swish is under -70 dBFS 0.45 s in), it waits for that,
+#      but never later than the second's own timing against its highlight
+#  - the gallery strip: three sounds on frames 5 (the zoom-out's rising sweep, with the chips), 44 (the strip's pan:
+#    clicks, the hit as card #1 arrives, a burst) and 113 (the whoosh that ends on the landing at 130), each sample 0
+#    GALLERY_SFX_EARLY_S before its frame: his clip's picture starts 665/57600 s into his sound's time (its video edit
+#    list), so on his reel each file starts that long before the frame ffmpeg's index gives it.
 # His level: each file as cut, 0 dB - his clips carry no voice and Mr Truth's narration sits where his films' does, so
 # the voice runs under them unchanged (as the map's sound on impl-m). One sound at a time on a shot: a sound still
 # playing when the next one starts is faded out over TPL_SFX_FADE_S as it starts, and none runs past its shot's last
-# frame. Never thinned by SFX_MIN_GAP_S (the transitions' rule); a transition sound that would land on such a shot is
-# left out, so the template's own sounds play as his do.
-HL_SFX_FIRST, HL_SFX_NEXT = ("highlight_1.wav", 0.381776), ("highlight_2.wav", 0.084200)
-HL_SFX_FIRST_STOP_S = 0.632292
+# frame. Never thinned by SFX_MIN_GAP_S (the transitions' rule); a transition sound on such a shot is left out (none
+# should come: these are HARD_CUT_DEVICES), so the template's own sounds play as his do.
+HL_SFX_FIRST, HL_SFX_FIRST_STOP_S = ("highlight_1.wav", 0.381788), 0.632292
+HL_SFX_FIRST_STOP_FRAC = (0.381788 + 0.632292) / 1.3        # his stop, 1014.08 ms into his 39-frame first sweep
+HL_SFX_FIRST_FADE_IN_S = 0.04
+HL_SFX_SECOND, HL_SFX_THIRD = ("highlight_2.wav", 0.085497), ("highlight_2.wav", -0.314837)
+HL_SFX_GAP_S = 0.45
 GALLERY_SFX = (("gallery_zoom_out.wav", 5), ("gallery_pan.wav", 44), ("gallery_zoom_in.wav", 113))
+GALLERY_SFX_EARLY_S = 665 / 57600
 TPL_SFX_DB, TPL_SFX_RATE, TPL_SFX_FADE_S = 0.0, 48000, 0.005
 
 # P03's headline is set at 92px in a 1120px column, two lines at most (devices.ts p03HeadlineFits)
@@ -7139,10 +7159,12 @@ def _content_draw(text: str) -> float:
     return int(hashlib.sha256(text.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
 
 
-def transitions(rows: list) -> None:
+def transitions(rows: list) -> list:
     """transitionIn/Out per shot: a dip to black at a section turn, then (keyed on each shot's own words, never
-    periodic) a film burn, flash, push or slide at the repo's shares; everything else a hard cut."""
-    last_burn, run = -1e9, 0
+    periodic) a film burn, flash, push or slide at the repo's shares; everything else a hard cut. A shot with one of the
+    owner's hard-cut templates (HARD_CUT_DEVICES) is cut into, and the shot after it never burns over its end. A section
+    turn that lands on one loses its dip (and the dip's thud): the notes returned name each, for the log."""
+    last_burn, run, notes = -1e9, 0, []
     burns_by_min = {}
     for i, r in enumerate(rows):
         r["tin"], r["tout"] = {"type": "cut", "durationFrames": 0}, None
@@ -7151,18 +7173,23 @@ def transitions(rows: list) -> None:
         u = _content_draw(r["text"] + str(i))
         t = r["startMs"] / 1000.0
         dev = (r.get("device") or {}).get("id")
+        # a hard cut into the page and the gallery strip, as his clips open (2026-10-11: a burn or a flash would hide
+        # the first highlight, cover the gallery's first 13 frames, where its zoom-out and first sound start, or put the
+        # shutter on top of that sound); a section turn's dip too (72% black over 18 frames), the planner never puts
+        # one there, so the log says so if it ever does
+        if dev in HARD_CUT_DEVICES:
+            if r.get("section_turn"):
+                notes.append(f"  transitions: shot {i} ({t:.1f}s) turns a section but carries his {dev} - cut in hard, "
+                             f"its dip to black and thud left out")
+            run = 0
+            continue
         if r.get("section_turn") or dev == "chapter-title":
             r["tin"] = {"type": "dipToBlack", "durationFrames": DIP_FRAMES}
             run = 0
             continue
-        # a hard cut into the page, as the reference opens (review 2026-10-11: a burn or a flash would hide its first
-        # highlight); into the gallery strip too, as his opens (2026-10-11: a burn covers its first 13 frames, where
-        # its zoom-out and first sound start, and a flash would put the shutter on top of that sound)
-        if dev in ("highlight-page", "gallery-strip"):
-            run = 0
-            continue
         minute = int(t // 60)
         if (u < BURN_SHARE and t - last_burn >= BURN_GAP_S and burns_by_min.get(minute, 0) < BURN_PER_MIN
+                and (rows[i - 1].get("device") or {}).get("id") not in HARD_CUT_DEVICES
                 and run < BURN_MAX_RUN and (r["endMs"] - r["startMs"]) / 1000 * FPS > BURN_IN + 2
                 and (rows[i - 1]["endMs"] - rows[i - 1]["startMs"]) / 1000 * FPS > BURN_OUT + 2):
             r["tin"] = {"type": "filmBurn", "durationFrames": BURN_IN, "clip": "burn02"}
@@ -7180,6 +7207,7 @@ def transitions(rows: list) -> None:
             r["tin"] = {"type": "pushCut", "durationFrames": PUSH_FRAMES}
         elif v < FLASH_SHARE + PUSH_SHARE + SLIDE_SHARE and prev_pic and r.get("pick"):
             r["tin"] = {"type": "slide", "durationFrames": SLIDE_FRAMES}
+    return notes
 
 
 _MOVES = [(1.0, 1.08, -0.15, 0.0, 0.0, 0.0), (1.1, 1.02, 0.0, 0.12, 0.04, 0.0), (1.02, 1.1, 0.12, -0.08, 0.0, -0.04),
@@ -7460,23 +7488,28 @@ def _sfx_samples(name: str) -> int:
 
 def _template_cues(sc: dict) -> list:
     """(seconds after the shot's first frame of the file's sample 0, file) of one shot's own template sounds, in order:
-    a highlighted page's scribble and swishes on its highlights' sweep starts (13 frames a word, chained from frame 0,
-    as highlightPageSchedule), the gallery strip's three on its fixed clock (HL_SFX_*, GALLERY_SFX)."""
+    a highlighted page's scribble and swishes on its highlights' sweeps (13 frames a word, chained from frame 0, as
+    highlightPageSchedule), the gallery strip's three on its fixed clock (HL_SFX_*, GALLERY_SFX)."""
     dev = sc.get("device") or {}
     if dev.get("id") == "highlight-page":
-        starts, at = [], 0
+        sweeps, at = [], 0                                  # (start s, length s) of each phrase's sweep
         for phrase in dev.get("phrases") or []:
-            starts.append(at / FPS)
-            at += HL_FRAMES_WORD * _hl_nwords(phrase)
-        out = [(s + HL_SFX_NEXT[1], HL_SFX_NEXT[0]) for s in starts[1:]]
-        if starts:
-            lead = HL_SFX_FIRST[1]
-            if out:                         # a short first phrase: earlier, so its dead stop meets the next swish
-                lead = min(lead, max(0.0, out[0][0] - starts[0] - HL_SFX_FIRST_STOP_S))
-            out.insert(0, (starts[0] + lead, HL_SFX_FIRST[0]))
+            n = HL_FRAMES_WORD * _hl_nwords(phrase)
+            sweeps.append((at / FPS, n / FPS))
+            at += n
+        out = []
+        for k, (s, _) in enumerate(sweeps[1:]):
+            if not k:                                       # the second highlight: his second swish's timing
+                t = s + HL_SFX_SECOND[1]
+            else:                                           # the third: his third's, clear of the swish before it
+                t = min(max(s + HL_SFX_THIRD[1], out[-1][0] + HL_SFX_GAP_S), s + HL_SFX_SECOND[1])
+            out.append((t, HL_SFX_SECOND[0]))
+        if sweeps:                                          # the scribble's dead stop as far into its sweep as his
+            s, n = sweeps[0]
+            out.insert(0, (s + max(0.0, HL_SFX_FIRST_STOP_FRAC * n - HL_SFX_FIRST_STOP_S), HL_SFX_FIRST[0]))
         return out
     if dev.get("id") == "gallery-strip":
-        return [(at / FPS, f) for f, at in GALLERY_SFX]
+        return [(at / FPS - GALLERY_SFX_EARLY_S, f) for f, at in GALLERY_SFX]
     return []
 
 
@@ -7488,7 +7521,7 @@ def _template_sounds(sc_list: list) -> list:
     out = []
     for sc in sc_list:
         a = sc["startFrame"] / FPS
-        b = a + sc["durationFrames"] / FPS
+        b = (sc["startFrame"] + sc["durationFrames"]) / FPS
         cues = [(a + dt, f) for dt, f in _template_cues(sc) if a + dt < b - TPL_SFX_FADE_S]
         for j, (t, f) in enumerate(cues):
             full = _sfx_samples(f) / TPL_SFX_RATE
@@ -7498,12 +7531,13 @@ def _template_sounds(sc_list: list) -> list:
 
 
 def _template_sound_chain(k: int, t: float, f: str, keep) -> str:
-    """The filter for one template sound on input k: stereo, at his level, cut (and faded) when `keep` says so, placed to
-    the sample (adelay in samples: whole milliseconds would put it up to 1 ms early)."""
-    cut = ""
+    """The filter for one template sound on input k: stereo, at his level, the scribble faded in (his trim cut into it),
+    cut (and faded) when `keep` says so, placed to the sample (adelay in samples: whole milliseconds would put it up to
+    1 ms early)."""
+    cut = f"afade=t=in:ns={round(HL_SFX_FIRST_FADE_IN_S * TPL_SFX_RATE)}," if f == HL_SFX_FIRST[0] else ""
     if keep is not None:
         n, fade = round(keep * TPL_SFX_RATE), round(TPL_SFX_FADE_S * TPL_SFX_RATE)
-        cut = f"atrim=end_sample={n},afade=t=out:ss={max(0, n - fade)}:ns={fade},"
+        cut += f"atrim=end_sample={n},afade=t=out:ss={max(0, n - fade)}:ns={fade},"
     return (f"[{k}:a]aresample={TPL_SFX_RATE},aformat=channel_layouts=stereo,{cut}volume={TPL_SFX_DB}dB,"
             f"adelay={round(t * TPL_SFX_RATE)}S:all=1")
 
@@ -7527,7 +7561,7 @@ def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
         kind = sc["transitionIn"]["type"]
         if kind in SFX:
             t = sc["startFrame"] / FPS
-            if any(a <= t < b for *_, a, b in tpl):         # a template's shot plays its own sounds alone
+            if _template_cues(sc):                          # a template's shot plays its own sounds alone
                 continue
             if t - last >= SFX_MIN_GAP_S:
                 cues.append((t, *SFX[kind]))
@@ -7706,7 +7740,8 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     left = _gaps(rows)
     engine.log(f"  words on screen: {len(marks) - 2} overlays, longest stretch without "
                f"{max(b - a for a, b in zip(marks, marks[1:])) / 1000:.0f}s" + (f" ({len(left)} over {OVERLAY_MAX_GAP_S:.0f}s)" if left else ""))
-    transitions(rows)
+    for note in transitions(rows) or []:         # a section turn's dip given up for his template, said in the log
+        engine.log(note)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
     _gate_scenes(engine, job, rows, sc_list)     # the gate's last look, at the scenes as drawn (effects, moves, frames)
