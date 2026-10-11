@@ -86,13 +86,18 @@ def test_one_row_per_line_is_paced():
     raw = rows_on(cues, list(range(len(cues))))
     out = paced(raw, cues)
     d = durs(out)
-    assert abs(sum(d) / len(d) - m.PACE_AIM_S) < 0.15, sum(d) / len(d)
+    aimed = (cues[-1][1] / 1000) / sum(b[2] for b in m._pace_bins(int(cues[-1][1]), m.PACE_LEAD_S))   # the curve's count
+    assert abs(sum(d) / len(d) - aimed) < 0.15, (sum(d) / len(d), aimed)
     assert max(d) <= m.SCENE_MAX_S and quick_run(out) <= m.SHORT_RUN_MAX
     check_invariants(out, cues, raw)
-    # every punchy whole sentence that had its own row keeps it
+    # every punchy whole sentence that had its own row keeps it - after the first 30 s, whose 7-8 shots (owner
+    # 2026-10-11) can take one on a narration this quick (16 lines in 30 s, one shot over 6 s there already)
     punchy = [(r["startMs"], r["endMs"]) for i, r in enumerate(raw) if r["endMs"] - r["startMs"] < 3000
               and len(r["text"].split()) <= m.PUNCHY_WORDS and m._cut_kind(r["text"]) == 2
-              and (i == 0 or m._cut_kind(raw[i - 1]["text"]) == 2)]
+              and (i == 0 or m._cut_kind(raw[i - 1]["text"]) == 2) and r["startMs"] >= m.PACE_OPEN_S * 1000]
+    opening = [r for r in out if r["startMs"] < m.PACE_OPEN_S * 1000]
+    assert m.PACE_OPEN_N[0] <= len(opening) <= m.PACE_OPEN_N[1], len(opening)
+    assert sum(r["endMs"] - r["startMs"] > m.PACE_OPEN_LONG_S * 1000 for r in opening) <= 1
     kept = {(r["startMs"], r["endMs"]) for r in out}
     assert punchy and all(p in kept for p in punchy), [p for p in punchy if p not in kept][:3]
     assert sum(r.get("joined", 0) for r in out) == len(raw) - len(out)
@@ -111,12 +116,17 @@ def test_long_rows_split_at_a_sentence_end():
             (12000, 14900, "next line here.")]
     raw = rows_on(cues, [0, 3])
     raw[0]["overlay"] = {"text": "x", "kind": "name", "style": "fullFrame", "atMs": 8500}
-    out = paced(raw, cues)
+    out = copy.deepcopy(raw)                       # aimed a second a shot slower: only the 8 s rule cuts (2026-10-11:
+    m._pace(out, cues, leads=(-1.0, -1.0, -1.0))   # at the owner's own aim this 15 s film is cut in four)
     assert [r["startMs"] for r in out] == [0, 4000, 12000], [r["startMs"] for r in out]
     assert out[1]["split"] and out[1]["queries"] == ["concept 0", "literal 0", "mood"]
     assert out[0]["text"] == "one two three four." and out[1]["text"] == "five six seven eight nine ten."
     assert out[1]["overlay"]["atMs"] == 8500 and not out[0].get("overlay")       # the part that says it
     check_invariants(out, cues, raw)
+    at_aim = paced(raw, cues)                      # at the aim: four shots, the overlay still on the part that says it
+    assert [r["startMs"] for r in at_aim] == [0, 4000, 8000, 12000], [r["startMs"] for r in at_aim]
+    assert at_aim[2]["overlay"]["atMs"] == 8500 and not any(r.get("overlay") for r in at_aim[:2])
+    check_invariants(at_aim, cues, raw)
 
 
 def test_a_line_too_long_to_cut_is_kept_and_reported():
@@ -170,7 +180,8 @@ def test_merged_plan_grows_at_sentence_ends():
     raw = rows_on(cues, list(range(0, 60, 3)))
     out = paced(raw, cues)
     d = durs(out)
-    assert sum(durs(raw)) / len(raw) > m.PACE_CEIL_S >= sum(d) / len(d), sum(d) / len(d)
+    ceil = (cues[-1][1] / 1000) / sum(b[3] for b in m._pace_bins(int(cues[-1][1]), m.PACE_LEAD_S))  # PACE_CEIL_UP_S slower
+    assert sum(durs(raw)) / len(raw) > ceil >= sum(d) / len(d), (sum(d) / len(d), ceil)
     assert quick_run(out) <= m.SHORT_RUN_MAX and all(m._cut_kind(r["text"]) == 2 for r in out)
     check_invariants(out, cues, raw)
 
