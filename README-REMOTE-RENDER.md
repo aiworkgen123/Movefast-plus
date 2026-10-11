@@ -87,3 +87,24 @@ REPEATS AND AI STAND-INS, COUNTED ON THE FINAL CUT (2026-10-10)
    mrtruth/reuse.json and the pod summary's "reuse"), with "reuse guard: ..." for each repair (another runner-up,
    another repeat, a join; sync is never run again). MRTRUTH_AI_WINDOW_MAX (6) and MRTRUTH_AI_AT_ONCE (4: stand-ins
    drawn and checked at the same time - the result is the same as one at a time) tune the spread.
+
+THE GATE BEFORE DRAWING (2026-10-10)
+   Every rule is checked in code once the cut is final (after the reuse guard), before transitions, scenes and the
+   render; nothing is checked after render any more (the old after-render check() and make_video's Gemini look are
+   gone from this channel). Checked: no shot over 8 s but a planned hold (after 12:00, at most 4, half after 15:00), at
+   most 4 quick shots in a row, the average 4.0-4.6 s; repeats by photo identity (the cap, 90 s, two showings, never
+   side by side); stand-ins on screen within the cap; every overlay and typed caption on its words; never 30 s without
+   words; no word cut short in the opening title or a chapter heading; a line taken from the narration ends where a
+   clause ends or on a noun; every overlay group at least its minimum and within its cap scaled to the film; one block
+   of words a frame and never the same words twice within a minute; no empty or broken template field; the opening
+   title on the first shot; the period where it matters, from the stored answers only (never a new question). Plus the
+   card check: every label that names its picture is asked once - "does this picture show <label>?" - on the judge's
+   own Gemini at HIGH, kept in the verdict store (a re-run asks nothing); a "no" moves the label to a runner-up that
+   shows it, else re-sets its words as a line that names no picture, else drops it. Each break is repaired (a template
+   dropped, moved or re-set, a picture swapped, a shot joined or cut on the narration, a filler re-worded) and the whole
+   checked again, up to 5 rounds; only what no repair can fix stops the run, and the stop names the rule, the shot and
+   the setting to change (MRTRUTH_ALLOW_DEGRADED=1 lets it through). A group minimum no shot can carry rightly is a
+   warning, not a stop. Log: "pre-render gate: PASS|REPAIRED|STOPPED - ..." and the repairs; record: mrtruth/gate.json
+   (the pod summary's "gate"). Read it back with `python mrtruth.py check <job>` - gate.json, then every code rule again
+   on plan.json, read-only (a label the card check never saw is a LOOK line). Knobs: MRTRUTH_CARD_CHECK=off (no look;
+   the labels stay as placed, logged), MRTRUTH_CARD_BATCH (12 a call), MRTRUTH_CARD_MAX (60 pictures a film).

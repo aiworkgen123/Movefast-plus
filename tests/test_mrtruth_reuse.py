@@ -623,7 +623,8 @@ class Order(unittest.TestCase):
                 ("fill_overlays", lambda *a, **k: None), ("typed_captions", lambda *a, **k: None),
                 ("pictures", pics), ("_fit_devices", lambda *a, **k: None), ("sync_overlays", lambda *a, **k: None),
                 ("_gaps", lambda rows: []), ("cap_shots", note("cap_shots")), ("fill_parts", note("fill_parts")),
-                ("_reuse_guard", note("_reuse_guard")), ("transitions", lambda rows: None),
+                ("_reuse_guard", note("_reuse_guard")), ("gate", note("gate")), ("_gate_scenes", lambda *a, **k: []),
+                ("transitions", lambda rows: None),
                 ("scenes", lambda *a, **k: []), ("_credits", lambda *a, **k: None), ("_cues", lambda *a, **k: []))]
             for p in patches:
                 p.start()
@@ -632,7 +633,7 @@ class Order(unittest.TestCase):
             finally:
                 for p in patches:
                     p.stop()
-        self.assertEqual(seen, {"cap_shots": 88, "fill_parts": 88, "_reuse_guard": 88})
+        self.assertEqual(seen, {"cap_shots": 88, "fill_parts": 88, "_reuse_guard": 88, "gate": 88})   # the gate too (D1)
         self.assertEqual(eng.AI_IMAGE_CAP, 30)
 
 
