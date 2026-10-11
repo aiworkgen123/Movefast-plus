@@ -157,6 +157,32 @@ TURN_MAX_S, LEAK_MAX_S = 5.0, 4.5      # the turn's move lasts ~3.7 s and the le
 DUST_SHARE, DUST_MIN_S, DUST_PREFER_S, DUST_SHADOW, DUST_SHADOW_MIN_LUMA = 0.13, 2.0, 3.0, 0.25, 0.45
 SFX = {"flash": ("shutter.wav", -12.0, 0.001), "dipToBlack": ("impact.wav", -6.0, 0.0)}   # deliver.ts SFX_BY_TRANSITION
 SFX_MIN_GAP_S = 12.0
+# the owner's sounds for two of his templates (2026-10-11: "SFX for the first highlight, and then the second highlight.
+# Third highlight is same SFX as second highlight. It needs to be timed right like this reference ... SFX for the A8
+# container - gallery strip. Time it right"), cut losslessly from his two reference clips into mrtruth_renderer/sfx/ as
+# 48 kHz stereo 16-bit. His animations run on the renderer's own clocks frame for frame (highlightPageClock.ts,
+# galleryStripClock.ts; a template's frame 0 is its shot's first frame), so each sound is placed on those clocks as his
+# clips place it. The times below are each file's FIRST SAMPLE, after the event it belongs to:
+#  - the highlighted page: the scribble under the FIRST highlight, HL_SFX_FIRST s after that highlight's sweep starts
+#    (his clip holds only its last 0.63 s: it stops dead 1014 ms after the sweep starts, as here); the swish under
+#    EVERY later highlight, HL_SFX_NEXT s after that highlight's sweep starts (his second highlight's timing: it rises
+#    61 ms after the first yellow and peaks 331 ms after it). The sweeps are 13 frames a word, so the cues follow the
+#    page's own words (highlightPageSchedule). His third swish sits on a fixed 40-frame cadence from his second, which
+#    fits 3-word sweeps but lands 12 frames early after his 4-word second phrase; our pages have other word counts and
+#    no such cadence, so every later highlight takes his second highlight's timing. A first phrase of one or two words
+#    would end before his scribble does: then it starts earlier (never before the page) so that its dead stop
+#    (HL_SFX_FIRST_STOP_S into the file) meets the second highlight's swish, and plays under the first highlight.
+#  - the gallery strip: three sounds, sample 0 on frames 5 (the zoom-out's rising sweep, with the chips), 44 (the
+#    strip's pan: clicks, the hit as card #1 arrives, a burst) and 113 (the whoosh that ends on the landing at 130).
+# His level: each file as cut, 0 dB - his clips carry no voice and Mr Truth's narration sits where his films' does, so
+# the voice runs under them unchanged (as the map's sound on impl-m). One sound at a time on a shot: a sound still
+# playing when the next one starts is faded out over TPL_SFX_FADE_S as it starts, and none runs past its shot's last
+# frame. Never thinned by SFX_MIN_GAP_S (the transitions' rule); a transition sound that would land on such a shot is
+# left out, so the template's own sounds play as his do.
+HL_SFX_FIRST, HL_SFX_NEXT = ("highlight_1.wav", 0.381776), ("highlight_2.wav", 0.084200)
+HL_SFX_FIRST_STOP_S = 0.632292
+GALLERY_SFX = (("gallery_zoom_out.wav", 5), ("gallery_pan.wav", 44), ("gallery_zoom_in.wav", 113))
+TPL_SFX_DB, TPL_SFX_RATE, TPL_SFX_FADE_S = 0.0, 48000, 0.005
 
 # P03's headline is set at 92px in a 1120px column, two lines at most (devices.ts p03HeadlineFits)
 _P03_EM = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -.,:;!?&/()'\"",
@@ -7129,8 +7155,11 @@ def transitions(rows: list) -> None:
             r["tin"] = {"type": "dipToBlack", "durationFrames": DIP_FRAMES}
             run = 0
             continue
-        if dev == "highlight-page":                  # a hard cut into the page, as the reference opens (review 2026-10-11:
-            run = 0                                  # a burn or a flash would hide its first highlight)
+        # a hard cut into the page, as the reference opens (review 2026-10-11: a burn or a flash would hide its first
+        # highlight); into the gallery strip too, as his opens (2026-10-11: a burn covers its first 13 frames, where
+        # its zoom-out and first sound start, and a flash would put the shutter on top of that sound)
+        if dev in ("highlight-page", "gallery-strip"):
+            run = 0
             continue
         minute = int(t // 60)
         if (u < BURN_SHARE and t - last_burn >= BURN_GAP_S and burns_by_min.get(minute, 0) < BURN_PER_MIN
@@ -7422,28 +7451,114 @@ def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
     engine.log(f"  rendered in {time.time() - t0:.0f}s")
 
 
+def _sfx_samples(name: str) -> int:
+    """Samples in one of the renderer's sound files (read off its WAV header)."""
+    import wave
+    with wave.open(str(RENDERER / "sfx" / name)) as w:
+        return w.getnframes()
+
+
+def _template_cues(sc: dict) -> list:
+    """(seconds after the shot's first frame of the file's sample 0, file) of one shot's own template sounds, in order:
+    a highlighted page's scribble and swishes on its highlights' sweep starts (13 frames a word, chained from frame 0,
+    as highlightPageSchedule), the gallery strip's three on its fixed clock (HL_SFX_*, GALLERY_SFX)."""
+    dev = sc.get("device") or {}
+    if dev.get("id") == "highlight-page":
+        starts, at = [], 0
+        for phrase in dev.get("phrases") or []:
+            starts.append(at / FPS)
+            at += HL_FRAMES_WORD * _hl_nwords(phrase)
+        out = [(s + HL_SFX_NEXT[1], HL_SFX_NEXT[0]) for s in starts[1:]]
+        if starts:
+            lead = HL_SFX_FIRST[1]
+            if out:                         # a short first phrase: earlier, so its dead stop meets the next swish
+                lead = min(lead, max(0.0, out[0][0] - starts[0] - HL_SFX_FIRST_STOP_S))
+            out.insert(0, (starts[0] + lead, HL_SFX_FIRST[0]))
+        return out
+    if dev.get("id") == "gallery-strip":
+        return [(at / FPS, f) for f, at in GALLERY_SFX]
+    return []
+
+
+def _template_sounds(sc_list: list) -> list:
+    """(film s of the file's sample 0, file, s kept - None for the whole file -, shot start s, shot end s) of every
+    template sound in the film. One at a time on a shot: a sound still playing when the next starts is kept until that
+    start + TPL_SFX_FADE_S (faded over it, gone before the next one's own rise ~8-10 ms in); none runs past its shot's
+    last frame (faded out over TPL_SFX_FADE_S onto it), and one that would start after it is not played."""
+    out = []
+    for sc in sc_list:
+        a = sc["startFrame"] / FPS
+        b = a + sc["durationFrames"] / FPS
+        cues = [(a + dt, f) for dt, f in _template_cues(sc) if a + dt < b - TPL_SFX_FADE_S]
+        for j, (t, f) in enumerate(cues):
+            full = _sfx_samples(f) / TPL_SFX_RATE
+            end = min(t + full, b, cues[j + 1][0] + TPL_SFX_FADE_S if j + 1 < len(cues) else b)
+            out.append((t, f, None if end >= t + full - 1e-9 else end - t, a, b))
+    return out
+
+
+def _template_sound_chain(k: int, t: float, f: str, keep) -> str:
+    """The filter for one template sound on input k: stereo, at his level, cut (and faded) when `keep` says so, placed to
+    the sample (adelay in samples: whole milliseconds would put it up to 1 ms early)."""
+    cut = ""
+    if keep is not None:
+        n, fade = round(keep * TPL_SFX_RATE), round(TPL_SFX_FADE_S * TPL_SFX_RATE)
+        cut = f"atrim=end_sample={n},afade=t=out:ss={max(0, n - fade)}:ns={fade},"
+    return (f"[{k}:a]aresample={TPL_SFX_RATE},aformat=channel_layouts=stereo,{cut}volume={TPL_SFX_DB}dB,"
+            f"adelay={round(t * TPL_SFX_RATE)}S:all=1")
+
+
+def _channels(path: Path) -> int:
+    try:
+        got = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+                              "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=60).stdout.strip()
+        return int(got.split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return 1
+
+
 def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
-    """The voice with the repo's two live sounds under it: a shutter on each flash, a thud on each dip."""
+    """The voice with the repo's two live sounds under it (a shutter on each flash, a thud on each dip) and the owner's
+    own sounds on the highlighted pages and the gallery strip (HL_SFX_*, GALLERY_SFX: his timing, his level, stereo,
+    never thinned by the gap rule)."""
+    tpl = _template_sounds(sc_list)
     cues, last = [], -1e9
     for sc in sc_list:
         kind = sc["transitionIn"]["type"]
         if kind in SFX:
             t = sc["startFrame"] / FPS
+            if any(a <= t < b for *_, a, b in tpl):         # a template's shot plays its own sounds alone
+                continue
             if t - last >= SFX_MIN_GAP_S:
                 cues.append((t, *SFX[kind]))
                 last = t
-    if not cues:
+    if not cues and not tpl:
         return mp3
-    out = job / "voice_sfx.m4a"          # beside audio.mp3: the final mux runs in the job folder and reads names
+    # beside audio.mp3: the final mux runs in the job folder and reads names. With a template sound it is FLAC, so the
+    # film's one AAC encode is the final mux's
+    out = job / ("voice_sfx.flac" if tpl else "voice_sfx.m4a")
     args = ["ffmpeg", "-loglevel", "error", "-y", "-i", str(mp3)]
     for _, f, _, _ in cues:
         args += ["-i", str(RENDERER / "sfx" / f)]
-    chains = [f"[{k + 1}:a]aresample=48000,volume={g}dB,adelay={int(max(0.0, t - att) * 1000)}:all=1[s{k}]"
-              for k, (t, f, g, att) in enumerate(cues)]
-    mix = "".join(f"[s{k}]" for k in range(len(cues)))
-    fc = ";".join(chains + [f"[0:a]aresample=48000[v];[v]{mix}amix=inputs={len(cues) + 1}:normalize=0:duration=first[a]"])
-    subprocess.run(args + ["-filter_complex", fc, "-map", "[a]", "-c:a", "aac", "-b:a", "192k", str(out)], check=True)
-    engine.log(f"  sound: {len(cues)} cue(s) (shutter on a flash, impact on a dip)")
+    for _, f, *_ in tpl:
+        args += ["-i", str(RENDERER / "sfx" / f)]
+    # with a template sound the mix is stereo (his sounds are): a mono voice and the mono cues go to both sides at full
+    # level, as a mono track plays; a peak limiter at full scale touches only the overs of voice + sound
+    up = "" if not tpl else (",pan=stereo|c0=c0|c1=c0" if _channels(mp3) == 1 else ",aformat=channel_layouts=stereo")
+    chains = [f"[{k + 1}:a]aresample=48000{',pan=stereo|c0=c0|c1=c0' if tpl else ''},volume={g}dB,"
+              f"adelay={int(max(0.0, t - att) * 1000)}:all=1[s{k}]" for k, (t, f, g, att) in enumerate(cues)]
+    chains += [_template_sound_chain(len(cues) + 1 + j, t, f, keep) + f"[p{j}]"
+               for j, (t, f, keep, _, _) in enumerate(tpl)]
+    mix = "".join(f"[s{k}]" for k in range(len(cues))) + "".join(f"[p{j}]" for j in range(len(tpl)))
+    tail = ",alimiter=limit=1:attack=1:release=50:level=0:latency=1" if tpl else ""
+    fc = ";".join(chains + [f"[0:a]aresample=48000{up}[v];[v]{mix}amix=inputs={len(cues) + len(tpl) + 1}:normalize=0:"
+                            f"duration=first{tail}[a]"])
+    codec = ["-c:a", "flac"] if tpl else ["-c:a", "aac", "-b:a", "192k"]
+    subprocess.run(args + ["-filter_complex", fc, "-map", "[a]", *codec, str(out)], check=True)
+    shots = [f"{n} {what}" for n, what in ((len({a for _, f, _, a, _ in tpl if f.startswith(k)}), what) for k, what in
+                                          (("highlight", "highlighted page(s)"), ("gallery", "gallery strip(s)"))) if n]
+    engine.log(f"  sound: {len(cues)} cue(s) (shutter on a flash, impact on a dip)"
+               + (f", the owner's {len(tpl)} sound(s) on {' and '.join(shots)}" if tpl else ""))
     return out
 
 
@@ -9072,23 +9187,40 @@ def preview(which: str = "all") -> Path:
             sc = scenes([row], storage)[0]
             tasks.append({"id": "Segment", "props": _props(sc), "output": str(out)})
         on = LIBRARY[tid][0]
-        labels.append((out, f"{tid}  ·  {what}" + ("" if on else "  (switched off)"), frames))
+        labels.append((out, f"{tid}  ·  {what}" + ("" if on else "  (switched off)"), frames, fields))
     render(engine, work, tasks, workers=1)
     reel = work / ("templates.mp4" if not want else f"templates_{'_'.join(sorted(want))[:60]}.mp4")
-    parts = []
-    for k, (seg, label, frames) in enumerate(labels):
+    parts, at, sounds = [], 0, []
+    for k, (seg, label, frames, fields) in enumerate(labels):
         lab = seg.with_name(seg.stem + "_lab.mp4")
         txt = label.replace("\\", "\\\\").replace(":", "\\:").replace("'", "’").replace(",", "\\,")
-        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(seg), "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(seg),
                         "-vf", f"scale=1728:972,pad=1920:1080:96:0:color=0x0b0b0b,drawtext=fontfile='/System/Library/Fonts/Supplemental/Arial Bold.ttf':"
                                f"text='{txt}':x=96:y=1010:fontsize=34:fontcolor=0xE8C468",
                         "-t", f"{frames / FPS:.4f}", "-r", "30", "-c:v", "libx264", "-crf", "18", "-pix_fmt", "yuv420p",
-                        "-c:a", "aac", "-shortest", str(lab)], check=True)
+                        "-an", str(lab)], check=True)
         parts.append(lab)
+        # the owner's sounds on the page's and the gallery's previews, as _sfx_audio cues them in a film
+        sounds += _template_sounds([{"startFrame": at, "durationFrames": frames, "device": fields}])
+        at += frames
     lst = work / "list.txt"
     lst.write_text("".join(f"file '{p}'\n" for p in parts), encoding="utf-8")
+    silent = work / "reel_video.mp4"
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy",
+                    str(silent)], check=True)
+    # the reel's one sound track, built to the sample (joining each part's own AAC would put a part's sound late by its
+    # AAC lead-in and frame padding): silence, and the template sounds at their places
+    total, ins = at / FPS, []
+    for _, f, *_ in sounds:
+        ins += ["-i", str(RENDERER / "sfx" / f)]
+    chains = [_template_sound_chain(j + 1, t, f, keep) + f"[p{j}]" for j, (t, f, keep, _, _) in enumerate(sounds)]
+    mix = "".join(f"[p{j}]" for j in range(len(sounds)))
+    graph = ";".join(chains + [f"anullsrc=r={TPL_SFX_RATE}:cl=stereo,atrim=end={total:.6f}[z]",
+                               f"[z]{mix}amix=inputs={len(sounds) + 1}:normalize=0:duration=first[a]"])
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(silent), *ins, "-filter_complex", graph,
+                    "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.6f}",
                     "-movflags", "+faststart", str(reel)], check=True)
+    silent.unlink(missing_ok=True)
     for lab in parts:                                    # the labelled copies were only for the join
         lab.unlink(missing_ok=True)
     print(f"Mr Truth preview -> {reel}")
