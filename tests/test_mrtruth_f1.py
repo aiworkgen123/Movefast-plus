@@ -63,7 +63,7 @@ class JudgeGuard(Tmp):
         super().tearDown()
 
     def test_a_tripped_guard_stops_the_next_check_before_it_is_paid(self):
-        e, gem = claude_engine(fallback=6)             # 6 > max(5, 5% of 100): tripped
+        e, gem = claude_engine(fallback=21)            # 21 > max(20, 10% of 100): tripped
         p = textured(self.d / "a.jpg", 1)
         with self.assertRaises(M.PlanningStopped):
             M.judge(e, dict(ROW), [({"title": "a tablet"}, p)], {})
@@ -73,7 +73,7 @@ class JudgeGuard(Tmp):
         self.assertEqual(gem.calls, [])
 
     def test_below_the_line_the_check_is_asked_and_the_trip_stops_the_next(self):
-        e, gem = claude_engine(fallback=5)             # at the line (5): still asked, its own fallback trips it
+        e, gem = claude_engine(fallback=20)            # at the line (20): still asked, its own fallback trips it
         with self.assertRaises(M.PlanningStopped):
             M.judge(e, dict(ROW), [({"title": "a tablet"}, textured(self.d / "a.jpg", 1))], {})
         self.assertEqual(len(gem.calls), 1)
@@ -88,7 +88,7 @@ class JudgeGuard(Tmp):
         tripped_then = []
 
         def look(prompt, paths, **k):                  # each call notes whether the guard had tripped when it began
-            tripped_then.append(e.GEMINI_PICKS["fallback"] > max(5, 0.05 * e.GEMINI_PICKS["calls"]))
+            tripped_then.append(e.GEMINI_PICKS["fallback"] > max(20, 0.10 * e.GEMINI_PICKS["calls"]))
             return Claude.__call__(gem, prompt, paths, **k)
         e.pick_vision = look
 
@@ -102,7 +102,7 @@ class JudgeGuard(Tmp):
         self.assertFalse(any(tripped_then), tripped_then)
 
     def test_degraded_carries_on_and_says_it_once_a_call(self):
-        e, gem = claude_engine(fallback=7)
+        e, gem = claude_engine(fallback=22)
         with mock.patch.dict(os.environ, {"MRTRUTH_ALLOW_DEGRADED": "1"}):
             M.judge(e, dict(ROW), [({"title": "a tablet"}, textured(self.d / "a.jpg", 1))], {})
         self.assertEqual(len(gem.calls), 1)

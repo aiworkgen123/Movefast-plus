@@ -889,9 +889,12 @@ def _judge_guard(engine, before: bool = False) -> None:
     asks, failed, claude = JUDGE["asks"], JUDGE["failed"], int(g.get("fallback", 0))
     if failed > max(5, 0.05 * asks):
         _stop(engine, f"Mr Truth stopped: the picture judge gave no answer {failed} times in {asks} calls")
-    if claude > max(5, 0.05 * max(1, int(g.get("calls", 0)))):
+    # a short Gemini spell early in a film is tolerated (2026-10-11: 10 in a minute stopped a film 9 minutes in, then
+    # Gemini answered again): 20 Claude looks (about $0.60) or 10% of the checks, whichever is more
+    if claude > max(20, 0.10 * max(1, int(g.get("calls", 0)))):
+        why = ", ".join(f"{k} {v}" for k, v in sorted((g.get("why") or {}).items(), key=lambda kv: -kv[1]))
         _stop(engine, f"Mr Truth stopped: Gemini failed {claude} times and the pictures went to Claude instead "
-                      f"(expensive) - check the Gemini key and credit")
+                      f"(expensive) - check the Gemini key and credit" + (f" (Gemini said: {why})" if why else ""))
 
 
 def preflight(engine) -> None:

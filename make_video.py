@@ -1731,15 +1731,26 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": max(256, max_tokens), "thinkingConfig": think}}
             if media:
                 body["generationConfig"]["mediaResolution"] = f"MEDIA_RESOLUTION_{media.upper()}"
-            for wait in (2, 5, 10, 20, 0):      # busy (429/5xx): wait and ask again before Claude looks instead
-                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
-                                  headers={"x-goog-api-key": key}, json=body, timeout=180)
-                if r.status_code not in (429, 500, 502, 503, 504) or not wait:
-                    break
+            # busy (429/5xx) or no connection: wait and ask again before Claude looks instead. Mr Truth's checks
+            # (labels) wait longer: on 2026-10-11 a short Gemini spell sent 10 checks to Claude in a minute and the
+            # guard stopped the film 9 minutes in, though Gemini answered again right after
+            ladder = (2, 5, 10, 20, 40, 60, 0) if labels is not None else (2, 5, 10, 20, 0)
+            r, why = None, ""
+            for wait in ladder:
+                try:
+                    r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
+                                      headers={"x-goog-api-key": key}, json=body, timeout=180)
+                    why = f"HTTP {r.status_code}"
+                    if r.status_code not in (429, 500, 502, 503, 504) or not wait:
+                        break
+                except requests.RequestException as e:            # timeout, reset: busy too
+                    r, why = None, type(e).__name__
+                    if not wait:
+                        break
                 with _SPEND_LOCK:
                     GEMINI_PICKS["busy"] = GEMINI_PICKS.get("busy", 0) + 1
                 time.sleep(wait)
-            if r.ok:
+            if r is not None and r.ok:
                 d = r.json()
                 text = "".join(x.get("text", "") for x in ((d.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                                if not x.get("thought")).strip()
@@ -1757,12 +1768,16 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                     info.update(via="gemini", model=use, tokens=(tin, tout, tthink),
                                 finish=str(((d.get("candidates") or [{}])[0]).get("finishReason") or ""))
                     return text
-            else:
+                why = "empty answer (" + str(((d.get("candidates") or [{}])[0]).get("finishReason")
+                                              or (d.get("promptFeedback") or {}).get("blockReason") or "?") + ")"
+            elif r is not None:
                 info["status"] = r.status_code
-        except Exception:                                        # noqa: BLE001 - Claude looks instead
-            pass
+        except Exception as e:                                   # noqa: BLE001 - Claude looks instead
+            why = why or type(e).__name__
         with _SPEND_LOCK:
             GEMINI_PICKS["fallback"] += 1
+            w = GEMINI_PICKS.setdefault("why", {})              # why Gemini gave no answer, for the run's log
+            w[why or "?"] = w.get(why or "?", 0) + 1
     if labels is not None:                       # Claude sees the pictures in order, their labels in the text
         image_paths = list(image_paths)[:10]     # claude_vision's own cap: no label for a picture it does not send
         prompt = "\n".join([lead] + [f"Image {i + 1}: {str(labels[i]) if i < len(labels) else ''}"
