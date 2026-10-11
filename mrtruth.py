@@ -37,7 +37,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 HERE = Path(__file__).resolve().parent
 RENDERER = HERE / "mrtruth_renderer"
@@ -6275,11 +6275,17 @@ def _stage(storage: Path, path: str) -> str:
     return key
 
 
+def _https(url) -> str:
+    """The renderer takes only an https URL with no spaces, up to 2048 characters (Bing gives page URLs unescaped, e.g.
+    '?_s=Rev Dr Luigi Gioia', which stopped the 2026-10-11 pod render at shot 21): escape it, else the Commons home."""
+    u = quote(str(url or "").strip(), safe=":/?#[]@!$&'()*+,;=%~")
+    return u if u.lower().startswith("https://") and len(u) <= 2048 else "https://commons.wikimedia.org/"
+
+
 def _asset(storage: Path, pick: dict) -> dict:
     key = _stage(storage, pick["photo"])
-    url = pick.get("url") or ""
     return {"path": key, "contentHash": _hash(key), "type": "image",
-            "sourceUrl": url if url.startswith("https://") else "https://commons.wikimedia.org/",
+            "sourceUrl": _https(pick.get("url")),
             "license": str(pick.get("license") or "")[:200], "attribution": str(pick.get("title") or "")[:500],
             "vision": None, "generator": "movefast-ai" if pick.get("ai") else None, "sourceBeatId": None}
 
