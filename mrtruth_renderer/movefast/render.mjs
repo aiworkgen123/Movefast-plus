@@ -11,6 +11,18 @@ const {bundle} = require('@remotion/bundler');
 const {selectComposition, renderMedia, openBrowser} = require('@remotion/renderer');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+// The frames are JPEG (BT.601 full-range YCbCr); the encode is BT.709 limited range (see ffmpegOverride below).
+const JPEG_AS_709 = 'zscale=matrix=709:matrixin=709:range=limited';
+const JPEG_AS_601 = 'zscale=matrixin=470bg:rangein=full:matrix=709:range=limited';
+let warned = false;
+const jpegMatrix = (vf) => {
+  if (vf === JPEG_AS_709) return JPEG_AS_601;
+  if (!warned && vf.startsWith('zscale') && vf !== JPEG_AS_601) {      // a Remotion upgrade changed its filter
+    warned = true;
+    console.warn(`render.mjs: Remotion's colour filter is now "${vf}" - check the JPEG frames are still read as BT.601`);
+  }
+  return vf;
+};
 const request = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const dir = path.resolve(request.bundleDir);
 const core = path.join(root, 'src/core');
@@ -43,8 +55,12 @@ try {
     await renderMedia({serveUrl: dir, composition, inputProps: task.props, outputLocation: temporary, puppeteerInstance: browser,
       logLevel: 'error', codec: 'h264', imageFormat: 'jpeg', jpegQuality: process.env.MT_PREVIEW ? 70 : 90, crf: process.env.MT_PREVIEW ? 26 : 18, x264Preset: process.env.MT_PREVIEW ? 'ultrafast' : 'veryfast', ...(process.env.MT_PREVIEW ? {scale: 2 / 3} : {}), muted: true,
       pixelFormat: 'yuv420p', colorSpace: 'bt709',
-      // MoveFast stream-copies its segment join; every MP4 must share its time base.
-      ffmpegOverride: ({args}) => args.map((arg, i) => args[i - 1] === '-video_track_timescale' ? '15360' : arg),
+      // MoveFast stream-copies its segment join; every MP4 must share its time base. And the colours: Remotion's
+      // bt709 path converts with `zscale=matrix=709:matrixin=709`, but a JPEG frame is BT.601 full-range YCbCr, so
+      // every colour was re-read with the wrong matrix (#F7E440 came out (250,219,56), greens 3-6 levels dark).
+      // The frames are read as what they are; neutral greys never moved, so only saturated colours change.
+      ffmpegOverride: ({args}) => args.map((arg, i) => args[i - 1] === '-video_track_timescale' ? '15360'
+        : args[i - 1] === '-vf' ? jpegMatrix(arg) : arg),
       concurrency: Number(process.env.MT_CONC) || request.concurrency || 3, timeoutInMilliseconds: 120000});
     fs.renameSync(temporary, task.output);
     console.log(`rendered ${path.basename(task.output)}`);
