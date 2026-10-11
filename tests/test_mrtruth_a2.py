@@ -90,6 +90,7 @@ class Tmp(unittest.TestCase):
         self.env.start()
         M.VERDICTS.update(store=None, film="film-1")
         M.VSTAT.clear()
+        M.BUDGET.clear()                             # no film's AI budget yet (pictures() sets one per film)
 
     def tearDown(self):
         self.env.stop()
@@ -538,7 +539,7 @@ class AICheck(Tmp):
         pick, gem, drawn, e = self.run_ai(plan)
         self.assertEqual(drawn, 2)                                       # the second drawing: generic is enough
         self.assertTrue(pick and pick["tier"] == 1)
-        self.assertTrue(any("warped" in l and "counts against the AI cap" in l for l in e.lines))
+        self.assertTrue(any("warped" in l and "counts against the film's drawings" in l for l in e.lines))
 
     def test_unanswered_is_not_used_and_not_kept(self):
         pick, gem, drawn, _ = self.run_ai(lambda cap: None)

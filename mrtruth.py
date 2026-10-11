@@ -19,9 +19,11 @@ fit falls back or the shot stays a plain photograph, and nothing stops the run.
     python mrtruth.py preview P03,P14        # just these
     python mrtruth.py check "<job folder>"   # the rules, read back off a finished video's plan
 """
+import copy
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -32,7 +34,7 @@ import threading
 import time
 import unicodedata
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -125,6 +127,12 @@ TIERS = ("no", "generic", "kind", "exact")
 NO, GENERIC, KIND, EXACT = 0, 1, 2, 3
 SUBJECT_MAX, SUBJECT_GAP = 2, 6      # one view of one subject: at most twice a film, never within 6 shots
 REUSE_GAP_S = 90.0                     # a photo shown before comes back only after this much of the film (owner 2026-10-10)
+# repeats (owner 2026-10-10): at most REUSE_PER_MIN a film minute (38 in 11 min), a photo - the same bytes or a near copy,
+# main picture or a template's companion - at most REUSE_MAX_SHOWINGS times, never on shots side by side, REUSE_GAP_S
+# apart on the FINAL cut. While choosing, REUSE_MARGIN_S more: the pod's cuts moved -5.3..+8.7 s after the pictures
+# (a gap shrank by up to 14 s); the guard after the last sync holds the 90 s exactly
+REUSE_PER_MIN = float(os.environ.get("MRTRUTH_REUSE_PER_MIN", "3.5"))
+REUSE_MARGIN_S, REUSE_MAX_SHOWINGS = 15.0, 2
 # a long hold instead of a bad repeat (owner 2026-10-10, from the reference films: 4, 2 and 3 such holds in ~20 minutes):
 # only after HOLD_FROM_S, at most HOLD_MAX_N a film (one per HOLD_EVERY_S of film), at most half of them before
 # HOLD_PREFER_S, and only where the shot would otherwise repeat a photo shown twice already or within REUSE_GAP_S
@@ -1887,19 +1895,56 @@ def _same_ids(x, y) -> bool:
         return False
     if x[0] == y[0]:
         return True
-    if x[1] is None or y[1] is None or bin(x[1] ^ y[1]).count("1") > SAME_BITS:
+    if x[1] is None or y[1] is None or (x[1] ^ y[1]).bit_count() > SAME_BITS:
         return False
     return float((x[2] * len(x[2])) @ y[2]) >= SAME_CORR
 
 
 def _distinct(photo: str, others: list) -> bool:
-    """Not the same picture (or a near copy of one) as any of `others`."""
-    import photofx
-    try:
-        h = photofx._phash(photo)
-        return all(Path(o) != Path(photo) and not photofx._same_photo(h, photofx._phash(o)) for o in others)
-    except Exception:                                                # noqa: BLE001
-        return all(Path(o) != Path(photo) for o in others)
+    """Not the same picture (or a near copy of one: _same) as any of `others` (was photofx's 3-bit 8x8 hash)."""
+    return not any(_same(photo, o) for o in others)
+
+
+class _Ledger:
+    """What is on screen, one entry per photo however it got there (_same: the same bytes or a near copy; owner
+    2026-10-10: a photo at most REUSE_MAX_SHOWINGS times, never within REUSE_GAP_S of its other showing): for each photo
+    the moments (ms) it is shown and where (a key: a shot, or one of a template's companions). Each file's identity is
+    read once."""
+
+    def __init__(self):
+        self.ids, self.at, self.of = [], [], {}
+
+    def group(self, p) -> int:
+        p = str(p)
+        if p not in self.of:
+            me = _ident(p)
+            g = next((k for k, x in enumerate(self.ids) if _same_ids(me, x)), None)
+            if g is None:
+                g = len(self.ids)
+                self.ids.append(me)
+                self.at.append([])
+            self.of[p] = g
+        return self.of[p]
+
+    def add(self, p, ms, key) -> None:
+        self.at[self.group(p)].append((int(ms), key))
+
+    def drop(self, key) -> None:
+        for k, at in enumerate(self.at):
+            self.at[k] = [x for x in at if x[1] != key]
+
+    def n(self, p) -> int:
+        return len(self.at[self.group(p)])
+
+    def times(self, p) -> list:
+        return sorted(ms for ms, _ in self.at[self.group(p)])
+
+    def gap(self, p, ms) -> float:
+        """ms from `ms` to the photo's nearest showing (inf when it is not on screen)."""
+        return min((abs(t - ms) for t in self.times(p)), default=float("inf"))
+
+    def repeats(self) -> int:
+        return sum(max(0, len(at) - 1) for at in self.at)
 
 
 def _mostly_blank(path: Path) -> bool:
@@ -3502,13 +3547,13 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
          (one Claude call for all such shots). A shot that names nothing takes a contextual photo instead.
     The picture checks answer yes/no questions (judge): a tier - exact (the very thing the shot names, or the stand-in's
     role), kind, generic, no - and what is wrong (added text, a frame, banned, not real, modern, blank).
-    The picture on screen, first that exists (owner 2026-10-06 — Documentary's rule: exact for a named thing,
-    otherwise "fits the context"): an exact picture → the new anchor's picture → a contextual one (kind) → a
-    neighbour's picture checked against this line → an AI stand-in under AI_IMAGE_CAP → an unused kind picture of a
-    nearer subject → a real photo from earlier in the video (never within REUSE_GAP_S, at most twice) or a long hold →
-    the least-shown earlier picture, else a generic one. No text cards while the video has photos. A template that
-    names its picture needs kind (owner 2026-10-08), its label checked before render. A near copy is checked once."""
-    import photofx
+    The picture on screen (owner 2026-10-06 — Documentary's rule: exact for a named thing, otherwise "fits the
+    context"), chosen in three passes by _choose: the shot's own picture (exact → the new anchor's → contextual (kind) →
+    a neighbour's checked against this line) in film order; then the film's AI stand-ins, spread by need across the
+    film and counted on screen (owner 2026-10-10); then, for what is still open, a repeat within the film's cap (a
+    photo at most twice, never within REUSE_GAP_S), a join to a plain shot beside it, a long hold, a weaker unused
+    picture - or the planner stops with the reason. No text cards while the video has photos. A template that names
+    its picture needs kind (owner 2026-10-08), its label checked before render. A near copy is checked once."""
     root = job / "mrtruth" / "pictures"
     t0 = time.time()
     b0 = _BRAVE["requests"]
@@ -3615,14 +3660,13 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         _dump(home / "pick.json", state)
         return state
 
-    if not os.environ.get("AI_IMAGE_CAP"):          # an explicit AI_IMAGE_CAP in .env still wins
-        engine.AI_IMAGE_CAP = max(1, int(round(AI_PER_MIN * rows[-1]["endMs"] / 60000)))
+    bud = _budget_set(engine, rows)                  # the film's stand-ins, drawings and repeats (see _choose)
     web = ("then Brave (MRTRUTH_WEB_SEARCH=brave)" if WEB_SEARCH == "brave" else
            f"then Bing (free), Brave as backup (at most {BRAVE_LAST_MAX} for thin answers)")
     engine.log(f"Mr Truth: pictures for {len(rows)} shots (Commons first, "
                + ("the open archives, " if archives_on else "")
-               + f"{web}; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most "
-               f"{getattr(engine, 'AI_IMAGE_CAP', '?')}"
+               + f"{web}; up to 3 rounds; Gemini judges; AI stand-ins: {AI_MODEL}, at most {bud['cap']} on screen from "
+               f"{bud['draw_cap']} drawings; repeats at most {bud['reuse_cap']}"
                + ("" if archives_on else "; open archives off, MRTRUTH_ARCHIVES=1 turns them on") + ")...")
     archive_names(engine, job, rows, dossier, force)
     plan = _search_plan(rows, dossier)
@@ -3716,178 +3760,14 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     with ThreadPoolExecutor(max_workers=SHOT_WORKERS) as ex:
         borrowed = list(ex.map(borrow, range(len(rows))))
 
-    # what has been shown: the same photograph (same bytes, or within a few bits of each other) and the same view of
-    # the same subject (the judge's 'subject' words) are counted, so one tourist photo of one hall cannot carry five
-    # beats (audit 2026-10-08: the same file 4 times, the same hall in 5 shots)
-    sha, hashes, shown_sig, subj_n, subj_last = {}, {}, {}, {}, {}
-    def sig(p):
-        if p not in sha:
-            try:
-                sha[p] = hashlib.sha1(Path(p).read_bytes()).hexdigest()
-            except OSError:
-                sha[p] = p
-        return sha[p]
-
-    def h_of(p):
-        if p not in hashes:
-            try:
-                hashes[p] = photofx._phash(p)
-            except Exception:                                        # noqa: BLE001
-                hashes[p] = None
-        return hashes[p]
-
-    def seen(p):
-        n = shown_sig.get(sig(p), [0, -99])[0]
-        h = h_of(p)
-        if h is not None:
-            for q, (m, _) in shown_sig.items():
-                hq = hashes.get(next((x for x, s in sha.items() if s == q), ""), None)
-                if hq is not None and photofx._same_photo(h, hq):
-                    n = max(n, m)
-        return n
-
-    def varied(c, i, gap=SUBJECT_GAP):
-        s = c.get("subject") or ""
-        return not s or (subj_n.get(s, 0) < SUBJECT_MAX and i - subj_last.get(s, -99) > gap)
-
-    picked, steps, audit, holds, hold_at = [], {}, [], [], []
-    film_s = rows[-1]["endMs"] / 1000
-    hold_n = min(HOLD_MAX_N, int(film_s // HOLD_EVERY_S))
-
-    def since_s(photo):                               # seconds of film since this photo was last on screen
-        last = shown_sig.get(sig(photo), [0, None])[1]
-        return 1e9 if last is None or last < 0 else (rows[i]["startMs"] - rows[last]["startMs"]) / 1000
-
-    def can_hold(k):
-        """Hold the picture before through shot k: late in the film, within the film's budget, on a plain shot."""
-        t = rows[k]["startMs"] / 1000
-        if t < HOLD_FROM_S or len(holds) >= hold_n or k == 0 or not picked or picked[-1][0] != k - 1:
-            return False
-        if t < HOLD_PREFER_S and sum(1 for h in holds if rows[h]["startMs"] / 1000 < HOLD_PREFER_S) >= max(1, hold_n // 2):
-            return False
-        for x in (rows[k], rows[k - 1]):             # neither the held shot nor the one it stretches carries words:
-            if x.get("device") or x.get("typedCaption") or x.get("overlay"):   # a template has no exit, it would
-                return False                                                   # stay up across the next sentence
-        r_ = rows[k]
-        start = next(j for j in range(k - 1, -1, -1) if not rows[j].get("_hold"))
-        return (r_["endMs"] - rows[start]["startMs"]) / 1000 <= HOLD_MAX_S
-    dark_first = lambda cs: sorted(cs, key=lambda c: _luma(Path(c["photo"])) > TITLE_CEILING["P03"])
-    for i, (r, cands) in enumerate(zip(rows, found)):
-        dev = r.get("device") or {}
-        bar = _need(r)
-        new_ok = lambda c: seen(c["photo"]) == 0 and varied(c, i)
-        own = [c for c in cands if _usable(r, c, bar) and new_ok(c)]           # sorted by _rank: best tier first
-        # the honest steps (2026-10-10): exact = the very thing the shot names (or its stand-in's role), anchor = a
-        # round-3 picture of another anchor, contextual = the right kind of thing - each in its own list
-        fresh = [c for c in own if _tier(c) >= EXACT and not c.get("anchor_switched")]
-        anch = [c for c in own if c.get("anchor_switched")]
-        ctx = [dict(c, contextual=True) for c in own if _tier(c) < EXACT and not c.get("anchor_switched")]
-        if i == 0:                                    # the opening title wants a picture dark enough for it
-            fresh, anch, ctx = dark_first(fresh), dark_first(anch), dark_first(ctx)
-        near = [c for c in borrowed[i] if _usable(r, c, bar) and new_ok(c)]
-        options = ([(c, "exact") for c in fresh] + [(c, "anchor") for c in anch] + [(c, "contextual") for c in ctx]
-                   + [(c, "neighbour") for c in near])
-        # why the fresh photos of this line were or were not usable (pick_audit.json: the reused-photo diagnosis)
-        good = [c for c in cands + borrowed[i] if _usable(r, c, bar)]
-        tiers = [_tier(c) for c in cands if _clean(c)]
-        refused, looked = {}, {}
-        for c in cands:
-            for b in c.get("bad") or c.get("flags") or []:
-                b = str(b).split(":")[0]
-                if b not in ("not looked", "unjudged"):          # refused for what the picture is, not for no look
-                    refused[b] = refused.get(b, 0) + 1
-            looked[c.get("looked") or "?"] = looked.get(c.get("looked") or "?", 0) + 1
-        audit.append({"i": i, "text": r["text"][:90], "round": states[i].get("round"), "cands": len(cands),
-                      "best": TIERS[max(tiers)] if tiers else "none", "exact": tiers.count(EXACT),
-                      "kind": tiers.count(KIND), "generic": tiers.count(GENERIC), "refused": refused,
-                      "stored": looked.get("stored", 0), "asked": looked.get("asked", 0),
-                      "dirty": looked.get("dirty", 0), "later": looked.get("later", 0), "good": len(good),
-                      "good_shown": sum(1 for c in good if seen(c["photo"]) > 0),
-                      "good_subject_cap": sum(1 for c in good if seen(c["photo"]) == 0 and not varied(c, i)),
-                      "subjects": sorted({c.get("subject") or "" for c in good})[:6]})
-        pick, step = None, None
-        about_him = bool(states[i].get("stand_in"))
-        if about_him:
-            # a line about a person of whom no likeness exists: the viewer gets a PERSON of his role to picture him
-            # by (owner 2026-10-08) — a real photo first, else (unless the shot before already showed one) an AI
-            # stand-in of the same fixed look, and only then a picture of what he reads or where he is
-            people = [(c, st) for c, st in options if c.get("person")]
-            if people:
-                pick, step = people[0]
-            elif not (picked and picked[-1][0] == i - 1 and (picked[-1][1].get("person") or picked[-1][1].get("ai"))) \
-                    and dev.get("id") not in ("chapter-title", "highlight-page"):
-                pick = _ai_picture(engine, job, r, i, dossier, states[i].get("stand_in", ""),
-                                   states[i].get("stand_look", ""), *around(i))
-                step = "ai" if pick else None
-        if pick is None and options:                  # 1-3. own exact/anchor, contextual, a neighbour's re-judged photo
-            pick, step = options[0]
-        if pick is None and not about_him and dev.get("id") not in ("chapter-title", "highlight-page"):
-            pick = _ai_picture(engine, job, r, i, dossier, states[i].get("stand_in", ""),
-                               states[i].get("stand_look", ""), *around(i))      # 4. an AI stand-in (cap, checked)
-            step = "ai" if pick else None
-        if pick is None:                              # 5. an unused, unflagged photo of this line, even a weak one:
-            # a new picture beats a repeat (audit v5: 20 repeats from 9 shots back, few of them fitting their new line)
-            weak = [c for c in cands + borrowed[i] if _usable(r, c, KIND) and seen(c["photo"]) == 0
-                    and varied(c, i, gap=3)]
-            if weak:
-                pick, step = dict(sorted(weak, key=_rank)[0], contextual=True), "contextual"
-        if pick is None:                              # 6. last: a photo shown before, never close by, at most twice
-            again = [c for c in cands + borrowed[i] if _usable(r, c, bar) and seen(c["photo"]) < 2
-                     and since_s(c["photo"]) >= REUSE_GAP_S and varied(c, i, gap=8)]
-            back = [p for k, p in reversed(picked) if not p.get("ai") and _clean(p) and _tier(p) >= KIND
-                    and seen(p["photo"]) < 2 and (r["startMs"] - rows[k]["startMs"]) / 1000 >= REUSE_GAP_S
-                    and varied(p, i, gap=8)]
-            if not (again or back) and can_hold(i):   # the only repeat left is a bad one: the picture before stays
-                pick, step = None, "hold"
-                r["_hold"] = True
-                holds.append(i)
-                hold_at.append(r["startMs"] / 1000)
-            elif not (again or back):                 # never a shot with no picture: a closer repeat before none
-                back = sorted((p for k, p in picked if not p.get("ai") and _clean(p) and _tier(p) >= KIND
-                               and seen(p["photo"]) < 3 and i - k > 5),
-                              key=lambda p: (seen(p["photo"]), -since_s(p["photo"])))
-            if again or back:
-                pick, step = dict((again or back)[0], reused=True), "reused"
-        if pick is None and step != "hold":           # 7. never a text-only screen (owner 2026-10-09): the least-shown
-            # picture of the film so far that is not within 3 shots, else any judged photo of this line or a neighbour
-            back = sorted(((k, p) for k, p in picked if i - k > 3 and _clean(p) and _tier(p) >= GENERIC),
-                          key=lambda kp: (seen(kp[1]["photo"]), -kp[0]))
-            near_any = sorted((c for c in cands + borrowed[i] if _clean(c) and _tier(c) >= GENERIC), key=_rank)
-            if back:
-                pick, step = dict(back[0][1], reused=True), "reused"
-            elif near_any:
-                pick, step = dict(near_any[0], contextual=True), "contextual"
-        r["pick"], r["step"], r["stand_in"] = pick, step, states[i].get("stand_in", "")
-        audit[-1]["step"], audit[-1]["src"] = step, _provider(pick)
-        r["spare"] = [c for c in cands if pick and c["photo"] != pick["photo"] and _usable(r, c, KIND)
-                      and not c.get("studio") and seen(c["photo"]) == 0][:3]
-        if pick:
-            n, _ = shown_sig.get(sig(pick["photo"]), [0, -99])
-            shown_sig[sig(pick["photo"])] = [n + 1, i]
-            h_of(pick["photo"])
-            if pick.get("subject"):
-                subj_n[pick["subject"]] = subj_n.get(pick["subject"], 0) + 1
-                subj_last[pick["subject"]] = i
-            picked.append((i, pick))
-        steps[step] = steps.get(step, 0) + 1
-    _dump(job / "mrtruth" / "pick_audit.json", audit)
-    if holds:                                         # a held shot's time and words go to the shot before it
-        kept = []
-        for r in rows:
-            if r.pop("_hold", False) and kept:
-                kept[-1]["endMs"] = r["endMs"]
-                kept[-1]["text"] = f"{kept[-1]['text']} {r['text']}".strip()
-                kept[-1]["hold"] = True               # a planned long hold: the one shot allowed past SCENE_MAX_S
-            else:
-                kept.append(r)
-        rows[:] = kept
-        engine.log(f"  long holds instead of a repeat: {len(holds)} of {hold_n} allowed, at "
-                   + ", ".join(f"{int(t // 60)}:{int(t % 60):02d}" for t in hold_at))
+    info = _choose(engine, job, rows, states, found, borrowed, dossier)
+    steps = info["steps"]
     by_round = [sum(1 for st in states if st.get("round") == k) for k in (1, 2, 3)]
     engine.log(f"  pictures in {time.time() - t0:.0f}s (search rounds: 1 {by_round[0]}, 2 {by_round[1]}, 3 {by_round[2]}); "
                f"on screen: exact {steps.get('exact', 0)}, another anchor {steps.get('anchor', 0)}, contextual "
                f"{steps.get('contextual', 0)}, neighbour {steps.get('neighbour', 0)}, AI {steps.get('ai', 0)}, earlier photo "
-               f"{steps.get('reused', 0)}, long hold {steps.get('hold', 0)}, none {steps.get(None, 0)}; Brave requests {_BRAVE['requests'] - b0}")
+               f"{steps.get('reused', 0)}, long hold {steps.get('hold', 0)}, joined to a shot beside it "
+               f"{steps.get('joined', 0)}, none {steps.get(None, 0)}; Brave requests {_BRAVE['requests'] - b0}")
     g = getattr(engine, "GEMINI_PICKS", None) or {}
     _verdict_report(engine, job, rows)
     engine.log(f"    judge: {JUDGE['asks']} requests, {JUDGE['failed']} unanswered, {g.get('busy', 0)} busy waits, "
@@ -3901,6 +3781,460 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
     if PIC_T:                                         # where the stage's time went (A12)
         engine.log(f"    picture time, summed over the {SHOT_WORKERS} shots at once: "
                    + ", ".join(f"{k} {s:.0f}s ({n}x)" for k, (s, n) in PIC_T.items()))
+
+
+def _bare(r: dict) -> bool:
+    """Nothing on the shot but its picture: no template, typed caption, beat overlay or chapter turn, no planned hold -
+    a shot that may be folded into a neighbour without moving any words on screen."""
+    return not (r.get("device") or r.get("typedCaption") or r.get("overlay") or r.get("section_turn") or r.get("hold")
+                or r.get("_hold"))
+
+
+def _covered(r: dict) -> bool:
+    """A template that covers the whole frame with its own page (highlight-page; chapter-title is off): the shot needs
+    no picture of its own, and the picture scenes() lays under the page is never seen (not a showing)."""
+    return (r.get("device") or {}).get("id") in ("chapter-title", "highlight-page")
+
+
+def _window_ok(times: list, t: int) -> bool:
+    """One more stand-in at t (ms) keeps every AI_WINDOW_S of film at AI_WINDOW_MAX stand-ins or fewer."""
+    w = AI_WINDOW_S * 1000
+    ts = sorted(list(times) + [t])
+    return all(sum(1 for y in ts if x <= y <= x + w) <= AI_WINDOW_MAX for x in ts if x <= t <= x + w)
+
+
+def _ai_mode(rows: list, k: int, about: bool, got: dict = None) -> str:
+    """How a stand-in for shot k is drawn (_ai_picture): him on a line about the stand-in - unless a shot beside it
+    already shows a person (a photo of one, or a drawn stand-in): then place, never two people in a row (owner
+    2026-10-08; both sides, as the stand-ins are no longer drawn in film order); thing on any other line."""
+    if not about:
+        return "thing"
+    got = got or {}
+    near = [got.get(j) or rows[j].get("pick") for j in (k - 1, k + 1) if 0 <= j < len(rows)]
+    return "place" if any(p and p.get("person") for p in near) else "him"
+
+
+def _shortest(led) -> float:
+    """The shortest gap (s) between two showings of one photo, inf when nothing is shown twice."""
+    gaps = [b - a for at in led.at for a, b in zip(sorted(ms for ms, _ in at), sorted(ms for ms, _ in at)[1:])]
+    return min(gaps, default=float("inf")) / 1000
+
+
+def _choose(engine, job: Path, rows: list, states: list, found: list, borrowed: list, dossier: dict) -> dict:
+    """The picture on every shot, in three passes (owner 2026-10-10; the pod's 11-min film: the AI cap ran out at 5:53
+    on refused drawings, 45 of its 53 repeats came after it, and four repeats came back within 90 s):
+      A  film order, no paid call: the shot's own picture, first that exists - exact → another anchor → contextual
+         (kind) → a neighbour's picture checked against this line; on a line about the stand-in, a picture with a person
+         first. A shot with none is OPEN; a line about the stand-in with only pictures without a person, or a shot with
+         only a weak picture (its subject shown within SUBJECT_GAP shots), is SOFT: its first such picture is held for
+         it as its fallback (no later shot takes it) and is free again for the shots still open if it gets a stand-in.
+      allocation (pure Python): the order the stand-ins are drawn in - the open shots that can neither repeat a photo
+         nor be joined first, then the open shot in the densest stretch of open shots (±45 s; then the longer, then the
+         earlier), then the soft ones (the stand-in's lines first: owner decision, open shots come before them).
+      B  the stand-ins in that order, AI_AT_ONCE at a time, until `cap` are ACCEPTED (on screen) or the drawings run
+         out (BUDGET); a refused shot stays open and the next in the order gets its chance; at most AI_WINDOW_MAX in
+         any AI_WINDOW_S (waived for the shots nothing else can fill). A launch waits for the drawings in flight within
+         AI_WINDOW_S and for its slots, so the result is the order's, never the threads'. A soft line about the
+         stand-in beside a person keeps its real picture; a soft shot's fallback is held for it until then.
+      C  film order, every shot still open, first that exists: its stand-in → its fallback → a picture of its own that
+         a soft shot with a stand-in let go of → a repeat within the film's cap (a photo on screen once, REUSE_GAP_S +
+         REUSE_MARGIN_S from its showing either way, not AI, kind or better, its subject not crowded; this line's own
+         picture first, then a shared subject, then the longest gap; the next ones kept as reuse_alts for the guard) →
+         joined to the plain shot before it, else after it (never over SCENE_MAX_S) → a long hold (can_hold) → an
+         unused picture of this line or a neighbour's (generic is enough) → a repeat over the cap (logged) → a repeat
+         whose subject is crowded (logged) → a stand-in after all, if it was never drawn for and the budget lasts → a
+         repeat REUSE_GAP_S from its showing without the margin (logged; the guard holds it) → the planner stops with
+         the reason (MRTRUTH_ALLOW_DEGRADED=1: the least-shown photo, logged). The old repeats
+         that ignored the gap (any photo 5 shots back, the least-shown photo 3 shots back) are gone.
+    Writes pick_audit.json; returns the counts for the log."""
+    film_s = rows[-1]["endMs"] / 1000
+    t_of = [r["startMs"] for r in rows]          # pictures-stage starts (a shot joined to the next moves its start)
+    led, subj, placed = _Ledger(), {}, {}
+    about = [bool(st.get("stand_in")) for st in states]
+    gap_ms = (REUSE_GAP_S + REUSE_MARGIN_S) * 1000
+    hold_n = min(HOLD_MAX_N, int(film_s // HOLD_EVERY_S))
+    holds, hold_at, joined, audit, demand = [], [], [], [], {}
+    around = lambda i: (rows[i - 1]["text"] if i else "", rows[i + 1]["text"] if i + 1 < len(rows) else "")
+
+    def place(i, pick, step):
+        rows[i]["pick"], rows[i]["step"] = pick, step
+        placed[i] = pick
+        led.add(pick["photo"], t_of[i], i)
+        if pick.get("subject"):
+            subj.setdefault(pick["subject"], []).append(i)
+
+    def varied(c, i, gap=SUBJECT_GAP):            # one view of one subject: SUBJECT_MAX a film, `gap` shots apart
+        s = c.get("subject") or ""
+        at = subj.get(s, [])
+        return not s or (len(at) < SUBJECT_MAX and all(abs(i - k) > gap for k in at))
+
+    dark_first = lambda cs: sorted(cs, key=lambda c: _luma(Path(c["photo"])) > TITLE_CEILING["P03"])
+
+    def options_of(i):
+        """The shot's own unused pictures, in the honest steps' order (2026-10-10): exact = the very thing the shot
+        names (or its stand-in's role), anchor = a round-3 picture of another anchor, contextual = the right kind of
+        thing, neighbour = a neighbour's picture checked against this line."""
+        r = rows[i]
+        bar = _need(r)
+        new_ok = lambda c: led.n(c["photo"]) == 0 and varied(c, i)
+        own = [c for c in found[i] if _usable(r, c, bar) and new_ok(c)]       # sorted by _rank: best tier first
+        fresh = [c for c in own if _tier(c) >= EXACT and not c.get("anchor_switched")]
+        anch = [c for c in own if c.get("anchor_switched")]
+        ctx = [dict(c, contextual=True) for c in own if _tier(c) < EXACT and not c.get("anchor_switched")]
+        if i == 0:                                # the opening title wants a picture dark enough for it
+            fresh, anch, ctx = dark_first(fresh), dark_first(anch), dark_first(ctx)
+        near = [c for c in borrowed[i] if _usable(r, c, bar) and new_ok(c)]
+        return ([(c, "exact") for c in fresh] + [(c, "anchor") for c in anch] + [(c, "contextual") for c in ctx]
+                + [(c, "neighbour") for c in near])
+
+    def weak_of(i):                               # a weak photo: its subject was shown a few shots ago
+        return [(dict(c, contextual=True), "contextual") for c in sorted(
+            (c for c in found[i] + borrowed[i] if _usable(rows[i], c, KIND) and led.n(c["photo"]) == 0
+             and varied(c, i, gap=3)), key=_rank)]
+
+    reserved = {}                                 # soft shots: their fallback, held for them until the stand-ins are drawn
+
+    def reserve(i, c, st):
+        led.add(c["photo"], t_of[i], i)
+        if c.get("subject"):
+            subj.setdefault(c["subject"], []).append(i)
+        reserved[i] = (c, st)
+
+    def release(i):                               # it got a stand-in: its fallback is free for the shots still open
+        led.drop(i)
+        for at in subj.values():
+            if i in at:
+                at.remove(i)
+        reserved.pop(i, None)
+
+    # ── A: each shot's own picture ──
+    for i, (r, cands) in enumerate(zip(rows, found)):
+        r["stand_in"], r["stand_look"] = states[i].get("stand_in", ""), states[i].get("stand_look", "")
+        r["pick"], r["step"] = None, None
+        if _covered(r):
+            r["step"] = "covered"
+            audit.append({"i": i, "text": r["text"][:90], "round": states[i].get("round"), "cands": len(cands),
+                          "best": "none", "exact": 0, "kind": 0, "generic": 0, "refused": {}, "good": 0,
+                          "good_shown": 0, "good_subject_cap": 0, "subjects": [], "step": "covered", "demand": ""})
+            continue
+        options = options_of(i)
+        # why the fresh photos of this line were or were not usable (pick_audit.json: the reused-photo diagnosis)
+        good = [c for c in cands + borrowed[i] if _usable(r, c, _need(r))]
+        tiers = [_tier(c) for c in cands if _clean(c)]
+        refused, looked = {}, {}
+        for c in cands:
+            for b in c.get("bad") or c.get("flags") or []:
+                b = str(b).split(":")[0]
+                if b not in ("not looked", "unjudged"):          # refused for what the picture is, not for no look
+                    refused[b] = refused.get(b, 0) + 1
+            looked[c.get("looked") or "?"] = looked.get(c.get("looked") or "?", 0) + 1
+        audit.append({"i": i, "text": r["text"][:90], "round": states[i].get("round"), "cands": len(cands),
+                      "best": TIERS[max(tiers)] if tiers else "none", "exact": tiers.count(EXACT),
+                      "kind": tiers.count(KIND), "generic": tiers.count(GENERIC), "refused": refused,
+                      "stored": looked.get("stored", 0), "asked": looked.get("asked", 0),
+                      "dirty": looked.get("dirty", 0), "later": looked.get("later", 0), "good": len(good),
+                      "good_shown": sum(1 for c in good if led.n(c["photo"]) > 0),
+                      "good_subject_cap": sum(1 for c in good if led.n(c["photo"]) == 0 and not varied(c, i)),
+                      "subjects": sorted({c.get("subject") or "" for c in good})[:6], "demand": ""})
+        if about[i]:
+            # a line about a person of whom no likeness exists: the viewer gets a PERSON of his role to picture him
+            # by (owner 2026-10-08) — a real photo first, else an AI stand-in of the same fixed look, and only then a
+            # picture of what he reads or where he is
+            people = [(c, st) for c, st in options if c.get("person")]
+            if people:
+                place(i, *people[0])
+            else:
+                demand[i] = {"kind": "him" if options else "hard"}
+                if options:
+                    reserve(i, *options[0])
+        elif options:
+            place(i, *options[0])
+        else:
+            weak = weak_of(i)
+            demand[i] = {"kind": "weak" if weak else "hard"}
+            if weak:
+                reserve(i, *weak[0])
+        audit[-1]["demand"] = (demand.get(i) or {}).get("kind", "")
+
+    # ── allocation: who gets the film's stand-ins, spread by need ──
+    def can_repeat(i):
+        return any(not p.get("ai") and _clean(p) and _tier(p) >= KIND and led.n(p["photo"]) == 1
+                   and abs(t_of[k] - t_of[i]) >= gap_ms for k, p in placed.items())
+
+    def can_join(i):
+        r, nxt = rows[i], (rows[i + 1] if i + 1 < len(rows) else None)
+        return bool(i and _bare(r) and (
+            ((i - 1) in placed and _bare(rows[i - 1]) and r["endMs"] - rows[i - 1]["startMs"] <= SCENE_MAX_S * 1000)
+            or (nxt is not None and (i + 1) in placed and _bare(nxt) and nxt["endMs"] - r["startMs"] <= SCENE_MAX_S * 1000)))
+    hard = [i for i in sorted(demand) if demand[i]["kind"] == "hard"]
+    order = [i for i in hard if not can_repeat(i) and not can_join(i)]
+    first = set(order)                            # nothing else could fill them: the minute rule gives way
+    left = sorted(set(hard) - set(order))
+    while left:
+        j = max(left, key=lambda j: (sum(1 for k in left if abs(t_of[k] - t_of[j]) <= 45000),
+                                     rows[j]["endMs"] - rows[j]["startMs"], -t_of[j]))
+        order.append(j)
+        left.remove(j)
+    order += [i for i in sorted(demand) if demand[i]["kind"] == "him"]
+    order += [i for i in sorted(demand) if demand[i]["kind"] == "weak"]
+    for n, j in enumerate(order):
+        audit[j]["order"] = n
+
+    # ── B: the stand-ins, drawn and checked AI_AT_ONCE at a time, settled in the allocation's order ──
+    cap, at_once = BUDGET.get("cap", 0), max(1, AI_AT_ONCE)
+    got, acc_t, windowed, launched, pos = {}, [], [], [], {j: n for n, j in enumerate(order)}
+
+    def draw(j, mode, tries):
+        b_, a_ = around(j)
+        return _ai_picture(engine, job, rows[j], j, dossier, rows[j]["stand_in"] if mode != "thing" else "",
+                           rows[j]["stand_look"] if mode == "him" else "", b_, a_, mode=mode, tries=tries)
+    pending, k = {}, 0
+    with ThreadPoolExecutor(max_workers=at_once) as ex:
+        while True:
+            while k < len(order) and len(pending) < at_once and len(got) + len(pending) < cap:
+                j = order[k]
+                with _BUDGET_LOCK:
+                    room = BUDGET.get("draw_cap", 0) - BUDGET.get("drawn", 0.0) - 2 * len(pending)
+                if room < (2 if pending else 1):
+                    break                         # the drawings in flight settle first: the same choice every run
+                if any(abs(t_of[x] - t_of[j]) < AI_WINDOW_S * 1000 for x, *_ in pending.values()):
+                    break
+                k += 1
+                waived = not _window_ok(acc_t, t_of[j])
+                if waived and j not in first:
+                    windowed.append(j)
+                    continue
+                mode = _ai_mode(rows, j, about[j], got)
+                if demand[j]["kind"] == "him" and mode == "place":
+                    continue                      # beside a person: his real things beat a drawn room
+                audit[j]["ai_mode"] = mode
+                launched.append(j)
+                pending[ex.submit(draw, j, mode, int(min(2, room)))] = (j, mode, waived)
+            if not pending:
+                break
+            done, _ = wait(list(pending), return_when=FIRST_COMPLETED)
+            for f in sorted(done, key=lambda f: pos[pending[f][0]]):
+                j, mode, waived = pending.pop(f)
+                try:
+                    pick = f.result()
+                except (PlanningStopped, OutOfCredit):
+                    raise
+                except Exception as e:                               # noqa: BLE001 - this shot stays open
+                    engine.log(f"    shot {j}: no AI picture — {str(e)[:80]}")
+                    pick = None
+                if pick:
+                    got[j] = dict(pick, minute_waived=True) if waived else pick
+                    acc_t.append(t_of[j])
+
+    for j in got:
+        if j in reserved:
+            release(j)
+
+    # ── C: what is still open ──
+    has_gallery = any((r.get("device") or {}).get("id") == "gallery-strip" for r in rows)
+    cap_r = max(0, BUDGET.get("reuse_cap", 0) - (LIBRARY["gallery-strip"][1] if has_gallery else 0))
+    reps, over, lax_n, nears, margin_n = 0, [], [], 0, []
+
+    def again(i, relax=False, gap_ms=gap_ms):
+        """Photos that may come back on shot i, best first (one per photo)."""
+        r, t = rows[i], t_of[i]
+        want = set(_content(" ".join([str(r.get("about") or ""), str(r.get("visualIntent") or "")]
+                                     + [str(e) for e in r.get("entities") or []])))
+        best = {}
+
+        def consider(c, own, src=None):
+            p = c["photo"]
+            if c.get("ai") or not _usable(r, c, KIND) or led.n(p) != 1:
+                return
+            g = led.gap(p, t)
+            if g < gap_ms or (not relax and not varied(c, i, gap=8)):
+                return
+            words = set(_content(str(c.get("subject") or "")))
+            if src is not None:
+                words |= set(_content(" ".join([str(src.get("about") or "")] + [str(e) for e in src.get("entities") or []])))
+            key = (0 if own else 1, -len(want & words), -g, p)
+            gid = led.group(p)
+            if gid not in best or key < best[gid][0]:
+                best[gid] = (key, c)
+        for c in found[i] + borrowed[i]:          # pictures checked for THIS line, already on screen elsewhere
+            consider(c, True)
+        for k_, p in sorted(placed.items()):
+            if k_ != i:
+                consider(p, False, rows[k_])
+        return [c for _, c in sorted(best.values(), key=lambda kc: kc[0])]
+
+    def join(i):
+        r = rows[i]
+        if not i or not _bare(r):
+            return False
+        k_ = i - 1                                # past the shots already folded into the one before
+        while k_ > 0 and (rows[k_].get("_join") == -1 or rows[k_].get("_hold")):
+            k_ -= 1
+        if k_ in placed and _bare(rows[k_]) and r["endMs"] - t_of[k_] <= SCENE_MAX_S * 1000:
+            r["_join"] = -1
+            joined.append(i)
+            return True
+        nxt = rows[i + 1] if i + 1 < len(rows) else None
+        moved_ok = lambda p: all(abs(ms - t_of[i]) >= gap_ms for ms, key in led.at[led.group(p["photo"])] if key != i + 1)
+        if (nxt is not None and (i + 1) in placed and _bare(nxt) and nxt["endMs"] - r["startMs"] <= SCENE_MAX_S * 1000
+                and moved_ok(placed[i + 1])):    # its picture opens earlier: still clear of its other showing
+            r["_join"] = 1
+            t_of[i + 1] = t_of[i]
+            led.drop(i + 1)
+            led.add(placed[i + 1]["photo"], t_of[i + 1], i + 1)
+            joined.append(i)
+            return True
+        return False
+
+    def can_hold(k_):
+        """Hold the picture before through shot k: late in the film, within the film's budget, on a plain shot."""
+        t = t_of[k_] / 1000
+        if t < HOLD_FROM_S or len(holds) >= hold_n or k_ == 0 or (k_ - 1) not in placed:
+            return False
+        if t < HOLD_PREFER_S and sum(1 for h in holds if t_of[h] / 1000 < HOLD_PREFER_S) >= max(1, hold_n // 2):
+            return False
+        for x in (rows[k_], rows[k_ - 1]):       # neither the held shot nor the one it stretches carries words:
+            if x.get("device") or x.get("typedCaption") or x.get("overlay"):   # a template has no exit, it would
+                return False                                                   # stay up across the next sentence
+        return (rows[k_]["endMs"] - t_of[k_ - 1]) / 1000 <= HOLD_MAX_S
+
+    for i in sorted(demand):
+        r, t = rows[i], t_of[i]
+        if i in got:
+            place(i, got[i], "ai")
+            continue
+        if i in reserved:                         # its fallback, held for it since pass A
+            c, st = reserved.pop(i)
+            rows[i]["pick"], rows[i]["step"], placed[i] = c, st, c
+            continue
+        opts = options_of(i)                      # a picture a shot with a stand-in let go of
+        if about[i]:
+            opts = [o for o in opts if o[0].get("person")] or opts
+        else:
+            opts = opts or weak_of(i)
+        if opts:
+            place(i, *opts[0])
+            continue
+        alts = again(i)
+        if alts and reps < cap_r:
+            place(i, dict(alts[0], reused=True), "reused")
+            r["reuse_alts"] = alts[1:4]
+            reps += 1
+            continue
+        if join(i):
+            r["step"] = "joined"
+            continue
+        if can_hold(i):                           # the only repeat left is a bad one: the picture before stays
+            r["_hold"], r["step"] = True, "hold"
+            holds.append(i)
+            hold_at.append(t / 1000)
+            continue
+        near, have = [], set()
+        for j in (i, i - 1, i + 1, i - 2, i + 2):
+            if 0 <= j < len(rows):
+                for c in sorted(found[j] + (borrowed[i] if j == i else []), key=_rank):
+                    if (c["photo"] not in have and not c.get("ai") and _clean(c) and _tier(c) >= GENERIC
+                            and _studio_ok(r, c) and led.n(c["photo"]) == 0):
+                        have.add(c["photo"])
+                        near.append(c)
+        if near:                                  # a weaker picture of this line or the next, never shown
+            place(i, dict(near[0], contextual=True), "contextual")
+            nears += 1
+            continue
+        lax = alts or again(i, relax=True)
+        if lax:                                   # over the cap, or its subject crowded: the gap still holds
+            place(i, dict(lax[0], reused=True, over_cap=reps >= cap_r, crowded=not alts), "reused")
+            r["reuse_alts"] = lax[1:4]
+            (over if reps >= cap_r else lax_n).append(i)
+            reps += 1
+            continue
+        if i not in launched and len(got) < cap and _draw_room() >= 1:   # never drawn for (the minute rule, or the
+            b_, a_ = around(i)                                             # order ran out): a stand-in after all
+            mode = _ai_mode(rows, i, about[i])
+            pick = _ai_picture(engine, job, r, i, dossier, r["stand_in"] if mode != "thing" else "",
+                               r["stand_look"] if mode == "him" else "", b_, a_, mode=mode, tries=int(min(2, _draw_room())))
+            launched.append(i)
+            if pick:
+                got[i] = dict(pick, minute_waived=not _window_ok(acc_t, t))
+                acc_t.append(t)
+                place(i, got[i], "ai")
+                continue
+        tight = again(i, relax=True, gap_ms=REUSE_GAP_S * 1000)
+        if tight:                                 # REUSE_GAP_S itself, without the margin (the guard holds it on the
+            place(i, dict(tight[0], reused=True, over_cap=reps >= cap_r, crowded=True, tight=True), "reused")
+            r["reuse_alts"] = tight[1:4]          # final cut: a shift below 90 s is repaired there)
+            margin_n.append(i)
+            reps += 1
+            continue
+        _stop(engine, f"Mr Truth stopped: shot {i} at {int(t) // 60000}:{int(t) // 1000 % 60:02d} has no picture - none of its "
+                      f"own passed the checks, no stand-in was left or accepted for it, no photo shown once can come "
+                      f"back {REUSE_GAP_S:.0f} s from its other showing and it cannot be joined to a plain shot beside "
+                      f"it (search wider for this line, or allow more stand-ins: MRTRUTH_AI_PER_MIN)")
+        last = sorted(((led.n(p["photo"]), -led.gap(p["photo"], t), p["photo"], p) for k_, p in placed.items()
+                       if not p.get("ai") and _clean(p) and _tier(p) >= GENERIC), key=lambda x: x[:3])
+        if last:                                  # MRTRUTH_ALLOW_DEGRADED=1: the least-shown photo, the farthest away
+            place(i, dict(last[0][3], reused=True, over_cap=True), "reused")
+            reps += 1
+    # what was chosen, per pictures-stage shot (the reused-photo diagnosis reads it)
+    for i, a in enumerate(audit):
+        a["step"], a["src"] = rows[i].get("step"), _provider(rows[i].get("pick"))
+    _dump(job / "mrtruth" / "pick_audit.json", audit)
+    # runner-ups: pictures checked for this line that are on no shot (templates' companions, split parts, swaps)
+    for i, r in enumerate(rows):
+        pick, sp, gs = r.get("pick"), [], set()
+        for c in found[i] + borrowed[i]:
+            if (not pick or c.get("ai") or c.get("studio") or not _usable(r, c, KIND) or led.n(c["photo"])
+                    or led.group(c["photo"]) in gs):
+                continue
+            gs.add(led.group(c["photo"]))
+            sp.append(c)
+        r["spare"] = sp[:4]
+    steps = {}
+    for r in rows:
+        steps[r.get("step")] = steps.get(r.get("step"), 0) + 1
+    shortest = _shortest(led)
+    if holds or joined:                           # a held or joined shot's time and words go to its neighbour
+        kept, carry = [], None
+        for r in rows:
+            if carry is not None:                 # the shot before was joined to this one: it opens earlier
+                r["startMs"], r["text"] = carry["startMs"], f"{carry['text']} {r['text']}".strip()
+                r["entities"] = list(dict.fromkeys(list(carry.get("entities") or []) + list(r.get("entities") or [])))
+                carry = None
+            how = "hold" if r.pop("_hold", False) else {-1: "before", 1: "after"}.get(r.pop("_join", 0))
+            if how in ("hold", "before") and kept:
+                p = kept[-1]
+                p["endMs"], p["text"] = r["endMs"], f"{p['text']} {r['text']}".strip()
+                p["entities"] = list(dict.fromkeys(list(p.get("entities") or []) + list(r.get("entities") or [])))
+                if how == "hold":
+                    p["hold"] = True              # a planned long hold: the one shot allowed past SCENE_MAX_S
+            elif how == "after":
+                carry = r
+            else:
+                kept.append(r)
+        rows[:] = kept
+    if holds:
+        engine.log(f"  long holds instead of a repeat: {len(holds)} of {hold_n} allowed, at "
+                   + ", ".join(f"{int(t // 60)}:{int(t % 60):02d}" for t in hold_at))
+    with _BUDGET_LOCK:
+        b = dict(BUDGET)
+    soft = sum(1 for d in demand.values() if d["kind"] != "hard")
+    engine.log(f"  stand-ins: {len(demand)} shots without a picture of their own ({len(demand) - soft} open, {soft} with a "
+               f"weaker fallback), drawn spread over the film: {len(got)} on screen of {cap} allowed, "
+               f"{b.get('drawings', 0)} drawings ({b.get('drawn', 0):.0f} of the {b.get('draw_cap', 0)} budget"
+               + (f", {b.get('backups')} by the backup at x{AI_BACKUP_WEIGHT}" if b.get("backups") else "")
+               + f"), {b.get('refused', 0)} refused, {len(launched)} shots tried"
+               + (f", {len(windowed)} skipped (already {AI_WINDOW_MAX} in a minute)" if windowed else ""))
+    engine.log(f"  repeats: {reps} of {BUDGET.get('reuse_cap', 0)} allowed"
+               + (f" ({BUDGET.get('reuse_cap', 0) - cap_r} kept for the gallery's previews)" if has_gallery else "")
+               + (f", shortest gap {shortest:.0f}s at this stage" if reps else "")
+               + f"; {len(joined)} joined to a plain shot beside them, {len(holds)} long holds, {nears} weaker unused "
+               f"pictures" + (f"; ⚠ {len(over)} over the cap" if over else "")
+               + (f"; ⚠ {len(lax_n)} with their subject shown twice already" if lax_n else "")
+               + (f"; ⚠ {len(margin_n)} only {REUSE_GAP_S:.0f}-{REUSE_GAP_S + REUSE_MARGIN_S:.0f}s from their other "
+                  f"showing (the guard holds {REUSE_GAP_S:.0f}s on the final cut)" if margin_n else ""))
+    return {"steps": steps, "repeats": reps, "over_cap": len(over), "crowded": len(lax_n), "tight": len(margin_n),
+            "joined": len(joined), "holds": len(holds), "ai_shown": len(got), "ai_tried": len(launched),
+            "demand": len(demand), "soft": soft, "shortest_s": shortest, "order": order, "skipped_window": len(windowed)}
 
 
 def _verdict_report(engine, job: Path, rows: list) -> dict:
@@ -3978,15 +4312,18 @@ def _search_report(engine, job: Path, rows: list, brave_requests: int) -> dict:
     return out
 
 
-def _ai_ok(engine, dest: Path, row: dict, dossier: dict, before: str = "", after: str = "", loose: bool = False) -> tuple:
+def _ai_ok(engine, dest: Path, row: dict, dossier: dict, before: str = "", after: str = "", loose: bool = False,
+           nobody: bool = False) -> tuple:
     """(ok, why, verdict): a generated stand-in is checked with the candidates' questions (AI_RULES: real as a
     photograph, the owner's text rule word for word, a drawn frame, and warped faces, hands or figures), one picture a
     call, a 1280-px copy at AI_CHECK_MEDIA. Used only when nothing is wrong and it shows the line's kind of thing or
-    better - `loose` (the second drawing, the subject shown through its objects): generic is enough. (Audit
-    2026-10-08: garbled pseudo-script on 'manuscripts', burnt photo borders, a cardigan for a priest.) The answers are
-    kept in the verdict store; an unanswered check is "not checked" (not used, not kept)."""
+    better - `loose` (the second drawing, the subject shown through its objects): generic is enough. `nobody` (a place
+    drawn for a line about the stand-in beside a shot that already shows a person): no stand-in in the question, and a
+    person in view refuses it. (Audit 2026-10-08: garbled pseudo-script on 'manuscripts', burnt photo borders, a
+    cardigan for a priest.) The answers are kept in the verdict store; an unanswered check is "not checked" (not used,
+    not kept)."""
     import verdicts
-    era, stand = _era(row, dossier), _stand_in(row, dossier)
+    era, stand = _era(row, dossier), (None if nobody else _stand_in(row, dossier))
     names = _names_of(row, stand)
     media = verdicts.media_rank(AI_CHECK_MEDIA)
     key = (_photo_id(dest), _AI_QSET, _line_key("ai", row, before, after, era, names, stand), media)
@@ -4000,54 +4337,125 @@ def _ai_ok(engine, dest: Path, row: dict, dossier: dict, before: str = "", after
     if a is None:
         return False, f"not checked ({how})", {}
     v = _verdict({}, a, ai=True, exact_ok=True, looked=how)
-    ok = v["clean"] and v["tier"] >= (GENERIC if loose else KIND)
-    why = ", ".join(v["bad"]) or (f"shows {v['shows']}" if not ok else "ok")
+    ok = v["clean"] and v["tier"] >= (GENERIC if loose else KIND) and not (nobody and v["person"])
+    why = ", ".join(v["bad"]) or ("a person in view" if nobody and v["person"] else
+                                  f"shows {v['shows']}" if not ok else "ok")
     return ok, f"{why} — {v['reason'][:100]}", {k: v[k] for k in ("shows", "tier", "bad", "clean", "subject", "person",
                                                                    "anchor", "looked")}
 
 
 # AI stand-ins (owner 2026-10-10): Z-Image Turbo on WaveSpeed, $0.005 a picture against Seedream 4.0's $0.027, and in the
 # side-by-side test it passed the check more often (7/8 against 6/8). Seedream (the engine's own picture service) is the
-# backup when it fails. At most AI_PER_MIN pictures per minute of film (the reference channels use about three).
+# backup when it fails. At most AI_PER_MIN pictures ON SCREEN per minute of film (owner 2026-10-10: a refused drawing
+# does not use up the film's stand-ins - on the pod 11 refused drawings ran the cap of 44 out at 5:53 and 45 of the 53
+# repeats came after), drawn within a budget of AI_DRAWS_PER_SHOWN drawings per picture shown (the cost bound: 88
+# drawings, $0.44 at worst for 11 min); a Seedream backup drawing costs ~5.4x and counts AI_BACKUP_WEIGHT.
 AI_MODEL = os.environ.get("MRTRUTH_AI_MODEL", "wavespeed-ai/z-image/turbo")
 AI_SIZE = os.environ.get("MRTRUTH_AI_SIZE", "1536*864")      # Z-Image's largest 16:9 (each side at most 1536)
 AI_PER_MIN = float(os.environ.get("MRTRUTH_AI_PER_MIN", "4"))
+AI_DRAWS_PER_SHOWN = float(os.environ.get("MRTRUTH_AI_DRAWS_PER_SHOWN", "2"))
+AI_BACKUP_WEIGHT = 5
+# spread across the film, not spent first-come: at most AI_WINDOW_MAX stand-ins in any AI_WINDOW_S of film
+AI_WINDOW_S, AI_WINDOW_MAX = 60.0, int(os.environ.get("MRTRUTH_AI_WINDOW_MAX", "6"))
+AI_AT_ONCE = int(os.environ.get("MRTRUTH_AI_AT_ONCE", "4"))   # stand-ins drawn and checked at the same time
+BUDGET = {}                     # this film's AI and repeat budget (pictures() sets it; the stages after it spend from it)
+_BUDGET_LOCK = threading.Lock()
+# a line whose picture IS writing (a handwritten note, a register, a list, a page): a drawn page of Latin letters is
+# refused by rule (owner 2026-10-10), and 8 of the pod's 11 refused drawings were exactly that - it is drawn as the
+# object closed or turned away, or its place. Script of another writing system on the thing itself is allowed (the
+# owner's rule), so such a line is drawn as asked
+_WRITING = re.compile(r"\b(handwrit\w*|hand-written|notations?|inscriptions?|ledgers?|registers?|records?|lists?|letters?|"
+                      r"documents?|pages?|folios?|manuscripts?|codex|codices|texts?|scrolls?|scripts?|writing|written|"
+                      r"ink|notes?|entry|entries|catalogu?es?|catalogs?|transcripts?|paragraphs?|passages?|signatures?|"
+                      r"diary|diaries|journals?|margins?|marginalia|annotations?|printed|typed|typewritten|newspapers?|"
+                      r"headlines?|words?)\b", re.I)
+_NON_LATIN = re.compile(r"\b(ge'?ez|ethiopic|amharic|hebrew|greek|arabic|syriac|aramaic|coptic|cuneiform|hieroglyph\w*|"
+                        r"sanskrit|chinese|japanese|tibetan|armenian|georgian|cyrillic|runes?|runic|calligraph\w*)\b", re.I)
 
 
-def _draw_ai(engine, prompt: str, dest: Path, label: str) -> None:
-    """One stand-in through AI_MODEL; the engine's picture service (Seedream) when that fails."""
+def _writing(row: dict) -> bool:
+    """The line's picture is a piece of Latin-alphabet writing (A9)."""
+    want = str(row.get("visualIntent") or row.get("text") or "")
+    return bool(_WRITING.search(want)) and not _NON_LATIN.search(want)
+
+
+def _budget_set(engine, rows: list) -> dict:
+    """The film's budget (owner 2026-10-10), set when its pictures are chosen and spent from until the last picture
+    decision: `cap` stand-ins on screen (AI_PER_MIN a minute), `draw_cap` drawings (weighted: a backup drawing counts
+    AI_BACKUP_WEIGHT) and `reuse_cap` repeats (REUSE_PER_MIN a minute). The engine's AI_IMAGE_CAP becomes the drawings
+    made before this film plus draw_cap: the money ceiling every drawing claims (a cached one too, so a re-run reaches
+    the same decisions); an explicit AI_IMAGE_CAP in .env still wins."""
+    mins = rows[-1]["endMs"] / 60000 if rows else 0.0
+    used0 = int((getattr(engine, "_AI_IMAGES", None) or {}).get("used", 0))
+    cap = max(1, int(round(AI_PER_MIN * mins)))
+    draw_cap = int(math.ceil(AI_DRAWS_PER_SHOWN * cap))
+    if os.environ.get("AI_IMAGE_CAP"):
+        draw_cap = max(0, int(getattr(engine, "AI_IMAGE_CAP", draw_cap)) - used0)
+        cap = min(cap, draw_cap)
+    else:
+        engine.AI_IMAGE_CAP = used0 + draw_cap
+    with _BUDGET_LOCK:
+        BUDGET.clear()
+        BUDGET.update(cap=cap, draw_cap=draw_cap, drawn=0.0, drawings=0, backups=0, refused=0, used0=used0,
+                      reuse_cap=int(round(REUSE_PER_MIN * mins)))
+    return BUDGET
+
+
+def _spend(weight) -> None:
+    w = weight if isinstance(weight, (int, float)) and not isinstance(weight, bool) else 1
+    with _BUDGET_LOCK:
+        BUDGET["drawn"] = BUDGET.get("drawn", 0.0) + w
+        BUDGET["drawings"] = BUDGET.get("drawings", 0) + 1
+        BUDGET["backups"] = BUDGET.get("backups", 0) + (1 if w > 1 else 0)
+
+
+def _draw_room() -> float:
+    """Drawings the film's budget still allows (unlimited before pictures() set one)."""
+    with _BUDGET_LOCK:
+        cap = BUDGET.get("draw_cap")
+        return float("inf") if cap is None else cap - BUDGET.get("drawn", 0.0)
+
+
+def _draw_ai(engine, prompt: str, dest: Path, label: str) -> int:
+    """One stand-in through AI_MODEL; the engine's picture service (Seedream) when that fails. Returns what it costs
+    against the drawing budget: 1, or AI_BACKUP_WEIGHT for a backup drawing."""
     import wavespeed
     from PIL import Image
-    engine.ai_image_slot(label)                      # counts against the film's AI cap (raises when it is reached)
+    engine.ai_image_slot(label)                      # counts against the film's drawings (raises when they run out)
     raw = dest.with_name(dest.stem + "_z.png")
     try:
         with _timed("AI drawing"):
             wavespeed.run(AI_MODEL, {"prompt": prompt[:3900], "size": AI_SIZE, "output_format": "png"}, raw, label=label,
                           log=engine.log)
         Image.open(raw).convert("RGB").save(dest, "JPEG", quality=93)
+        return 1
     except Exception as e:                                            # noqa: BLE001 - the backup draws it instead
         engine.log(f"    {label}: {AI_MODEL} failed ({str(e)[:80]}) - drawing it with the backup")
         with engine._AI_LOCK:                        # the backup claims its own slot: hand this one back
             engine._AI_IMAGES["used"] = max(0, engine._AI_IMAGES["used"] - 1)
         with _timed("AI drawing"):
             engine.image_gen(prompt, dest, label=label)
+        return AI_BACKUP_WEIGHT
     finally:
         raw.unlink(missing_ok=True)
 
 
 def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role: str = "", look: str = "",
-                before: str = "", after: str = ""):
-    """A generated stand-in in the film's own look (the visual brief's aiLook, period, setting and tone). A person in it
-    is an anonymous figure of the role with the brief's fixed appearance, so the same man does not change face from
-    shot to shot. Nothing written is ever visible. Each drawing is checked (_ai_ok) and drawn once more if it fails;
-    a picture that still fails is not used. Never carries a name on screen."""
+                before: str = "", after: str = "", mode: str = "", tries: int = 2):
+    """A generated stand-in in the film's own look (the visual brief's aiLook, period, setting and tone), drawn as `mode`:
+      him    the line is about the stand-in (role, look): a person of his role with the brief's fixed appearance, so the
+             same man does not change face from shot to shot;
+      thing  the line's own picture (its visualIntent); any person in it anonymous - the protagonist is never put into a
+             line that is not about him (A9: shot 98 was refused for a portrait of the priest on a reading-room line);
+             a line whose picture is Latin writing is drawn as the object closed or turned away, then its place (A9);
+      place  a line about him beside a shot that already shows a person: what he reads or where he is, NO person in
+             view (owner 2026-10-08: "what he reads or where he is"); a person in the drawing refuses it.
+    Nothing written is ever readable. Each drawing is checked (_ai_ok) and drawn once more if it fails (at most `tries`,
+    and only while the film's drawing budget lasts: every drawing counts, a refused or cached one too); a picture that
+    still fails is not used. Never carries a name on screen."""
     dossier = dossier or {}
     b = dossier.get("visualBrief") or {}
-    about_him = bool(role)                        # the line is about him: he is the picture's subject
-    if not role:                                  # the film's one unphotographed protagonist, if a person appears
-        nophoto = [p for p in b.get("people") or [] if not p.get("likenessKnown")]
-        if len(nophoto) == 1:
-            role, look = nophoto[0].get("role", ""), nophoto[0].get("appearance", "")
+    mode = mode or ("him" if role else "thing")
     # the brief's look sentence describes the film's photographs ("archival photograph, age-toning, parchment
     # reproduction"); read literally the model draws an old PRINT - burnt borders, a mount, a page of script. 19 of 30
     # stand-ins were refused for exactly that (pod test 2026-10-10): the look keeps its light, palette and grain only
@@ -4064,38 +4472,56 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
             f"that belong in this time and place. ")
     tail = ("The photograph fills the entire 16:9 frame edge to edge. Not a painting, not CGI, not an illustration; any "
             "writing is too small or soft to read; no frame or border.")
-    who = (f" The person is {role}{(' — ' + look) if look else ''}: anonymous, not a real identifiable person." if role
-           else " Any person is anonymous, not a real identifiable person.")
-    subject = (f"A photograph of {role}{(' — ' + look) if look else ''}, the main subject of the frame (portrait or at "
-               f"work), for the line: {row['text']}" if about_him else (row.get("visualIntent") or row["text"]))
     view = "Seen at eye level, as a person standing there would see it. "
-    tries = [f"{look_}{subject.rstrip('.')}.{who} {view}{real}{tail}",
-             # second try, when the first is refused: the same look and realism, the subject through its objects
-             f"{look_}"
-             + (f"{role}{(' — ' + look) if look else ''}, alone in a dim stone corridor or archive aisle, lost in thought, "
-                f"seen from the side; anonymous, not a real identifiable person. " if about_him else
-                f"{(row.get('visualIntent') or row['text']).rstrip('.')}, shown through its objects and its place: worn "
-                f"bindings, seals, cords, stone, candlelight and shadow. ")
-             + f"{view}{real}{tail}"]
+    him = f"{role}{(' — ' + look) if look else ''}"
+    intent = (row.get("visualIntent") or row["text"]).rstrip(".")
+    if mode == "him":
+        tries_ = [f"{look_}A photograph of {him}, the main subject of the frame (portrait or at work), for the line: "
+                  f"{row['text'].rstrip('.')}. The person is {him}: anonymous, not a real identifiable person. {view}{real}{tail}",
+                  # second try, when the first is refused: the same look and realism, the man seen from the side
+                  f"{look_}{him}, alone in a dim stone corridor or archive aisle, lost in thought, seen from the side; "
+                  f"anonymous, not a real identifiable person. {view}{real}{tail}"]
+    elif mode == "place":
+        tries_ = [f"{look_}What {role or 'he'} reads or where he works, for the line: {row['text'].rstrip('.')} - the room "
+                  f"and the things in it only, with NO person in view: an empty chair, a desk, worn bindings, candlelight "
+                  f"and shadow. {view}{real}{tail}",
+                  f"{look_}An empty {dossier.get('setting') or 'archive'} reading room or stone corridor, no person in view, "
+                  f"quiet and dim. {view}{real}{tail}"]
+    elif _writing(row):
+        tries_ = [f"{look_}{intent}, shown so that no writing can be read: the book or document closed, seen edge-on or "
+                  f"turned away, deep in shadow or soft focus; worn bindings, seals, cords. Any person is anonymous, not "
+                  f"a real identifiable person. {view}{real}{tail}",
+                  f"{look_}The place where it is kept: shelves of bound volumes seen from the side, a reading desk, "
+                  f"candlelight and shadow; no legible writing anywhere. {view}{real}{tail}"]
+    else:
+        tries_ = [f"{look_}{intent}. Any person is anonymous, not a real identifiable person. {view}{real}{tail}",
+                  # second try, when the first is refused: the same look and realism, the subject through its objects
+                  f"{look_}{intent}, shown through its objects and its place: worn bindings, seals, cords, stone, "
+                  f"candlelight and shadow. {view}{real}{tail}"]
     home = job / "mrtruth" / "pictures" / ("s" + hashlib.sha1(row["text"].encode()).hexdigest()[:14])
     home.mkdir(parents=True, exist_ok=True)
-    for k, prompt in enumerate(tries):
+    nobody = mode == "place"
+    for k, prompt in enumerate(tries_[:max(1, tries)]):
+        if _draw_room() < 1:
+            engine.log(f"    shot {i}: no AI picture — the film's drawings are used up ({BUDGET.get('draw_cap')})")
+            return None
         dest = home / f"ai_{hashlib.sha1(prompt.encode()).hexdigest()[:8]}.jpg"
         verdict = home / (dest.stem + ".check.json")
         if dest.exists():
             try:
-                engine.ai_image_slot(f"mrtruth shot {i}")     # one drawn earlier still counts against this video's cap
+                engine.ai_image_slot(f"mrtruth shot {i}")     # one drawn earlier still counts against the drawings
             except Exception:                                        # noqa: BLE001 - AIImageCapReached
                 return None
+            _spend(1)
         else:
             try:
-                _draw_ai(engine, prompt, dest, label=f"mrtruth shot {i}")
+                _spend(_draw_ai(engine, prompt, dest, label=f"mrtruth shot {i}"))
             except Exception as e:                                   # noqa: BLE001 - next step: an earlier photo
                 engine.log(f"    shot {i}: no AI picture — {str(e)[:80]}")
                 return None
         got = _load(verdict)
-        if not got or got.get("v") != CHECK_V:       # checked by the old 0-10 check: checked again
-            ok, why, v = _ai_ok(engine, dest, row, dossier, before, after, loose=bool(k))
+        if not got or got.get("v") != CHECK_V or bool(got.get("nobody")) != nobody:   # an older check: checked again
+            ok, why, v = _ai_ok(engine, dest, row, dossier, before, after, loose=bool(k), nobody=nobody)
             if not ok and v.get("bad") == ["frame"]:  # only a drawn border: crop it off, ask once more (a Gemini check
                 crop = dest.with_name(dest.stem + "_crop.jpg")   # costs far less than a new picture)
                 try:
@@ -4104,7 +4530,7 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
                         w, h = im.size
                         im.convert("RGB").crop((int(w * .1), int(h * .1), int(w * .9), int(h * .9))) \
                             .resize((w, h), Image.LANCZOS).save(crop, quality=92)
-                    ok, why2, v2 = _ai_ok(engine, crop, row, dossier, before, after, loose=bool(k))
+                    ok, why2, v2 = _ai_ok(engine, crop, row, dossier, before, after, loose=bool(k), nobody=nobody)
                     if ok:
                         crop.replace(dest)
                         why, v = "border cropped — " + why2, v2
@@ -4112,22 +4538,25 @@ def _ai_picture(engine, job: Path, row: dict, i: int, dossier: dict = None, role
                         crop.unlink(missing_ok=True)
                 except Exception:                                    # noqa: BLE001 - the refusal stands
                     pass
-            got = {"ok": ok, "why": why, "v": CHECK_V, "check": v}
+            got = {"ok": ok, "why": why, "v": CHECK_V, "check": v, "nobody": nobody, "mode": mode}
             if not why.startswith("not checked"):
                 _dump(verdict, got)
         if got["ok"]:
             break
         _vcount("ai_refused")
-        engine.log(f"    shot {i}: AI picture refused ({got['why'][:90]}){' — drawing it again' if not k else ''}"
-                   f" (its drawing counts against the AI cap)")
+        with _BUDGET_LOCK:
+            BUDGET["refused"] = BUDGET.get("refused", 0) + 1
+        engine.log(f"    shot {i}: AI picture refused ({got['why'][:90]}){' — drawing it again' if not k and tries > 1 else ''}"
+                   f" (it counts against the film's drawings, not its stand-ins on screen)")
     else:
         return None
-    t = int((got.get("check") or {}).get("tier", KIND))
+    ck = got.get("check") or {}
+    t = int(ck.get("tier", KIND))
     return {"photo": str(dest), "title": "AI picture", "url": "", "source": "ai", "license": "generated",
             "tier": t, "shows": TIERS[t], "clean": True, "bad": [], "score": _SCORE_OF[t],
             "depiction": _DEPICTION[t], "flags": [], "reason": got.get("why", ""), "looked": "asked",
-            "anchor": tuple((got.get("check") or {}).get("anchor") or (0.5, 0.5)), "ai": True, "studio": False,
-            "subject": "", "provider": "ai"}
+            "anchor": tuple(ck.get("anchor") or (0.5, 0.5)), "ai": True, "studio": False,
+            "subject": "", "provider": "ai", "ai_mode": mode, "person": bool(ck.get("person", mode == "him"))}
 
 
 def _record_names(pick: dict, label: str) -> bool:
@@ -4150,10 +4579,23 @@ def _fit_devices(rows: list, only: set = None) -> None:
     """What the pictures allow: no words that name a picture on an AI frame, a weak one or one found for another
     anchor (T-8/T-10), a name only where the archive record carries it, no type on ground too bright or busy for it
     (T-7/T-26), the companions a multi-picture template needs. A refused template falls down its chain (through
-    the same checks as any placement) or the shot stays a clean photograph."""
+    the same checks as any placement) or the shot stays a clean photograph.
+    Companions are showings too (owner 2026-10-10: a photo - the same bytes or a near copy - at most twice, 90 s apart):
+    a template's companions are photos on no other shot and no other template; the gallery previews photos shown once,
+    later, REUSE_GAP_S + REUSE_MARGIN_S on (was 60 s) - a second showing each, inside the film's repeat cap."""
+    led = _Ledger()                                  # what is on screen besides the companions about to be chosen
+    for x in rows:
+        if x.get("pick") and not _covered(x):
+            led.add(x["pick"]["photo"], x["startMs"], ("main", id(x)))
+        if only is not None and id(x) not in only:
+            for n, c in enumerate(x.get("companions") or []):
+                led.add(c["photo"], x["startMs"], ("comp", id(x), n))
     for i, r in enumerate(rows):
         dev, pick = r.get("device"), r.get("pick")
-        if not dev or (only is not None and id(r) not in only):
+        if only is not None and id(r) not in only:
+            continue
+        r.pop("companions", None)                    # chosen again below (a template that fell back needs none)
+        if not dev:
             continue
         tid = dev["id"]
         if pick is None and LIBRARY[tid][1] > 0:
@@ -4203,12 +4645,15 @@ def _fit_devices(rows: list, only: set = None) -> None:
                        labelY=round(min(0.8, max(0.15, ay - 0.25)), 3))
         need = LIBRARY[tid][1] - 1
         if tid == "gallery-strip":
-            ahead = [x for k, x in enumerate(rows) if k > i and x.get("pick") and not x["pick"].get("ai")
-                     and x["startMs"] - r["endMs"] >= 60000 and _clean(x["pick"]) and _tier(x["pick"]) >= KIND]
-            pool = []
-            for x in ahead:
-                if _distinct(x["pick"]["photo"], [p["photo"] for p in pool]):
-                    pool.append(x["pick"])
+            pool, gs = [], set()
+            for x in rows[i + 1:]:
+                p = x.get("pick")
+                if (not p or p.get("ai") or _covered(x) or not (_clean(p) and _tier(p) >= KIND)
+                        or x["startMs"] - r["startMs"] < (REUSE_GAP_S + REUSE_MARGIN_S) * 1000
+                        or led.n(p["photo"]) != 1 or led.group(p["photo"]) in gs):
+                    continue
+                gs.add(led.group(p["photo"]))
+                pool.append(p)
                 if len(pool) == 4:
                     break
             if len(pool) < 4:
@@ -4217,19 +4662,22 @@ def _fit_devices(rows: list, only: set = None) -> None:
                 continue
             r["companions"] = list(reversed(pool))       # the camera opens on card 4 and travels to card 1 (T-17)
         elif need > 0:
-            spare = []
+            spare, gs = [], {led.group(pick["photo"])}
             pool = list(r.get("spare") or [])
             if not (r.get("stand_in") or _names_thing(r)):
                 for k in (i - 1, i + 1, i - 2, i + 2, i - 3, i + 3, i - 4, i + 4, i - 5, i + 5, i - 6, i + 6):
                     if 0 <= k < len(rows):
                         pool += list(rows[k].get("spare") or [])
-            for x in pool:
-                if len(spare) < need and _distinct(x["photo"], [pick["photo"]] + [s["photo"] for s in spare]):
+            for x in pool:                           # never a photo on screen anywhere, never one twice
+                if len(spare) < need and not x.get("ai") and led.n(x["photo"]) == 0 and led.group(x["photo"]) not in gs:
                     spare.append(x)
+                    gs.add(led.group(x["photo"]))
             if len(spare) < need:
                 _fall_back(rows, i, tid, f"{len(spare)} of {need} companion pictures")
                 continue
             r["companions"] = spare[:need]
+        for n, c in enumerate(r.get("companions") or []):
+            led.add(c["photo"], r["startMs"], ("comp", id(r), n))
 
 
 # ── 5b. the typed caption (renderer TypedCaption.tsx), owner ruling 2026-10-08 ─────────────────────────────────
@@ -4872,7 +5320,8 @@ def _split_long(engine, rows: list, cues: list, heard: list, starts: list) -> li
         pool = _part_pool(rows, k, a, b)
         pick, step = _provisional(rows, k, a, pool)
         src = max(rows, key=lambda y: (min(b, y["_said"][1]) - max(a, y["_said"][0]) if y.get("_said") else -1, -abs(y["startMs"] - a)))
-        part = {key: src[key] for key in ("visualIntent", "queries", "entities", "about", "sceneType", "mood", "era", "stand_in")
+        part = {key: src[key] for key in ("visualIntent", "queries", "entities", "about", "sceneType", "mood", "era", "stand_in",
+                                          "stand_look")
                 if key in src}
         part.update(startMs=int(a), endMs=int(b), device=None, pick=pick, step=step, spare=[], pool=pool, split=True,
                     needs_picture=True, _said=(int(a), int(b)), _seated=True,
@@ -4931,6 +5380,301 @@ def cap_shots(engine, job: Path, rows: list, cues: list) -> dict:
     if best > SHORT_RUN_MAX:
         engine.log(f"  ⚠ {best} quick shots in a row: overlays on every pair there, nothing to join")
     return {"joins": joins, "splits": splits}
+
+
+# ── 5c'. pictures decided after the last sync, and the reuse guard on the final cut (owner 2026-10-10) ────────────
+def _final_ledger(rows: list, skip=()) -> "_Ledger":
+    """The film as it will be drawn: every shot's picture and every template companion at its shot's final start (a
+    page that covers the frame shows none of its own); `skip`: showings left out (a picture about to be replaced)."""
+    led = _Ledger()
+    for x in rows:
+        if _covered(x):
+            continue
+        if x.get("pick") and ("main", id(x)) not in skip:
+            led.add(x["pick"]["photo"], x["startMs"], ("main", id(x)))
+        for n, c in enumerate(x.get("companions") or []):
+            if ("comp", id(x), n) not in skip:
+                led.add(c["photo"], x["startMs"], ("comp", id(x), n))
+    return led
+
+
+def _ai_times(rows: list) -> list:
+    return [x["startMs"] for x in rows if (x.get("pick") or {}).get("ai")]
+
+
+def _comeback(rows: list, k: int, led, first=()) -> list:
+    """Photos that may come back on shot k on the final cut, best first, one per photo: on screen once, REUSE_GAP_S
+    from that showing, not AI, kind or better; `first` (the shot's own alternates) before the other shots' pictures,
+    then the longest gap."""
+    r, t, best = rows[k], rows[k]["startMs"], {}
+    for n, c in enumerate(list(first) + [x.get("pick") for x in rows if x is not r]):
+        if not c or c.get("ai") or not _usable(r, c, KIND) or led.n(c["photo"]) != 1:
+            continue
+        g = led.gap(c["photo"], t)
+        if g < REUSE_GAP_S * 1000:
+            continue
+        key, gid = (0 if n < len(first) else 1, -g, c["photo"]), led.group(c["photo"])
+        if gid not in best or key < best[gid][0]:
+            best[gid] = (key, c)
+    return [c for _, c in sorted(best.values(), key=lambda kc: kc[0])]
+
+
+def _picture_for(engine, job: Path, rows: list, k: int, dossier: dict, led, fresh=(), alts=(),
+                 steps=("fresh", "ai", "repeat", "weak", "over")) -> tuple:
+    """A picture for shot k decided after the last sync - a split part, a repeat the guard replaces, a shot left
+    without one - trying `steps` in order: an unused runner-up checked for its line (fresh) → a stand-in within the
+    film's budget and its AI_WINDOW_MAX a minute (ai) → a photo that may come back within the repeat cap (repeat) → an
+    unused weaker picture of a neighbour (weak) → a photo that may come back over the cap (over). (pick, step) or
+    (None, "")."""
+    r, t = rows[k], rows[k]["startMs"]
+    for step in steps:
+        if step == "fresh":
+            for c in fresh:
+                if c and not c.get("ai") and _usable(r, c, KIND) and led.n(c["photo"]) == 0:
+                    return dict(c), "fresh"
+        elif step in ("ai", "ai-any"):            # ai-any: the minute rule waived (the planner would stop otherwise)
+            acc = _ai_times([x for x in rows if x is not r])
+            waived = not _window_ok(acc, t)
+            if len(acc) < BUDGET.get("cap", 0) and _draw_room() >= 1 and (step == "ai-any" or not waived):
+                mode = _ai_mode(rows, k, bool(r.get("stand_in")))
+                b_, a_ = rows[k - 1]["text"] if k else "", rows[k + 1]["text"] if k + 1 < len(rows) else ""
+                pick = _ai_picture(engine, job, r, k, dossier, r.get("stand_in", "") if mode != "thing" else "",
+                                   r.get("stand_look", "") if mode == "him" else "", b_, a_, mode=mode,
+                                   tries=int(min(2, _draw_room())))
+                if pick:
+                    return (dict(pick, minute_waived=True) if waived else pick), "ai"
+        elif step in ("repeat", "over"):
+            back = _comeback(rows, k, led, alts)
+            if back and (step == "over" or led.repeats() < BUDGET.get("reuse_cap", 0)):
+                return dict(back[0], reused=True, over_cap=step == "over"), "reused"
+        elif step == "weak":
+            for j in (k - 1, k + 1, k - 2, k + 2):
+                for c in (rows[j].get("spare") or []) if 0 <= j < len(rows) else []:
+                    if (not c.get("ai") and _clean(c) and _tier(c) >= GENERIC and _studio_ok(r, c)
+                            and led.n(c["photo"]) == 0):
+                        return dict(c, contextual=True), "contextual"
+    return None, ""
+
+
+def fill_parts(engine, job: Path, rows: list, dossier: dict) -> dict:
+    """The new parts cap_shots cut off (needs_picture) get their own picture within the film's budget (owner
+    2026-10-10), first that exists: an unused runner-up of the line heard there (its pool) → a stand-in → a repeat
+    within the cap → an unused weaker picture of a neighbour → a repeat over the cap (logged). None of these: the
+    planner stops (MRTRUTH_ALLOW_DEGRADED=1 keeps the provisional picture, logged). Returns the steps taken."""
+    parts = [x for x in rows if x.get("needs_picture")]
+    out = {}
+    for x in parts:
+        k = rows.index(x)
+        led = _final_ledger(rows, skip={("main", id(x))})
+        pick, how = _picture_for(engine, job, rows, k, dossier, led, fresh=x.get("pool") or [],
+                                 steps=("fresh", "ai", "repeat", "weak", "over", "ai-any"))
+        if pick is None:
+            _stop(engine, f"Mr Truth stopped: the part cut off at {x['startMs'] // 60000}:{x['startMs'] // 1000 % 60:02d} "
+                          f"({(x['endMs'] - x['startMs']) / 1000:.1f}s) has no picture of its own - no unused runner-up, no "
+                          f"stand-in left, no photo can come back {REUSE_GAP_S:.0f} s from its other showing")
+            how = "kept"
+        else:
+            x["pick"], x["step"] = pick, {"fresh": "split-spare", "ai": "ai", "reused": "split-reused",
+                                          "contextual": "split-contextual"}[how]
+        x.pop("needs_picture", None)
+        out[how] = out.get(how, 0) + 1
+    if parts:
+        engine.log(f"  pictures for the {len(parts)} part(s) cut on the narration: "
+                   + ", ".join(f"{n} {dict(fresh='unused runner-up', ai='stand-in', reused='repeat', contextual='weaker unused', kept='⚠ the provisional one').get(k, k)}"
+                               for k, n in out.items()))
+    return out
+
+
+def _swap(rows: list, k: int, pick: dict, step: str) -> bool:
+    """Shot k shows `pick` instead. On a template shot the template's checks run again for it (_fit_devices) and the
+    swap is undone when the template would change or lose a companion - the words on screen never move."""
+    x = rows[k]
+    if not x.get("device"):
+        x["pick"], x["step"] = pick, step
+        x.pop("type_shade", None)
+        return True
+    keep = {key: copy.deepcopy(x.get(key)) for key in ("pick", "step", "device", "companions", "type_shade")}
+    n = len(DEV_DROPS)
+    x["pick"], x["step"] = pick, step
+    x.pop("type_shade", None)
+    _fit_devices(rows, only={id(x)})
+    if (x.get("device") or {}).get("id") != keep["device"]["id"] or \
+            len(x.get("companions") or []) != len(keep["companions"] or []):
+        for key, v in keep.items():
+            if v is None:
+                x.pop(key, None)
+            else:
+                x[key] = v
+        del DEV_DROPS[n:]
+        return False
+    return True
+
+
+def _join_plain(rows: list, k: int) -> bool:
+    """Shot k's time and words go to a plain shot beside it (the one before first), never past SCENE_MAX_S; that
+    shot's picture stays. No words on screen move."""
+    x = rows[k]
+    if not _bare(x):
+        return False
+    for j in (k - 1, k + 1):
+        if not 0 <= j < len(rows) or not _bare(rows[j]) or not rows[j].get("pick") or _covered(rows[j]):
+            continue
+        y = rows[j]
+        a, b = (y, x) if j < k else (x, y)
+        if b["endMs"] - a["startMs"] > SCENE_MAX_S * 1000:
+            continue
+        said = (a.get("_said") or (a["startMs"], a["endMs"]))[0], (b.get("_said") or (b["startMs"], b["endMs"]))[1]
+        y.update(startMs=a["startMs"], endMs=b["endMs"], text=f"{a.get('text') or ''} {b.get('text') or ''}".strip(),
+                 _said=said, entities=list(dict.fromkeys(list(y.get("entities") or []) + list(x.get("entities") or []))))
+        del rows[k]
+        return True
+    return False
+
+
+def _reuse_problem(rows: list, led):
+    """The first breach of the reuse rule on the final cut: (showing key, why) - a photo on more than
+    REUSE_MAX_SHOWINGS shots, or two showings closer than REUSE_GAP_S (shots side by side included). The showing
+    fixed is a companion, else a repeat, else a split part, else the later one."""
+    rank = {}
+    for x in rows:
+        st = x.get("step") or ""
+        rank[("main", id(x))] = 1 if st in ("reused", "split-reused") or (x.get("pick") or {}).get("reused") else \
+            2 if x.get("split") else 3
+    for at in led.at:
+        at = sorted(at)
+        pairs = [(a, b) for a, b in zip(at, at[1:]) if b[0] - a[0] < REUSE_GAP_S * 1000]
+        if len(at) > REUSE_MAX_SHOWINGS:
+            pairs.append((at[0], at[-1]))
+        for a, b in pairs:
+            pick = min((a, b), key=lambda s: (0 if s[1][0] == "comp" else rank.get(s[1], 3), -s[0]))
+            why = (f"on {len(at)} shots" if len(at) > REUSE_MAX_SHOWINGS else f"back after {(b[0] - a[0]) / 1000:.0f}s")
+            return pick[1], why
+    return None, ""
+
+
+def _reuse_guard(engine, job: Path, rows: list, dossier: dict) -> dict:
+    """The reuse rule on the FINAL cut, after the last sync and the split parts (owner 2026-10-10: a photo - the same
+    bytes or a near copy, a template's companion too - at most REUSE_MAX_SHOWINGS times, never on shots side by side,
+    REUSE_GAP_S apart; at most REUSE_PER_MIN repeats a minute). Each breach is repaired, first that works:
+      a repeated shot   an unused runner-up of its line → its stored alternates (reuse_alts) or another photo that may
+                        come back within the cap → its time and words joined to a plain shot beside it → a stand-in
+                        within the budget → an unused weaker picture → a photo that may come back over the cap (logged);
+                        on a template shot only a picture the template's checks pass;
+      a companion       an unused runner-up of its template's neighbourhood, else the template falls back down its chain;
+      a shot without a picture (its covering page went in a sync): the same as a split part.
+    Then the cap: repeats over it become unused runner-ups or stand-ins where any are left (else logged). sync is never
+    run again - nothing here moves a word on screen. Nothing left to try: the planner stops with the reason. Writes
+    mrtruth/reuse.json and the log line: repeats against the cap with the shortest gap, AI on screen against its cap
+    and the drawings against their budget."""
+    fixes = {}
+    for x in [x for x in rows if not x.get("pick") and not _covered(x)]:
+        k = rows.index(x)
+        pick, how = _picture_for(engine, job, rows, k, dossier, _final_ledger(rows), fresh=x.get("spare") or [],
+                                 steps=("fresh", "ai", "repeat", "weak", "over", "ai-any"))
+        if pick is None:
+            _stop(engine, f"Mr Truth stopped: the shot at {x['startMs'] / 1000:.1f}s has no picture and none can be found")
+        else:
+            x["pick"], x["step"] = pick, how
+            fixes["filled"] = fixes.get("filled", 0) + 1
+    for _ in range(4 * len(rows) + 10):
+        led = _final_ledger(rows)
+        key, why = _reuse_problem(rows, led)
+        if key is None:
+            break
+        x = next(y for y in rows if id(y) == key[1])
+        k, led2 = rows.index(x), _final_ledger(rows, skip={key})
+        t = f"{x['startMs'] // 60000}:{x['startMs'] // 1000 % 60:02d}"
+        if key[0] == "comp":
+            n, tid = key[2], (x.get("device") or {}).get("id")
+            if tid == "gallery-strip":
+                pool = [y["pick"] for y in rows[k + 1:] if y.get("pick") and y["startMs"] - x["startMs"] >= REUSE_GAP_S * 1000]
+                pool = [c for c in pool if led2.n(c["photo"]) == 1 and not c.get("ai") and _clean(c) and _tier(c) >= KIND]
+            else:
+                pool = [c for j in (k, k - 1, k + 1, k - 2, k + 2, k - 3, k + 3) if 0 <= j < len(rows)
+                        for c in rows[j].get("spare") or []]
+                pool = [c for c in pool if led2.n(c["photo"]) == 0 and not c.get("ai")]
+            mine = {led2.group(c["photo"]) for c in [x.get("pick")] + list(x.get("companions") or []) if c} - \
+                {led2.group(x["companions"][n]["photo"])}
+            new = next((c for c in pool if led2.group(c["photo"]) not in mine), None)
+            if new is not None:
+                x["companions"][n] = new
+                fixes["companion swapped"] = fixes.get("companion swapped", 0) + 1
+            else:
+                _fall_back(rows, k, tid, f"a companion is {why} and no unused picture is left")
+                x.pop("companions", None)
+                fixes["template fell back"] = fixes.get("template fell back", 0) + 1
+                engine.log(f"  ⚠ reuse guard: {tid} at {t} falls back - a companion was {why}")
+            continue
+        done = ""
+        fresh = list(x.get("spare") or []) + list(x.get("pool") or [])
+        for steps, label in ((("fresh",), "swapped for an unused runner-up"), (("repeat",), "swapped for another repeat"),
+                             (None, "joined to the shot beside it"), (("ai", "weak", "over", "ai-any"), "")):
+            if steps is None:
+                if _join_plain(rows, k):
+                    done = label
+                    break
+                continue
+            pick, how = _picture_for(engine, job, rows, k, dossier, led2, fresh=fresh, alts=x.get("reuse_alts") or [],
+                                     steps=steps)
+            if pick is not None and _swap(rows, k, pick, "ai" if how == "ai" else
+                                          "reused" if how == "reused" else x.get("step") or how):
+                done = label or {"ai": "a stand-in drawn", "contextual": "swapped for a weaker unused picture",
+                                 "reused": "swapped for a repeat over the cap"}[how]
+                break
+        if not done:
+            _stop(engine, f"Mr Truth stopped: the picture at {t} is {why} on the final cut and nothing can replace it "
+                          f"(no unused runner-up, no repeat that keeps {REUSE_GAP_S:.0f} s, no plain shot to join, no stand-in left)")
+            break
+        fixes[done] = fixes.get(done, 0) + 1
+        engine.log(f"    reuse guard: the picture at {t} was {why}: {done}")
+    # the cap: repeats over it become unused runner-ups or stand-ins where any are left
+    led = _final_ledger(rows)
+    cap = BUDGET.get("reuse_cap", 0)
+    for x in sorted((y for y in rows if (y.get("pick") or {}).get("reused") and not _covered(y)),
+                    key=lambda y: -y["startMs"]):
+        if led.repeats() <= cap:
+            break
+        k = rows.index(x)
+        pick, how = _picture_for(engine, job, rows, k, dossier, _final_ledger(rows, skip={("main", id(x))}),
+                                 fresh=list(x.get("spare") or []) + list(x.get("pool") or []), steps=("fresh", "ai"))
+        if pick is not None and _swap(rows, k, pick, "ai" if how == "ai" else "contextual"):
+            fixes["over the cap, replaced"] = fixes.get("over the cap, replaced", 0) + 1
+            led = _final_ledger(rows)
+    if led.repeats() > cap:
+        engine.log(f"  ⚠ reuse guard: {led.repeats()} repeats, {led.repeats() - cap} over the film's cap of {cap} - no unused "
+                   f"runner-up or stand-in was left to replace them (each still keeps {REUSE_GAP_S:.0f} s)")
+    return _reuse_report(engine, job, rows, fixes)
+
+
+def _reuse_report(engine, job: Path, rows: list, fixes: dict = None) -> dict:
+    """The film's repeats and stand-ins on the final cut, in the log and in mrtruth/reuse.json (the pod summary)."""
+    led = _final_ledger(rows)
+    gaps = sorted((b - a) / 1000 for at in led.at for a, b in zip(sorted(m for m, _ in at), sorted(m for m, _ in at)[1:]))
+    same_next = sum(1 for a, b in zip(rows, rows[1:]) if a.get("pick") and b.get("pick") and not _covered(a)
+                    and not _covered(b) and led.group(a["pick"]["photo"]) == led.group(b["pick"]["photo"]))
+    rep = [bool((x.get("pick") or {}).get("reused")) for x in rows]
+    with _BUDGET_LOCK:
+        b = dict(BUDGET)
+    out = {"repeats": led.repeats(), "reuse_cap": b.get("reuse_cap", 0),
+           "photos_shown_twice": sum(1 for at in led.at if len(at) == 2),
+           "photos_on_3plus": sum(1 for at in led.at if len(at) > 2),
+           "companion_showings": sum(1 for at in led.at for _, key in at if key[0] == "comp"),
+           "shortest_gap_s": round(gaps[0], 1) if gaps else None, "under_gap": sum(1 for g in gaps if g < REUSE_GAP_S),
+           "same_photo_next_shot": same_next, "repeat_after_repeat": sum(1 for a, c in zip(rep, rep[1:]) if a and c),
+           "over_cap_logged": sum(1 for x in rows if (x.get("pick") or {}).get("over_cap")),
+           "ai_on_screen": len(_ai_times(rows)), "ai_cap": b.get("cap", 0), "drawings": b.get("drawings", 0),
+           "drawn_weighted": b.get("drawn", 0), "draw_cap": b.get("draw_cap", 0), "ai_refused": b.get("refused", 0),
+           "guard": dict(fixes or {}), "shots": len(rows)}
+    _dump(job / "mrtruth" / "reuse.json", out)
+    engine.log(f"  reuse on the final cut: {out['repeats']} repeats of {out['reuse_cap']} allowed ({out['photos_shown_twice']} "
+               f"photos shown twice, {out['companion_showings']} as a companion"
+               + (f", ⚠ {out['over_cap_logged']} over the cap" if out["over_cap_logged"] else "") + "), shortest gap "
+               + (f"{out['shortest_gap_s']:.0f}s" if gaps else "-") + f", {out['under_gap']} under {REUSE_GAP_S:.0f}s, "
+               f"{out['photos_on_3plus']} on 3+ shots, {same_next} on shots side by side; AI on screen {out['ai_on_screen']} "
+               f"of {out['ai_cap']} from {out['drawings']} drawings ({out['drawn_weighted']:.0f} of the {out['draw_cap']} "
+               f"budget, {out['ai_refused']} refused)"
+               + ("; guard: " + ", ".join(f"{n} {k}" for k, n in fixes.items()) if fixes else ""))
+    return out
 
 
 # ── 5d. no long stretch without words on screen (owner 2026-10-09: the last 4 minutes of a long film had none) ───
@@ -5472,34 +6216,11 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     return final
 
 
-def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
-    """Everything before the drawing: research → beats → templates → pictures → sync → scenes. Writes plan.json,
-    shots.json and credits.json, and returns the scenes."""
-    work = job / "mrtruth"
-    preflight(engine)
-    script = (job / "script.txt").read_text(encoding="utf-8")
-    dossier = research(engine, script, job, force)
-    took("research")
-    dossier = dict(dossier, visualBrief=visual_brief(engine, job, script, dossier, force))   # every later prompt reads it
-    took("visual brief")
-    rows = beats(engine, job, srt, script, dossier, force)
-    took("shots")
-    for r in rows:
-        r["device"] = None
-    title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
-    opps = opportunities(engine, job, script, force)
-    build = assign(engine, rows, opps, script, _cues(engine, srt), dossier, title)
-    took("overlays")
-    fill_overlays(engine, job, rows, script, dossier, build, force)
-    took("more overlays")
-    typed_captions(engine, job, rows, script, force)
-    took("typed captions")
-    cap0 = getattr(engine, "AI_IMAGE_CAP", None)
-    try:
-        pictures(engine, job, rows, dossier, force)
-    finally:                                         # the per-minute AI cap belongs to this film only
-        if cap0 is not None:
-            engine.AI_IMAGE_CAP = cap0
+def _pictures_and_cut(engine, job: Path, srt: Path, rows: list, dossier: dict, build, force: bool, took) -> None:
+    """pictures → the templates' pictures (_fit_devices) → sync and the gap fills → cap_shots → the split parts'
+    pictures → the reuse guard on the final cut: every step that may still choose a picture, all under the film's AI
+    budget (plan_film gives the engine its AI_IMAGE_CAP back only after the last of them; C2)."""
+    pictures(engine, job, rows, dossier, force)
     took("pictures")
     DEV_DROPS.clear()
     PEOPLE_NAMES.clear()
@@ -5523,7 +6244,39 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
         _fit_devices(rows, only=added)
         sync_overlays(engine, job, rows, _cues(engine, srt))
     cap_shots(engine, job, rows, _cues(engine, srt))   # quick runs calmed, nothing over 8 s (owner 2026-10-10)
+    fill_parts(engine, job, rows, dossier)           # the parts cut on the narration get their own pictures
+    _reuse_guard(engine, job, rows, dossier)         # the reuse rule on the final cut; sync never runs again
     took("sync and gaps")
+
+
+def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
+    """Everything before the drawing: research → beats → templates → pictures → sync → scenes. Writes plan.json,
+    shots.json and credits.json, and returns the scenes."""
+    work = job / "mrtruth"
+    preflight(engine)
+    script = (job / "script.txt").read_text(encoding="utf-8")
+    dossier = research(engine, script, job, force)
+    took("research")
+    dossier = dict(dossier, visualBrief=visual_brief(engine, job, script, dossier, force))   # every later prompt reads it
+    took("visual brief")
+    rows = beats(engine, job, srt, script, dossier, force)
+    took("shots")
+    for r in rows:
+        r["device"] = None
+    title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
+    opps = opportunities(engine, job, script, force)
+    build = assign(engine, rows, opps, script, _cues(engine, srt), dossier, title)
+    took("overlays")
+    fill_overlays(engine, job, rows, script, dossier, build, force)
+    took("more overlays")
+    typed_captions(engine, job, rows, script, force)
+    took("typed captions")
+    cap0 = getattr(engine, "AI_IMAGE_CAP", None)
+    try:                                             # the film's AI budget lasts until its last picture decision (C2)
+        _pictures_and_cut(engine, job, srt, rows, dossier, build, force, took)
+    finally:                                         # the per-minute AI cap belongs to this film only
+        if cap0 is not None:
+            engine.AI_IMAGE_CAP = cap0
     marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
     left = _gaps(rows)
     engine.log(f"  words on screen: {len(marks) - 2} overlays, longest stretch without "
@@ -5539,7 +6292,7 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     _dump(work / "shots.json", [{"text": r["text"], "photo": (r.get("pick") or {}).get("photo"), "step": r.get("step"),
                                  "ai": bool((r.get("pick") or {}).get("ai")), "provider": _provider(r.get("pick")),
                                  "tier": "" if not r.get("pick") or r["pick"].get("ai") else TIERS[_tier(r["pick"])],
-                                 "anchor_switched": r.get("step") in ("anchor", "neighbour", "reused")} for r in rows])
+                                 "anchor_switched": r.get("step") in ("anchor", "neighbour", "reused", "split-reused")} for r in rows])
     _credits(job, rows)                          # with the plan, so a finish from it needs nothing else
     return sc_list
 

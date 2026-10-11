@@ -73,3 +73,17 @@ PACING, OVERLAYS ON THEIR WORDS, NOTHING OVER 8 S (2026-10-10)
    a repeat the reuse rule allows, logged with "⚠ ... cut in two". A planned long hold (after 12:00) is the only shot
    past 8 s. The finish hands the plan's shot starts to the final encode's stall check (also in a prepared farm
    bundle's manifest.json as "cuts"), so a slow move on a dark photo or a planned hold is never re-muxed as a stall.
+
+REPEATS AND AI STAND-INS, COUNTED ON THE FINAL CUT (2026-10-10)
+   The pictures are chosen in three passes: each shot's own picture in film order; then the AI stand-ins, spread by
+   need across the film (the shots nothing else could fill first, then the densest open stretches, at most 6 in any
+   minute) and counted ON SCREEN - 4 a film minute (MRTRUTH_AI_PER_MIN), drawn within 2 drawings per picture shown
+   (MRTRUTH_AI_DRAWS_PER_SHOWN; a refused drawing uses the drawing budget, not the stand-ins); then for what is still
+   open a repeat within 3.5 a minute (MRTRUTH_REUSE_PER_MIN), a join to a plain shot beside it, a long hold, a weaker
+   unused picture - or the planner stops with the reason. A photo (the same bytes or a near copy, a template's
+   companion too) is shown at most twice, 90 s apart on the final cut. Lines whose picture is Latin writing are drawn
+   as the object closed or turned away; the stand-in is drawn only on his own lines (beside a person: his place, with
+   nobody in it). Log: "stand-ins: ...", "repeats: ...", then after the last sync "reuse on the final cut: ..." (also
+   mrtruth/reuse.json and the pod summary's "reuse"), with "reuse guard: ..." for each repair (another runner-up,
+   another repeat, a join; sync is never run again). MRTRUTH_AI_WINDOW_MAX (6) and MRTRUTH_AI_AT_ONCE (4: stand-ins
+   drawn and checked at the same time - the result is the same as one at a time) tune the spread.
