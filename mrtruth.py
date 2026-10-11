@@ -8938,7 +8938,10 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
                                   0.0)
             k = max(cands, key=lambda k: (round(over(k), 2), rows[k]["endMs"] - rows[k]["startMs"], -k))
             tried.add(id(rows[k]))
-            n += _split_plain(engine, job, rows, k, cues, dossier)
+            r = rows[k]                              # at a sentence start only (owner 2026-10-11, protect long
+            whole = not (r["startMs"] - rows[0]["startMs"] < PACE_OPEN_S * 1000    # sentences), but in the first
+                         or r["endMs"] - r["startMs"] > SCENE_MAX_S * 1000)          # 30 s or a shot over 8 s
+            n += _split_plain(engine, job, rows, k, cues, dossier, whole=whole)
         what = "joins of plain shots" if x["avg"] < lo else "cuts on the narration"
         if lo <= avg() <= hi:
             did(x, f"{n} {what}: {avg():.2f}s")
