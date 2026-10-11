@@ -70,6 +70,18 @@ PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
    own identity), only for a shot with no other usable picture, and only when the crop is still 800 px wide and
    1.0-2.5 in shape; at most MRTRUTH_CROP_MAX (25) a film. Counted in "picture checks (...)" (frame rechecks, their
    cost), verdicts.json, timing.json and pick_audit.json; shots.json marks a cropped picture.
+   The Flash-Lite fixes (2026-10-11, question set CHECK_V 2 - older answers stay in the store, unused): every answer
+   first names when and in what tradition the thing shown was made ("made"); with the era question comes a yes/no
+   "other_era" - another century's or tradition's version of the thing - that the code turns into "no" (the default
+   century rule, not yet ruled on by the owner: on an abstract line anything of the film's world fits as kind; change
+   WORLD_RULE and OTHER_ERA_Q in mrtruth.py together). The frame question walks all four edges; a print's margin
+   title is added text; every field up to studio is always given, and a refusal that leaves out "shows" counts as a
+   refusal for its reason. Free pixel tests run before any question: uniform bands along the edges (bars, a mount,
+   a margin) or a flat line splitting the picture (strips stacked, side by side) refuse it as framed without asking
+   - the frame crop then cuts it to the box inside the bands or to its largest part; an over-saturated HDR look is
+   refused as glossy on a shot whose time matters, a merely glossy one ranked below a plain one. Logged in
+   "picture checks (...)" ("framed and glossy by the pixel test"). For Flash-Lite at LOW:
+   MRTRUTH_JUDGE_MODEL=gemini-3.5-flash-lite MRTRUTH_JUDGE_MEDIA=LOW (the default stays gemini-3.8-flash, MEDIUM).
 
 PACING, OVERLAYS ON THEIR WORDS, NOTHING OVER 8 S (2026-10-10)
    Claude's shot list is kept as Claude wrote it (mrtruth/beats.json) and paced every time it is loaded: about 4.2 s a
