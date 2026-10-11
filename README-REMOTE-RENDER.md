@@ -72,9 +72,8 @@ PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
    cost), verdicts.json, timing.json and pick_audit.json; shots.json marks a cropped picture.
    The Flash-Lite fixes (2026-10-11, question set CHECK_V 2 - older answers stay in the store, unused): every answer
    first names when and in what tradition the thing shown was made ("made"); with the era question comes a yes/no
-   "other_era" - another century's or tradition's version of the thing - that the code turns into "no" (the default
-   century rule, not yet ruled on by the owner: on an abstract line anything of the film's world fits as kind; change
-   WORLD_RULE and OTHER_ERA_Q in mrtruth.py together). The frame question walks all four edges; a print's margin
+   "other_era" - another century's or tradition's version of the thing - that the code turns into "no" (replaced in
+   round 2, below). The frame question walks all four edges; a print's margin
    title is added text; every field up to studio is always given, and a refusal that leaves out "shows" counts as a
    refusal for its reason. Free pixel tests run before any question: uniform bands along the edges (bars, a mount,
    a margin) or a flat line splitting the picture (strips stacked, side by side) refuse it as framed without asking
@@ -82,6 +81,19 @@ PICTURE CHECKS AND SAVED VERDICTS (2026-10-10)
    refused as glossy on a shot whose time matters, a merely glossy one ranked below a plain one. Logged in
    "picture checks (...)" ("framed and glossy by the pixel test"). For Flash-Lite at LOW:
    MRTRUTH_JUDGE_MODEL=gemini-3.5-flash-lite MRTRUTH_JUDGE_MEDIA=LOW (the default stays gemini-3.8-flash, MEDIUM).
+   Round 2 (2026-10-11, CHECK_V 3): the century is decided in code. "made" names the thing's date first (at most 5
+   words); the code reads it as years and compares it with the line's OWN time - the beat's era, the dates in its
+   sentence, else the dossier notes of what it names - never the film's catch-all period, only on a SPECIFIC line (it
+   names something, is about a person, or gives a date), never against the very place or object the shot names (a
+   1794 view or a modern photo of the Vatican Library is the Vatican Library), and with a margin; an undated,
+   catch-all or abstract line is never refused on its date. The yes/no "other_era" is gone; a specific line is asked
+   instead whether the picture is the line's kind of thing ("same": a codex for a codex, not a library hall), and no
+   becomes "no". A 20th-century shot's era question asks only for what did not exist yet then. The default century
+   rule (the owner has not ruled yet) lives in WORLD_RULE and _date_off. The AI-picture checks stay on
+   MRTRUTH_AI_CHECK_MODEL (gemini-3.8-flash; MRTRUTH_AI_CHECK_THINKING, default "low" when it is not the judge's model)
+   when the candidates' checks move to Flash-Lite, and a defect answered in words ("a collage") counts. More free
+   frame tests: a thin border all round, a narrow gap between two scans, a transparency checkerboard. Ticket and tour
+   sellers and facsimile shops are refused before download, as stock is.
 
 PACING, OVERLAYS ON THEIR WORDS, NOTHING OVER 8 S (2026-10-10)
    Claude's shot list is kept as Claude wrote it (mrtruth/beats.json) and paced every time it is loaded: about 4.2 s a

@@ -120,14 +120,22 @@ JUDGE_MODE = (os.environ.get("MRTRUTH_JUDGE") or "yesno").strip().lower()
 # the questions' version: a change asks every picture again (it is in the stored key; older answers stay in the store,
 # unused). 2 (2026-10-11, the Flash-Lite fixes): "made" before "shows", the century/tradition rule (WORLD_RULE, and
 # the yes/no other_era with the era question), the four-edge frame list, a print's margin title is text, every field up
-# to studio always given, the AI check's fake border and garbled lettering first. The label check keeps its own
+# to studio always given, the AI check's fake border and garbled lettering first. 3 (2026-10-11, round 2): the century
+# decided in code from "made" (_date_off; other_era dropped), the yes/no "same" on a specific line (SAME_Q), a shorter
+# "made", the era question for a 20th-century time (ERA_Q_NEAR), no "made" on a drawing. The label check keeps its own
 # version (CARD_V): its question did not change
-CHECK_V = 2
+CHECK_V = 3
 CARD_V = 1
 JUDGE_PICS = int(os.environ.get("MRTRUTH_JUDGE_PICS", "6"))
 JUDGE_ENOUGH = int(os.environ.get("MRTRUTH_JUDGE_ENOUGH", "2"))
 JUDGE_MEDIA = (os.environ.get("MRTRUTH_JUDGE_MEDIA") or "MEDIUM").strip().upper()
 AI_CHECK_MEDIA = (os.environ.get("MRTRUTH_AI_CHECK_MEDIA") or "HIGH").strip().upper()
+# the AI-picture checks keep the stronger checker when the candidates' checks move to Flash-Lite (2026-10-11, round 2:
+# Flash-Lite at HIGH passed two burnt borders 3.8 caught, for ~$0.09 a film less): MRTRUTH_AI_CHECK_MODEL, with its own
+# thinking level (3.8 answers "minimal" with HTTP 400, so it does not follow a Flash-Lite judge's setting)
+AI_CHECK_MODEL = os.environ.get("MRTRUTH_AI_CHECK_MODEL") or "gemini-3.8-flash"
+AI_CHECK_THINKING = (os.environ.get("MRTRUTH_AI_CHECK_THINKING")
+                     or (JUDGE_THINKING if AI_CHECK_MODEL == JUDGE_MODEL else "low"))
 JUDGE_PX, AI_CHECK_PX = 640, 1280
 # the frame-only crop for REAL photos too (owner 2026-10-10, ~22:45): a photo refused for a frame alone (a ruler, colour
 # chart, border, mount or margin along an edge) is cut CROP_EDGE off each edge and asked once more - one picture a call,
@@ -918,20 +926,27 @@ def preflight(engine) -> None:
     bad, warn = [], []
     g = (os.environ.get("GEMINI_API_KEY") or "").strip()
     if g:
-        try:                                         # the checks' own settings: a model that refuses the thinking level
-            r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{JUDGE_MODEL}:generateContent",
-                              headers={"x-goog-api-key": g}, timeout=30,   # or the resolution stops the run here, not
-                              json={"contents": [{"parts": [{"text": "ok"}]}],   # every look going to Claude
-                                    "generationConfig": {"maxOutputTokens": 64,
-                                                         "thinkingConfig": {"thinkingLevel": JUDGE_THINKING},
-                                                         "mediaResolution": f"MEDIA_RESOLUTION_{JUDGE_MEDIA}"}})
-            if r.status_code == 400:
-                bad.append(f"Gemini (the picture checks) refused their settings (thinking {JUDGE_THINKING}, "
-                           f"{JUDGE_MEDIA}): {r.json().get('error', {}).get('message', r.text)[:140]}")
-            if r.status_code in (402, 403, 429):
-                bad.append(f"Gemini (the picture judge): {r.json().get('error', {}).get('message', r.text)[:140]}")
-        except Exception as e:                                       # noqa: BLE001
-            warn.append(f"Gemini could not be checked ({str(e)[:80]})")
+        # the checks' own settings: a model that refuses the thinking level or the resolution stops the run here, not
+        # every look going to Claude - the candidates' checks, and the AI-picture checks when they run elsewhere
+        # (AI_CHECK_MODEL, 2026-10-11)
+        asks = [("the picture checks", JUDGE_MODEL, JUDGE_THINKING, JUDGE_MEDIA)]
+        if (AI_CHECK_MODEL, AI_CHECK_THINKING, AI_CHECK_MEDIA) != asks[0][1:]:
+            asks.append(("the AI-picture checks", AI_CHECK_MODEL, AI_CHECK_THINKING, AI_CHECK_MEDIA))
+        for what, model, think, media in asks:
+            try:
+                r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                                  headers={"x-goog-api-key": g}, timeout=30,
+                                  json={"contents": [{"parts": [{"text": "ok"}]}],
+                                        "generationConfig": {"maxOutputTokens": 64,
+                                                             "thinkingConfig": {"thinkingLevel": think},
+                                                             "mediaResolution": f"MEDIA_RESOLUTION_{media}"}})
+                if r.status_code == 400:
+                    bad.append(f"Gemini ({what}, {model}) refused their settings (thinking {think}, {media}): "
+                               f"{r.json().get('error', {}).get('message', r.text)[:140]}")
+                if r.status_code in (402, 403, 429):
+                    bad.append(f"Gemini ({what}): {r.json().get('error', {}).get('message', r.text)[:140]}")
+            except Exception as e:                                   # noqa: BLE001
+                warn.append(f"Gemini could not be checked ({str(e)[:80]})")
     else:
         bad.append("Gemini: no GEMINI_API_KEY")
     b = (os.environ.get("BRAVE_SEARCH_API_KEY") or "").strip()
@@ -2015,6 +2030,19 @@ def _mostly_blank(path: Path) -> bool:
 #     frescoes, mosaics, icons and papyri in the set stay under both. Only for a shot whose time matters (_era).
 # A picture refused here is never sent to Gemini; one refused for a frame alone goes to the frame crop like a frame the
 # question found (_frame_only, _crop_recheck), cut to the box inside its bands or to its largest part.
+# Round 2 (2026-10-11; the retest's Flash-Lite let a thin white paper border, an 8-px gap between two page scans and a
+# transparency checkerboard through), three more frames, each kept only because it flagged none of the pictures the
+# judges called good - 0 of the 22 round-1 and 21 round-2 adjudicated-good pictures, 0 of the 15 that 3.8 called clean
+# and kind or better, and none more of the 34 it said had no frame (the 3 of them flagged in round 1 stay) - and on the
+# 2,202 local pictures they flag 26 more (171 in all), every one framed by eye (paper borders, two panels with a gap, a
+# figure of a grid, a stereo card, objects on white); about 80 ms a picture against 54, cached:
+#   border - a thin band of one light or dark colour on ALL FOUR sides (1 row of the PIX_PX copy up to PIX_BAND), the
+#     same colour all round and a sharp step inside on every side (23);
+#   parts - a thin flat line of pure white or black 0.25-0.65% thick splitting the picture, looked for on a 2 x PIX_PX
+#     copy (a PIX_PX copy blurs an 8-px gap away), with picture on both sides (2, and one that also has a border);
+#   checker - a transparency checkerboard (two light greys alternating) along three sides or more, on the decoded copy
+#     before any downscale blurs it (1).
+# Still left to the question: textured mounts, display cases and touching collages.
 PIX_PX, PIX_TOL = 480, 8.0
 PIX_BAND, PIX_SHARP = 0.015, 0.5
 PIX_GLOSS_HARD = {"sat": 160.0, "share": 0.5, "cf": 80.0, "lc": 18.0, "val": 150.0}
@@ -2103,10 +2131,76 @@ def _pix_gloss(a) -> int:
     return 2 if over(PIX_GLOSS_HARD) else 1 if over(PIX_GLOSS_SOFT) else 0
 
 
+def _pix_thin(b: dict) -> dict:
+    """{side: thickness} when the bands (_pix_bands) are a thin border on all four sides - each at least one row,
+    together not already a mount (all at PIX_BAND), one light (225+) or dark (40-) colour within 12, a sharp step
+    (0.9) inside every side - else {}."""
+    if not all(v[0] > 0 for v in b.values()) or all(v[0] >= PIX_BAND for v in b.values()):
+        return {}
+    cs = [v[1] for v in b.values()]
+    if max(cs) - min(cs) > 12 or not (min(cs) >= 225 or max(cs) <= 40) or min(v[2] for v in b.values()) < 0.9:
+        return {}
+    return {k: v[0] for k, v in b.items()}
+
+
+def _pix_gaps(g) -> list:
+    """[(start, end)] as shares: thin flat lines of pure white (235+) or black (20-), 0.25-0.65% thick, between 20% and
+    80% of the way across the rows of `g` (a 2 x PIX_PX copy; the caller turns it for columns) - a gap between two
+    scans - with a step of 40 into each side and at most 20% of that colour in either neighbour."""
+    import numpy as np
+    H = g.shape[0]
+    mean = g.mean(axis=1)
+    cand = np.flatnonzero((mean >= 225) | (mean <= 30))         # the only rows that can be pure white or black
+    med, flat = np.zeros(H), np.zeros(H, dtype=bool)
+    if len(cand):
+        m = np.median(g[cand], axis=1)
+        med[cand], flat[cand] = m, (np.abs(g[cand] - m[:, None]) <= 4).mean(axis=1) >= 0.995
+    out, y = [], int(H * 0.2)
+    while y < int(H * 0.8):
+        if not flat[y] or not (med[y] >= 235 or med[y] <= 20):
+            y += 1
+            continue
+        y0, c = y, med[y]
+        while y < H and flat[y] and abs(med[y] - c) <= 4:
+            y += 1
+        if not 0.0025 * H <= y - y0 <= 0.0065 * H:
+            continue
+        k = max(3, int(0.03 * H))
+        near = lambda a: float((np.abs(a - c) <= 12).mean()) if a.size else 1.0
+        same = max(near(g[max(0, y0 - k):max(0, y0 - 2)]), near(g[y + 2:y + k]))
+        step = min(abs(float(np.median(g[max(0, y0 - 6):max(1, y0 - 2)])) - c),
+                   abs(float(np.median(g[y + 2:y + 6])) - c))
+        if same <= 0.2 and step >= 40:
+            out.append((y0 / H, y / H))
+    return out
+
+
+def _pix_checker(im) -> bool:
+    """A transparency checkerboard along three sides or more of the picture `im` (as decoded: a downscale blurs it):
+    in the outer 1.5%, two light grey levels (170+) 10-60 apart, each a quarter or more of the pixels and together
+    92%."""
+    import numpy as np
+    W, H = im.size
+    k = max(4, int(0.015 * min(H, W)))
+    hit = 0
+    for box in ((0, 0, W, k), (0, H - k, W, H), (0, 0, k, H), (W - k, 0, W, H)):
+        v = np.asarray(im.crop(box), dtype=np.float32).mean(axis=2).ravel()
+        if v.mean() < 170:
+            continue
+        vals, cnt = np.unique(np.round(v / 4) * 4, return_counts=True)
+        if len(vals) < 2:
+            continue
+        o = np.argsort(-cnt)
+        l1, l2 = vals[o[0]], vals[o[1]]
+        n1, n2 = float((np.abs(v - l1) <= 4).mean()), float((np.abs(v - l2) <= 4).mean())
+        hit += n1 + n2 >= 0.92 and min(n1, n2) >= 0.25 and 10 <= abs(l1 - l2) <= 60 and min(l1, l2) >= 170
+    return hit >= 3
+
+
 def _pixels(path) -> dict:
-    """The free pixel tests of a picture, cached per file: {"frame": "bars" | "mount" | "parts" | "", "trim": the box
-    to keep (x0, y0, x1, y1 as shares: inside the bands, the largest part, 1% in from each side) or None, "gloss":
-    2 | 1 | 0}. A picture that cannot be read: nothing found."""
+    """The free pixel tests of a picture, cached per file: {"frame": "bars" | "mount" | "border" | "parts" | "checker"
+    | "", "trim": the box to keep (x0, y0, x1, y1 as shares: inside the bands, the largest part, 1% in from each
+    side) or None, "gloss": 2 | 1 | 0}. A picture that cannot be read: nothing found."""
     import numpy as np
     from PIL import Image
     p = Path(path)
@@ -2124,17 +2218,26 @@ def _pixels(path) -> dict:
         with Image.open(p) as im:
             im.draft("RGB", (PIX_PX * 2, PIX_PX * 2))
             im = im.convert("RGB")
-            im.thumbnail((PIX_PX, PIX_PX), Image.BOX)
-            a = np.asarray(im, dtype=np.float32)
+            fine = im.copy()
+            fine.thumbnail((PIX_PX * 2, PIX_PX * 2), Image.BOX)
+            g2 = np.asarray(fine, dtype=np.float32).mean(axis=2)        # 2 x PIX_PX: a thin gap
+            small = im.copy()
+            small.thumbnail((PIX_PX, PIX_PX), Image.BOX)
+            a = np.asarray(small, dtype=np.float32)
         g = a.mean(axis=2)
         b = _pix_bands(g)
         ok = {s: v for s, v in b.items() if v[0] >= PIX_BAND and v[2] >= PIX_SHARP}
         kind = ("mount" if len(ok) >= 3 and max(v[1] for v in ok.values()) - min(v[1] for v in ok.values()) <= 16
                 else next(("bars" for x, y in (("top", "bottom"), ("left", "right"))
                            if x in ok and y in ok and abs(ok[x][1] - ok[y][1]) <= 12), ""))
-        band = lambda s: ok[s][0] if kind and s in ok else 0.0
+        edge = {s: v[0] for s, v in ok.items()} if kind else {}
+        if not kind:
+            edge = _pix_thin(b)
+            kind = "border" if edge else ""
+        band = lambda s: edge.get(s, 0.0)
         x0, y0, x1, y1 = band("left"), band("top"), 1 - band("right"), 1 - band("bottom")
-        rows, cols = _pix_splits(g), _pix_splits(g.T)
+        rows = _pix_splits(g) + _pix_gaps(g2)
+        cols = _pix_splits(g.T) + _pix_gaps(g2.T)
         if rows or cols:
             kind = kind or "parts"
             y0, y1 = _largest(y0, y1, rows)
@@ -2142,6 +2245,8 @@ def _pixels(path) -> dict:
         x0, y0, x1, y1 = x0 + 0.01, y0 + 0.01, x1 - 0.01, y1 - 0.01
         trim = ((round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4))
                 if kind and x1 - x0 > 0.1 and y1 - y0 > 0.1 else None)
+        if not kind and _pix_checker(im):
+            kind = "checker"                      # no box: the 10% crop, whose own pixel test refuses what is left
         got = {"frame": kind, "trim": trim, "gloss": _pix_gloss(a)}
     except Exception:                                                # noqa: BLE001 - not a picture: nothing found
         got = none
@@ -2408,49 +2513,52 @@ frame: look at all four edges and between the parts - true for a mount, margin o
   or black gap between two pictures (strips stacked or side by side, a collage, a grid); torn or burnt edges; a ruler
   or colour chart; a viewer's or tool's window around the picture (a screenshot).
 """
-# THE CENTURY/TRADITION RULE (2026-10-11 default; the owner has not ruled yet - change it here, in WORLD_RULE and in
-# OTHER_ERA_Q below, its yes/no half that code turns into "no": the stored answers follow by themselves, since the
-# question set's key holds both wordings). Flash-Lite passed a 1320 charter, an 11th-century miniature and an 1893
-# Munch for a 4th-century codex, and moved loose fits up to "kind"; 3.8
-# refused a Greek funeral plaque, a Greek manuscript and a 4th-century catacomb fresco on abstract lines. So the
-# picture's own date and tradition is named first ("made"), then: on a SPECIFIC line (a named, dated or subject thing,
-# person, place, event or period) another century's or tradition's version of the thing is "no" and "kind" is the same
-# kind of thing or place; on an ABSTRACT line (a mood or idea) anything of the film's world is "kind" - a time or place
-# the <film> block names, or one of its motifs (_check_film lists them as "this film's world").
-WORLD_RULE = """shows: what the picture is for THIS line, decided after "made". A line is SPECIFIC when a particular thing,
-  person, place, event or period is its subject (named, dated, or what the sentence is about); else ABSTRACT (a mood
-  or an idea). Exactly one of:
-  "exact" - the very person, place or thing the shot NAMES (any real view of it); or, on a line about the shot's
-    STAND-IN (a person of whom no likeness exists), an anonymous figure of that role in the film's era and setting. A
-    shot that names nothing and has no stand-in has no "exact".
-  "kind" - the same kind of thing or place the line is about, of its period and tradition - not merely something of
-    the same general world; on an ABSTRACT line, anything of this film's world: a time or place the <film> block names
-    (not the centuries between) or one of its motifs.
+# THE CENTURY/TRADITION RULE (2026-10-11 default; the owner has not ruled yet - change it here and in _date_off, the
+# code that applies it; the stored answers follow by themselves, since the question set's key holds every wording).
+# On a SPECIFIC line (a named, dated or subject thing, person, place, event or period) another century's or tradition's
+# VERSION of the thing is "no" (a 1320 charter is not a 4th-century codex), but the SAME named place or object shown at
+# another time is still that thing (a 1794 view or a modern photo of the Vatican Library is the Vatican Library); on an
+# ABSTRACT line (a mood or an idea) anything of the film's world is "kind" - its times and places (the <film> block) or
+# one of its motifs (_check_film lists them as "this film's world"). Round 2 (2026-10-11): Flash-Lite answered the
+# century yes/no (other_era) wrongly where the shot's period was the film's catch-all ("4th-5th century ... through
+# late 20th century and present day"), and 3.8 refused good pictures on abstract lines with it; so the century is now
+# decided in code (_line_when, _date_off) from "made" against the line's OWN time, on specific lines only, and the
+# model is asked only what it sees: "made", and on a specific line whether it is the line's kind of thing ("same")
+WORLD_RULE = """shows: what the picture is for THIS line, exactly one of:
+  "exact" - the very person, place or thing the shot NAMES (any real view of it, of any date); or, on a line about the
+    shot's STAND-IN (a person of whom no likeness exists), an anonymous figure of that role in the film's era and
+    setting. A shot that names nothing and has no stand-in has no "exact".
+  "kind" - the same kind of thing, person or place the line is about, of its time and tradition; for a line that is a
+    mood or an idea, anything of this film's world: its times and places (the <film> block) or one of its motifs.
   "generic" - a loose fit (an anonymous aisle, posed hands on a book); a page of text ABOUT the subject; a poster,
-    book cover, screenshot, slide or infographic,
-    unless the line is about that very item.
+    book cover, screenshot, slide or infographic, unless the line is about that very item.
   "no" - unrelated, or the wrong thing: another century's or tradition's version of it (a 1320 charter for a
-    4th-century codex, an Islamic manuscript for a Latin one) - on an ABSTRACT line, anything outside the film's world;
-    a legible document naming different real people or events; THE WRONG PERSON - on a line about a named person whose
-    likeness is known (not in the <film> no-likeness list), anyone else, identifiable or anonymous; on a line about a
-    stand-in, a different identifiable person, a world-famous face (a pope, a head of state, a celebrity) or someone
-    visibly not of that role (dress, age, sex). A pope or a famous cleric is fine on a line about the Church or an
-    institution.
+    4th-century codex, an Islamic manuscript for a Latin one); a legible document naming different real people or
+    events; THE WRONG PERSON - on a line about a named person whose likeness is known (not in the <film> no-likeness
+    list), anyone else, identifiable or anonymous; on a line about a stand-in, a different identifiable person, a
+    world-famous face (a pope, a head of state, a celebrity) or someone visibly not of that role (dress, age, sex). A
+    pope or a famous cleric is fine on a line about the Church or an institution.
 """
-_Q_LINE = """banned: a kind of picture the <film> block says this film may NOT SHOW; modern stock (a lifestyle, advertising or
+_Q_BANNED = """banned: a kind of picture the <film> block says this film may NOT SHOW; modern stock (a lifestyle, advertising or
   staged concept photo, a product shot or shop listing, decor, a gift, a glossy or HDR tourist picture)
   unless the line is plainly about the present day; or a mood that clashes with the <film> tone (cheerful, playful or
   glossy in a dark film, or the opposite). A plain photo of a real subject, or a real portrait, does not clash.
-made: roughly when and in what tradition the main thing shown was made, in a few words ("c.1320 Gothic charter",
-  "1990s photo of a 16th-c. hall").
-""" + WORLD_RULE + """person: a person is the main subject (a portrait, a figure at work), not a crowd or a speck.
+"""
+# the picture's own date, read by code (_made_when): the thing, not the photo, a year or century first. Round 2: the
+# old wording's example ("1990s photo of a 16th-c. hall") had answers describe the photo at length - "made" doubled the
+# output tokens - and Flash-Lite often gave only "medieval"; a date first and at most 5 words
+_Q_MADE = """made: when the main thing shown was made - the thing, not the photo: a year or century, then its tradition, at
+  most 5 words ("c.1320 Gothic charter", "11th-c. Byzantine mosaic").
+"""
+_Q_REST = WORLD_RULE + """person: a person is the main subject (a portrait, a figure at work), not a crowd or a speck.
 studio: an object photographed on a plain white or seamless studio background.
 subject: 2-5 words naming WHAT and WHICH VIEW the picture shows, the same words for the same view of the same thing.
 x, y: where the main subject sits, each 0..1 (0.5, 0.5 when there is no single subject).
 """
-CHECK_RULES = _CHECK_HEAD + "\n" + _Q_SEEN + _Q_LINE
+CHECK_RULES = _CHECK_HEAD + "\n" + _Q_SEEN + _Q_BANNED + _Q_MADE + _Q_REST
 # a drawn stand-in: its own head, frame and text first (2026-10-11: a burnt-edge border and garbled plaque lettering are
-# what the comparison's drawings got through), real, warped - the same shows. Its text rule is the owner's, word for word
+# what the comparison's drawings got through), real, warped - the same shows (no "made": a drawing has no date to check).
+# Its text rule is the owner's, word for word
 _AI_HEAD = """This picture was GENERATED as a stand-in for ONE shot of a documentary. Look at it hard and answer a few short
 questions about it. Judge what you SEE against the shot's LINE (the narration).
 """
@@ -2466,27 +2574,34 @@ warped: a malformed face, hand or body (extra, missing or fused fingers, melted 
   the same face repeated, an extra figure merged into another where one person is meant, or objects melting into
   each other.
 """
-AI_RULES = _AI_HEAD + "\n" + _AI_SEEN + _Q_LINE
-# only for a shot whose time matters (_era): the beat's own era, else the film's period when that lies in the past
+AI_RULES = _AI_HEAD + "\n" + _AI_SEEN + _Q_BANNED + _Q_REST
+# only for a shot whose time matters (_era): the beat's own era, else the film's period when that lies in the past.
+# Round 2: the lamps, blinds and fittings of an old building do not count (3.8 refused the Vatican Library's reading
+# room for its window blinds on a line about its 4th-5th-century texts)
 ERA_Q = """modern (asked for this shot): the shot is set in {era}. Name the most obvious thing a viewer would notice at
   once that is clearly from after that time - cars on the street, tourists or other people in today's clothes, a
   phone, a screen or computer, modern furniture, a face mask, plastic, a modern sign, a glass tower - also when it
-  stands beside a cassock, a habit, a uniform or an old building. Small, distant or background details do not count.
+  stands beside a cassock, a habit, a uniform or an old building. Small, distant or background details, and the
+  lamps, blinds and fittings of an old building, do not count.
   Answer "" when there is none - and for a museum, restoration or display photo of the old object itself, for a
   person in the dress of their role photographed later, and for landscapes, stone, nature or old buildings, as long
   as nothing modern is prominent in view. For this shot "banned" also covers modern people in modern clothes and
   modern home or office interiors."""
-# the century/tradition rule as a yes/no fact, decided in code (_verdict: true makes it "no"), asked with the era question
-# (2026-10-11: on Flash-Lite LOW, with no thinking, "made" named the right date - "1320 medieval manuscript codex",
-# "1893 oil painting by Edvard Munch" - and shows still said "kind": the rule folded into shows is not applied; a
-# yes/no beside the date is the kind of question it answers well). Part of WORLD_RULE's default: change them together
-OTHER_ERA_Q = """other_era (asked for this shot): true when the thing shown was MADE in a clearly different century or
-  tradition than {era} (a 1320 charter, an 11th-century book or an 1893 painting for a 4th-century subject) - the thing,
-  not the photo. false for a later photo or copy of such a thing, a person in the dress of their role, and on an
-  ABSTRACT line anything of a time or place the <film> block names or one of its motifs."""
-# (A yes/no "loose" - could it illustrate another film - was tried the same way, 2026-10-11, and dropped: it turned the
-# anonymous library aisle into "generic" but also a plain Vatican Library photo on a line about work there, and the
-# Library's hall on an abstract line, which the owner's rules make "kind".)
+# a shot set in the 20th century or later (round 2: both models refused the Vatican reading room's office chairs and
+# desk lamps on a late-1980s line - the old examples, a screen or modern furniture, existed then): only what did not
+# exist yet, and no "banned" for modern interiors
+ERA_Q_NEAR = """modern (asked for this shot): the shot is set in {era}. Name the most obvious thing a viewer would notice
+  at once that did not exist yet then (a smartphone, a flat screen, a face mask, today's fashions); things of that time
+  or older do not count. Answer "" when there is none."""
+# the line's own kind of thing, as a yes/no decided in code (_verdict: false makes it "no"), only on a SPECIFIC line
+# (_line_when) so that an abstract line keeps anything of the film's world. Round 2: Flash-Lite passed a catacomb
+# fresco, a mosaic, a pilgrim flask and a stone lintel - of the right period - as "kind" for lines about a manuscript,
+# a funeral rite or a papyrus (3.8 said "no" to all of them). (A yes/no "loose" - could it illustrate another film - was
+# tried the same way, 2026-10-11, and dropped: it also turned a plain Vatican Library photo on a line about work there
+# into "generic" - hence "its place" here.)
+SAME_Q = """same (asked for this shot): true when it shows the kind of thing this line is about, in its tradition: a
+  codex for a codex (not a library hall or a fresco), a papyrus (not a jar or a relief); for a person or an
+  institution, that kind of person or its place."""
 # a drawn stand-in is held to its time strictly: a generator slips modern things in (a flat screen beside 1943 officers
 # passed the candidates' wording at HIGH, 2026-10-10), and a refused drawing is cheaply drawn again
 AI_ERA_Q = """modern (asked for this drawn picture): it stands for {era}. Name ANY object in view that did not exist then -
@@ -2503,20 +2618,39 @@ about: {about}{stand}
 </shot>"""
 # every field up to studio, always (2026-10-11): the old last line ("for a picture with text, frame or banned true, or
 # shows no, leave out subject, x and y") was read by Flash-Lite as leave out "shows" too - all 12 of its unanswered
-# pictures, and 2 retries on 3.8. _answer still takes a refusal without "shows" (_answer: refused for its reason)
-FORMAT = ('Return ONLY a JSON array, one object per picture, in picture order:\n'
-          '[{{"n": 1, "real": true, "text": false, "frame": false, "banned": false, {extra}"made": "...", {after_made}'
-          '"shows": "kind", "person": false, "studio": false, "subject": "...", "x": 0.5, "y": 0.5}}]\n'
+# pictures, and 2 retries on 3.8. _answer still takes a refusal without "shows" (_answer: refused for its reason).
+# {extra}: the questions this call adds before shows (_extra_fields). Compact, on one line (round 2: Flash-Lite printed
+# every field on its own indented line, and its output tokens cost it more than the whole prompt)
+FORMAT = ('Return ONLY a compact JSON array on one line, one object per picture, in picture order:\n'
+          '[{{"n": 1, "real": true, "text": false, "frame": false, "banned": false, {extra}"shows": "kind", '
+          '"person": false, "studio": false, "subject": "...", "x": 0.5, "y": 0.5}}]\n'
           'Always give every field from real to studio, including shows; only subject, x and y may be left out.')
+
+
+def _extra_fields(era: bool, ai: bool = False, same: bool = False) -> str:
+    """The format's fields between banned and shows: the era question's "modern", then a candidate's "made" and, on a
+    specific line, "same" (the date first, then the yes/no, then shows) - or a drawing's "warped"."""
+    return ('"modern": "", ' if era else "") + ('"warped": false, ' if ai else '"made": "...", '
+                                                + ('"same": true, ' if same else ""))
+
+
+def _era_q(era: str) -> str:
+    """The era question for a shot's time: ERA_Q_NEAR when that time starts in the 20th century or later (its own era,
+    not a catch-all), else ERA_Q."""
+    got = _period_of(era)
+    return (ERA_Q_NEAR if got and min(lo for lo, _ in got) >= 1900 else ERA_Q).format(era=era)
 
 
 def _qset(kind: str, v: int = None) -> str:
     """Who was asked what (part of every stored answer's key): the question set's version and wording, the model, its
-    thinking level and the picture size - any change files new answers (the resolution is kept beside it)."""
-    rules, px, era = (AI_RULES, AI_CHECK_PX, AI_ERA_Q) if kind == "ai" else (CHECK_RULES, JUDGE_PX, ERA_Q + OTHER_ERA_Q)
-    return hashlib.sha1("|".join(map(str, [kind, CHECK_V if v is None else v, JUDGE_MODEL, JUDGE_THINKING, px, rules,
+    thinking level and the picture size - any change files new answers (the resolution is kept beside it). The AI
+    checks are filed under their own model (AI_CHECK_MODEL)."""
+    if kind == "ai":
+        rules, px, era, model, think = AI_RULES, AI_CHECK_PX, AI_ERA_Q, AI_CHECK_MODEL, AI_CHECK_THINKING
+    else:
+        rules, px, era, model, think = CHECK_RULES, JUDGE_PX, ERA_Q + ERA_Q_NEAR + SAME_Q, JUDGE_MODEL, JUDGE_THINKING
+    return hashlib.sha1("|".join(map(str, [kind, CHECK_V if v is None else v, model, think, px, rules,
                                            era, SHOT_BLOCK, FORMAT])).encode()).hexdigest()[:12]
-
 
 _QSET, _AI_QSET = _qset("check"), _qset("ai")
 _TODAY = {"today", "present", "present day", "the present day", "the present", "now", "nowadays", "modern day",
@@ -2548,6 +2682,338 @@ def _era(r: dict, dossier: dict) -> str:
     p = " ".join(str((dossier or {}).get("period") or "").split())
     return p[:160] if _past(p) else ""
 
+
+
+# ── the century rule in code (2026-10-11, round 2 of the Flash-Lite fixes) ─────────────────────────────────────────
+# The retest (68 new items): Flash-Lite LOW still let another century's thing through where the shot's period was the
+# film's catch-all ("4th-5th century ... through late 20th century and present day": a 9th-century codex and an
+# 11th-century mosaic looked inside it) or the period was "undated" - and its yes/no other_era said "same era" even when
+# its own "made" named the right date. So the model only names the date ("made"); code reads it (_made_when) and
+# compares it with the LINE'S OWN time (_line_when: the beat's era, the dates its sentence gives, the dossier notes of
+# what it names - never the film's catch-all period), on a specific line only, never against the same named place or
+# object (_same_place), and with a margin (_date_off). An undated line, a catch-all line or an abstract line is never
+# refused on its date.
+YEAR_NOW = time.localtime().tm_year
+_ORDINALS = ("first second third fourth fifth sixth seventh eighth ninth tenth eleventh twelfth thirteenth fourteenth "
+             "fifteenth sixteenth seventeenth eighteenth nineteenth twentieth").split()
+_CENT_N = r"(?:(\d{1,2})(?:st|nd|rd|th)|(" + "|".join(_ORDINALS + ["twenty-first"]) + r"))"
+_WHEN_PART = r"(?:(early|mid|late)[- ]?)?"
+_CENT_WORD = r"(?:centur(?:y|ies)|cent\b\.?|c\b\.?)"
+_ERA_MARK = r"(?:\s*(bce|bc|b\.c\.(?:e\.)?|ad|a\.d\.|ce)\b)?"
+_CENTURY = re.compile(_WHEN_PART + _CENT_N + r"(?:[- ]?" + _CENT_WORD + r")?(?:\s*(?:-|to|or|and|/)\s*" + _WHEN_PART
+                      + _CENT_N + r")?[- ]?" + _CENT_WORD + _ERA_MARK)
+_DECADE = re.compile(r"\b" + _WHEN_PART + r"(\d{3})0s\b")
+_CIRCA = r"(?:(c\.|ca\.|c\b|circa|about|around|pre-|before|post-|after)\s*)?"
+_YEAR_RANGE = re.compile(r"(?<![\w.])" + _CIRCA + r"(\d{1,4})\s*(?:-|to)\s*(\d{1,4})(?!\d|s\b|th|st|nd|rd)" + _ERA_MARK)
+_ONE_YEAR = re.compile(r"(?<![\w.])" + _CIRCA + r"(\d{1,4})(?![\d]|s\b|th|st|nd|rd|\s*(?:-|to)\s*\d)" + _ERA_MARK)
+# era words as years, most specific first (a word inside a longer one is not counted again). "medieval" alone starts at
+# 600: the models say "6th-century" or "late antique" for earlier things, and "medieval" for a 12th-century charter
+_ERA_WORDS = (
+    ("late antiquity|late antique", (250, 700)), ("early christian", (30, 600)), ("early church fathers", (100, 450)),
+    ("church fathers|patristic", (100, 750)), ("early medieval|early middle ages", (500, 1000)),
+    ("high medieval|high middle ages", (1000, 1300)), ("late medieval|late middle ages", (1250, 1500)),
+    ("medieval|middle ages", (600, 1500)), ("carolingian", (750, 900)), ("ottonian", (919, 1024)),
+    ("romanesque", (1000, 1200)), ("gothic revival", (1830, 1900)), ("gothic", (1150, 1500)),
+    ("renaissance", (1400, 1600)), ("baroque", (1600, 1750)), ("victorian", (1837, 1901)),
+    ("edwardian", (1901, 1914)), ("early modern", (1500, 1800)), ("early byzantine", (330, 843)),
+    ("middle byzantine", (843, 1204)), ("late byzantine", (1204, 1453)), ("byzantine", (330, 1453)),
+    ("hellenistic", (-323, -30)), ("ptolemaic", (-305, -30)), ("archaic greek", (-800, -480)),
+    ("classical greek", (-480, -323)), ("old kingdom", (-2700, -2200)), ("middle kingdom", (-2050, -1650)),
+    ("new kingdom", (-1550, -1070)), ("pharaonic", (-3100, -30)), ("ancient egypt\\w*", (-3100, 395)),
+    ("ancient rome|ancient roman|imperial roman", (-500, 476)), ("roman", (-500, 476)), ("coptic", (200, 1000)),
+    ("ancient", (-3000, 500)), ("prehistoric", (-10000, -3000)), ("bronze age", (-3300, -1200)),
+    ("iron age", (-1200, -500)), ("ottoman", (1300, 1922)),
+)
+_ERA_RE = [(re.compile(r"\b(?:" + w + r")\b"), r) for w, r in _ERA_WORDS]
+# era words a narration line uses in another sense ("the Roman Curia", "a byzantine rule", "a renaissance of
+# interest", "Gothic type"): read from a beat's era or a "made" answer, never from the line's own words
+_LOOSE_WORDS = {"roman", "gothic", "byzantine", "renaissance", "baroque", "ancient", "coptic", "ottoman", "early modern"}
+_LINE_ERA_RE = [(rx, r) for (w, r), (rx, _) in zip(_ERA_WORDS, _ERA_RE) if w not in _LOOSE_WORDS]
+_NOW_WORDS = re.compile(r"\b(modern|contemporary|recent|present[- ]day|today)\b")
+# the thing, not the photo: "modern photo of a 16th-c. hall" is a 16th-century hall
+_COPY_OF = re.compile(r"\b(?:photo|photograph|photography|snapshot|scan|still|image|picture|facsimile|reproduction|"
+                      r"replica|copy|cast|render(?:ing)?|digiti[sz]ation)s?\s+of\s+")
+# a thing that is itself a picture (made when it was drawn, printed or taken)
+_PICTURE = re.compile(r"\b(prints?|engravings?|etchings?|lithographs?|woodcuts?|aquatints?|mezzotints?|paintings?|"
+                      r"drawings?|watercolou?rs?|illustrations?|plates?|postcards?|photos?|photographs?|daguerreotypes?|"
+                      r"posters?|cartoons?|caricatures?|sketch(?:es)?)\b")
+# a building, a place or its fittings: still there at any later time (a 16th-century hall is in the 1980s Library)
+_STAYS = re.compile(r"\b(halls?|rooms?|interiors?|library|libraries|galler(?:y|ies)|corridors?|stair(?:case|s|way)s?|"
+                    r"churche?s?|chapels?|basilicas?|cathedrals?|palaces?|buildings?|courtyards?|squares?|cisterns?|"
+                    r"catacombs?|tombs?|temples?|pyramids?|ruins?|monaster(?:y|ies)|abbe(?:y|ys)|archives?|"
+                    r"shelv(?:es|ing)|bookcases?|cabinets?|desks?|doors?|doorways?|confessionals?|frescoe?s?|mosaics?|"
+                    r"ceilings?|vaults?|streets?|cit(?:y|ies)|landscapes?|views?)\b")
+
+
+def _cent_num(digits, word) -> int:
+    return int(digits) if digits else 21 if word == "twenty-first" else _ORDINALS.index(word) + 1
+
+
+def _cent_years(n: int, part, bc: bool) -> tuple:
+    """The years of century `n` (BC: negative), or its early, middle or late part."""
+    lo, hi = (-100 * n, -100 * (n - 1) - 1) if bc else (100 * (n - 1), 100 * n - 1)
+    return {"early": (lo, lo + 39), "mid": (lo + 30, lo + 69), "late": (lo + 60, hi)}.get(part or "", (lo, hi))
+
+
+def _norm_when(text) -> str:
+    t = str(text or "").lower().replace("–", "-").replace("—", "-").replace("‑", "-")
+    return re.sub(r"\s+", " ", t)
+
+
+def _when_spans(text, words: bool = True) -> list:
+    """[(start, end, (lo, hi))] for every date in `text` (lower-cased), in text order - see _dates."""
+    t = _norm_when(text)
+    found = []
+
+    def take(m, rng):
+        nonlocal t
+        found.append((m.start(), m.end(), rng))
+        t = t[:m.start()] + " " * (m.end() - m.start()) + t[m.end():]
+
+    for m in list(_CENTURY.finditer(t)):
+        bc = (m.group(7) or "").startswith("b")
+        a = _cent_years(_cent_num(m.group(2), m.group(3)), m.group(1), bc)
+        b = _cent_years(_cent_num(m.group(5), m.group(6)), m.group(4), bc) if (m.group(5) or m.group(6)) else a
+        take(m, (min(a[0], b[0]), max(a[1], b[1])))
+    for m in list(_DECADE.finditer(t)):
+        d = int(m.group(2)) * 10
+        take(m, {"early": (d, d + 3), "mid": (d + 3, d + 7), "late": (d + 5, d + 9)}.get(m.group(1) or "", (d, d + 9)))
+    for rx in (_YEAR_RANGE, _ONE_YEAR):
+        for m in list(rx.finditer(t)):
+            circa = (m.group(1) or "").strip()
+            era = (m.group(4 if rx is _YEAR_RANGE else 3) or "").strip()
+            if rx is _YEAR_RANGE:
+                a, b = m.group(2), m.group(3)
+                if len(b) < len(a):                                  # "1540-50": the second year's last digits
+                    b = a[:len(a) - len(b)] + b
+                y0, y1 = int(a), int(b)
+            else:
+                y0 = y1 = int(m.group(2))
+            if not era and (y0 < 100 or (y0 < 1000 and not circa)):  # a bare small number is not a year
+                continue
+            if era.startswith("b"):
+                y0, y1 = -y0, -y1
+            elif max(y0, y1) > YEAR_NOW + 1:
+                continue
+            lo, hi = min(y0, y1), max(y0, y1)
+            if circa in ("pre-", "before"):
+                lo, hi = hi - 200, hi
+            elif circa in ("post-", "after"):
+                lo, hi = lo, lo + 50
+            elif circa:
+                w = 25 if lo < 1500 else 10
+                lo, hi = lo - w, hi + w
+            take(m, (lo, hi))
+    if words:
+        for rx, rng in _ERA_RE:
+            for m in list(rx.finditer(t)):
+                take(m, rng)
+    return sorted(found)
+
+
+def _dates(text, words: bool = True) -> list:
+    """Every date in `text`, in order, as (lo, hi) years (BC negative): centuries ("4th-5th century", "late 12th-c.",
+    "fourth or fifth century", "8th-7th century BCE"), decades ("late 1980s"), years and year ranges ("c.1320",
+    "1540-50", "c. 520-510 BC", "before 911") and - `words` - era words ("late antique", "Carolingian", "medieval",
+    "Byzantine"), each counted once (a word inside a longer one is not counted again)."""
+    return [r for _, _, r in _when_spans(text, words)]
+
+
+def _after_date(t: str, i: int) -> str:
+    """The (up to 3) words after a date, to the next of / by / with / and / comma: the thing the date is about."""
+    rest = re.split(r"[,;(/]|\s(?:of|by|with|and|after|from|in)\s", " " + t[i:].strip(" -") + " ", maxsplit=1)[0]
+    return " ".join(rest.split()[:3])
+
+
+def _made_when(made) -> tuple:
+    """((lo, hi), picture) for a check's "made" answer - when the main thing shown was made, and whether that thing is
+    itself a picture (a print, painting, plate or photograph: the word right after its date) - or (None, False) when
+    it gives no date. The first date counts ("1893 painting of a medieval charter", "late antique papyri and a 19th-c.
+    painting"), narrowed by the era words right after it ("medieval Byzantine" is 600-1453); a photo, scan, copy or
+    facsimile OF something is dated by that thing ("modern photo of a 16th-c. hall" is the hall; "2021 photo of the
+    Vatican Library" gives no date); "modern digital graphic" is 1950 to now."""
+    t = _norm_when(made)
+    m = _COPY_OF.search(t)
+    if m:
+        t = t[m.end():]
+    spans = _when_spans(t)
+    if not spans:
+        now = None if m else _NOW_WORDS.search(t)
+        return ((1950, YEAR_NOW), bool(_PICTURE.search(_after_date(t, now.end())))) if now else (None, False)
+    _, end, (lo, hi) = spans[0]
+    for s1, e1, (a, b) in spans[1:]:
+        if re.search(r"[/,;]|\b(?:or|and|with|of|by|in)\b", t[end:s1]) or max(lo, a) > min(hi, b):
+            break
+        lo, hi, end = max(lo, a), min(hi, b), e1
+    return (lo, hi), bool(_PICTURE.search(_after_date(t, end)))
+
+
+def _merge_years(rngs: list) -> list:
+    out = []
+    for a, b in sorted(rngs):
+        if out and a <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _period_of(text) -> list:
+    """The time a beat's era (or a film's period) names, as [(lo, hi)] - or [] when it is undated or a catch-all: two
+    times far apart ("4th-5th century ... through late 20th century and present day"), or a past time and today."""
+    t = _norm_when(text)
+    if not t or "undated" in t:
+        return []
+    got = _dates(t)
+    if not got:
+        return []
+    now = bool(re.search(r"\b(present|today|now|nowadays)\b", t))
+    spread = any(a2 - b1 > 300 for (_, b1) in got for (a2, _) in got if a2 > b1)
+    if spread or (now and max(b for _, b in got) < YEAR_NOW - 30):
+        return []
+    return _merge_years(got)
+
+
+def _date_off(made, periods: list, film: list = ()) -> str:
+    """'' when the thing `made` describes fits one of the line's `periods` (or either is unknown), else why not:
+    "made later" - after the time by more than a margin (100 years before 1500, 50 after), only for a time before
+      1850 (a later photo of a 20th-century scene is the era question's);
+    "an older picture" - a print, painting, plate or photograph made more than 50 years before a time after 1840 (an
+      1893 plate standing in for the 1980s);
+    "an older thing" - a book, document or object made more than 150 years before a time after 1840, and not from one
+      of the film's own times (`film`: a 15th-century book of hours on a 1980s line - where a 4th-century codex fits
+      in a film about one). A building, a place or its fittings stays: a 16th-century hall is still there in the 1980s.
+    An older thing on an older line fits (a 1st-century papyrus for a 4th-century line is of that era's world)."""
+    rng, picture = _made_when(made)
+    if rng is None or not periods:
+        return ""
+    lo, hi = rng
+    t = _norm_when(made)
+    m = _COPY_OF.search(t)
+    stays = bool(_STAYS.search(t[m.end():] if m else t))
+    why = ""
+    for plo, phi in periods:
+        if phi < 1850 and lo > phi + (100 if phi < 1500 else 50):
+            why = why or "made later"
+            continue
+        if plo >= 1840 and picture and hi < plo - 50:
+            why = why or "an older picture"
+            continue
+        if (plo >= 1840 and not picture and not stays and hi < plo - 150
+                and not any(f0 - 100 <= lo and hi <= f1 + 100 for f0, f1 in film)):
+            why = why or "an older thing"
+            continue
+        return ""
+    return why
+
+
+def _line_dates(text) -> list:
+    """The dates a narration line (or a dossier note) gives: its explicit dates, and the era words it cannot mean in
+    another sense (_LOOSE_WORDS)."""
+    t = _norm_when(text)
+    got = _when_spans(t, words=False)
+    for s, e, _ in got:
+        t = t[:s] + " " * (e - s) + t[e:]
+    for rx, rng in _LINE_ERA_RE:
+        for m in rx.finditer(t):
+            got.append((m.start(), m.end(), rng))
+            t = t[:m.start()] + " " * (m.end() - m.start()) + t[m.end():]
+    return [r for _, _, r in sorted(got)]
+
+
+def _line_sentence(row: dict, before: str = "", after: str = "") -> str:
+    """The line's own sentence: the line, with the line before when it starts mid-sentence (a small letter) and the
+    line after when it stops mid-sentence ("The Apostolic Tradition, a third century document, mentioned" / "prayers
+    said over the body")."""
+    t = " ".join(str(row.get("text") or "").split())
+    if before and t[:1].islower():
+        t = " ".join(str(before).split()) + " " + t
+    if after and not _SENT_END.search(t):
+        t = t + " " + " ".join(str(after).split())
+    return t
+
+
+def _surname_of(name: str) -> str:
+    words = [w.strip(".'-,") for w in re.split(r"[,(]", str(name or ""))[0].split() if w.strip(".'-,")]
+    return words[-1] if words else ""
+
+
+def _dossier_named(dossier: dict, text: str) -> list:
+    """The dossier's key entities `text` names: a person by surname (capitalised), anything else by its name without a
+    leading article ("the manuscript" by "manuscript", "the Apostolic Tradition" by "apostolic tradition")."""
+    out, low = [], text.lower()
+    for e in (dossier or {}).get("keyEntities") or []:
+        name = " ".join(str(e.get("name") or "").split())
+        if not name:
+            continue
+        if str(e.get("kind") or "").lower() == "person":
+            key = _surname_of(name)
+            hit = len(key) >= 3 and re.search(rf"(?<![\w-]){re.escape(key)}(?![\w-])", text)
+        else:
+            key = re.sub(r"^(?:the|a|an)\s+", "", name, flags=re.I).lower()
+            hit = len(key) >= 4 and re.search(rf"(?<![\w-]){re.escape(key)}(?![\w-])", low)
+        if hit:
+            out.append(e)
+    return out
+
+
+_PLACE_KINDS = {"place", "organisation", "organization", "institution", "building", "site", "landmark", "artifact",
+                "artefact", "object", "work"}
+# words of a name that do not tell WHICH one it is ("the Vatican Apostolic Library" is told by "vatican")
+_GENERIC_NAME = {"library", "libraries", "archive", "archives", "museum", "church", "cathedral", "basilica", "city",
+                 "palace", "chapel", "abbey", "monastery", "university", "college", "collection", "apostolic",
+                 "national", "royal", "state", "saint", "holy", "great", "hall", "house", "school", "street", "square",
+                 "tower", "castle", "river", "lake", "mount", "island", "bridge", "temple", "tomb", "secret", "central",
+                 "public", "imperial", "manuscript", "manuscripts", "codex", "folio", "text", "texts", "document",
+                 "record", "tradition", "traditions", "passage", "notation", "letter", "book", "papyrus", "ritual",
+                 "funerary", "early", "fathers", "language", "greek", "latin", "egyptian", "roman", "about"}
+
+
+def _about_who(row: dict) -> str:
+    a = " ".join(str(row.get("about") or "").split())
+    return "" if a.lower() in ("", "no one", "no one in particular", "nobody", "none", "n/a") else a
+
+
+def _line_when(row: dict, dossier: dict, before: str = "", after: str = "", names=(), stand=None) -> dict:
+    """What the century rule needs to know about a shot's line, decided in code:
+    specific - a particular thing, person, place, event or period is its subject: the shot names something (its
+      entities or archive name), it is about a person (a stand-in, or "about"), or its sentence names a dossier key
+      entity or gives a date; else it is an abstract line (a mood or an idea);
+    periods - the line's OWN time, [(lo, hi)]: the beat's era and the dates its sentence gives, else the dates in the
+      dossier notes of the key entities it names ("the manuscript": "fourth or fifth century") - never the film's
+      catch-all period, and nothing from an undated era ([] = no date check);
+    places - the words that tell which place, institution or object the shot names (not a person): a picture of that
+      very one is that thing at any date (_same_place);
+    film - the film's own times, discretely ("4th-5th century" and "late 20th century", not the centuries between):
+      only ever to keep an older thing (_date_off)."""
+    d = dossier or {}
+    sent = _line_sentence(row, before, after)
+    ents = [" ".join(str(e).split()) for e in row.get("entities") or [] if str(e).strip()]
+    hits = _dossier_named(d, " | ".join([sent] + list(names) + ents))
+    own = _period_of(" ".join(str(row.get("era") or "").split()) or d.get("period"))
+    said = _line_dates(sent)
+    noted = [r for e in hits for r in (_line_dates(e.get("note")) or _line_dates(e.get("canonicalSearchName")))]
+    people = {_surname_of(e.get("name")).lower() for e in d.get("keyEntities") or []
+              if str(e.get("kind") or "").lower() == "person"}
+    people |= {_surname_of(p.get("name")).lower() for p in (d.get("visualBrief") or {}).get("people") or []}
+    if stand:
+        people.add(_surname_of(stand.get("name")).lower())
+    placenames = [e for e in ents if not (set(re.findall(r"[a-z]+", e.lower())) & people)]
+    placenames += [str(e.get("name") or "") for e in hits if str(e.get("kind") or "").lower() in _PLACE_KINDS]
+    keys = sorted({w for n in placenames for w in re.findall(r"[a-z]+", n.lower())
+                   if len(w) >= 4 and w not in _GENERIC_NAME and w not in people})
+    return {"specific": bool(names or stand or _about_who(row) or hits or said),
+            "periods": _merge_years(own + said or noted), "places": keys, "film": _merge_years(_dates(d.get("period")))}
+
+
+def _same_place(a: dict, line: dict) -> bool:
+    """The picture shows the very place, institution or object the shot names (the century rule: a 1794 view or a
+    modern photo of the Vatican Library is the Vatican Library): "exact" for anything but a person, or a word of that
+    name in what the answer says the picture shows."""
+    if a.get("shows") == "exact" and not a.get("person"):
+        return True
+    words = re.findall(r"[a-z0-9]+", f"{a.get('made', '')} {a.get('subject', '')}".lower())
+    return any(w.startswith(k) for k in (line or {}).get("places") or () for w in words)
 
 _DATE_ENTITY = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})s?\b|\b(january|february|march|april|may|june|july|august|"
                           r"september|october|november|december|century|decade|era|bc|bce|ad|ce)\b|^\W*\d+\W*$", re.I)
@@ -2654,17 +3120,41 @@ def _yes(v):
     return True if s in ("true", "yes", "1") else False if s in ("false", "no", "0") else None
 
 
-def _answer(x, era: bool, ai: bool = False):
+_NO_WORDS = {"no", "none", "not", "false", "nothing", "without", "n/a", "nope", "neither"}
+
+
+def _flag(v, describes: bool = True):
+    """A yes/no about the picture, also when answered in words (2026-10-11, round 2: Flash-Lite answered two drawings'
+    frame with "several pictures in one (a collage)" and "collage", and they went unchecked): true/false/yes/no and
+    1/0 as always; then a sentence - "no ...", "not ...", "none" or "there is no ..." (a no-word in its first three
+    words) is false; `describes` (a question about something WRONG in it - text, frame, banned, warped) any other
+    description of what it saw ("there is a burnt border", "a collage") is true; else only a sentence starting with
+    yes or true is. Nothing readable is no answer (None: asked again)."""
+    y = _yes(v)
+    if y is not None:
+        return y
+    words = re.findall(r"[a-z/']+", str(v or "").lower())
+    if not words:
+        return None
+    if _NO_WORDS & set(words[:3]):
+        return False
+    if words[0] in ("yes", "true", "y"):
+        return True
+    return True if describes else None
+
+
+def _answer(x, era: bool, ai: bool = False, same: bool = False):
     """One picture's answer, checked: every question answered with its type, else None (asked again, never kept).
     A refusal without "shows" (2026-10-11: Flash-Lite left it out on 12 of 98 pictures, reading the old last line as
     leave it out when something is wrong) is a refusal for its own reason - text, frame, banned, not real, modern,
-    another era or warped - with shows "" (its tier unknown: never a pass; a frame alone still goes to the crop,
-    _frame_only)."""
+    not the line's kind or warped - with shows "" (its tier unknown: never a pass; a frame alone still goes to the
+    crop, _frame_only). A defect answered in words counts (_flag). `same` (asked on a specific line, SAME_Q): kept as
+    a bool - not said, or not readable, is not a refusal."""
     if not isinstance(x, dict):
         return None
     out = {}
     for k in ("real", "text", "frame", "banned") + (("warped",) if ai else ()):
-        v = _yes(x.get(k))
+        v = _flag(x.get(k), describes=k != "real")
         if v is None:
             return None
         out[k] = v
@@ -2672,17 +3162,17 @@ def _answer(x, era: bool, ai: bool = False):
         m = x.get("modern", "")
         out["modern"] = ("" if m is None or m is False or str(m).strip().lower() in ("", "none", "no", "false", "n/a", "nothing")
                          else "something modern" if m is True else " ".join(str(m).split())[:60])
-        if not ai:                               # the century/tradition fact (OTHER_ERA_Q); not said: false
-            out["other_era"] = bool(_yes(x.get("other_era")))
+    if same and not ai:
+        out["same"] = _flag(x.get("same"), describes=False) is not False
     shows = str(x.get("shows") or "").strip().lower()
     if shows not in TIERS:
         refused = (out["text"] or out["frame"] or out["banned"] or not out["real"] or out.get("modern")
-                   or out.get("other_era") or (ai and out["warped"]))
+                   or out.get("same") is False or (ai and out["warped"]))
         if not refused:
             return None
         shows = ""
     out["shows"] = shows
-    made = " ".join(str(x.get("made") or "").split())[:60]      # the picture's own date and tradition (for the logs)
+    made = " ".join(str(x.get("made") or "").split())[:60]      # the thing's own date and tradition (_date_off)
     if made:
         out["made"] = made
     out["person"], out["studio"] = bool(_yes(x.get("person"))), bool(_yes(x.get("studio")))
@@ -2695,7 +3185,7 @@ def _answer(x, era: bool, ai: bool = False):
     return out
 
 
-def _answers(raw: str, n: int, era: bool, ai: bool = False) -> dict:
+def _answers(raw: str, n: int, era: bool, ai: bool = False, same: bool = False) -> dict:
     """{picture index: answer} from a reply; a cut-off reply keeps its complete pictures, a bad one gives nothing."""
     raw = str(raw or "")
     items = []
@@ -2715,7 +3205,7 @@ def _answers(raw: str, n: int, era: bool, ai: bool = False) -> dict:
         except (AttributeError, TypeError, ValueError):
             continue
         if 0 <= k < n and k not in out:
-            a = _answer(x, era, ai)
+            a = _answer(x, era, ai, same)
             if a is not None:
                 out[k] = a
     return out
@@ -2725,13 +3215,17 @@ _SCORE_OF = {EXACT: 8.0, KIND: 6.0, GENERIC: 4.0, NO: 1.0}
 _DEPICTION = {EXACT: "named-subject", KIND: "same-category", GENERIC: "same-category", NO: "unrelated"}
 
 
-def _verdict(c: dict, a, *, ai: bool = False, exact_ok: bool = True, known=(), looked: str = "asked") -> dict:
+def _verdict(c: dict, a, *, ai: bool = False, exact_ok: bool = True, known=(), looked: str = "asked",
+             line: dict = None) -> dict:
     """A candidate with its answers turned into the decision: tier (exact 3, kind 2, generic 1, no 0), what is wrong
     (bad: text, frame, banned, not real, modern: <thing>, warped, blank) and clean. No answer: tier 0, `unjudged` (never
     a pass; asked again next run) - unless the picture was refused without asking (`known`: blank, dirty, not looked).
-    The old judge's fields stay for the logs and older readers: score (exact 8, kind 6, generic 4, no 1; at most 2 when
-    something is wrong), depiction, flags (= bad), reason."""
-    c = {k: v for k, v in c.items() if k != "unjudged"}
+    `line` (_line_when, a candidate's check): on a specific line, the century rule in code - the thing made at another
+    time than the line's own (_date_off) is "no" (date_off: why), and so is a picture that is not the line's kind of
+    thing ("same" false: not_same) unless it is "exact"; never for the very place or object the shot names
+    (_same_place). The old judge's fields stay for the logs and older readers: score (exact 8, kind 6, generic 4, no 1;
+    at most 2 when something is wrong), depiction, flags (= bad), reason."""
+    c = {k: v for k, v in c.items() if k not in ("unjudged", "date_off", "not_same")}
     if a is None:
         bad = list(known) or ["unjudged"]
         out = dict(c, shows="", tier=NO, bad=bad, clean=False, score=0.0, depiction="", flags=bad, reason=", ".join(bad),
@@ -2740,8 +3234,14 @@ def _verdict(c: dict, a, *, ai: bool = False, exact_ok: bool = True, known=(), l
             out["unjudged"] = True
         return out
     shows = a["shows"] if a["shows"] != "exact" or exact_ok else "kind"     # a shot naming nothing has no exact
-    if a.get("other_era"):                                   # another century's or tradition's version: "no" (WORLD_RULE)
-        shows, c = "no", dict(c, other_era=True)
+    off = ""
+    if line and line.get("specific") and not ai and shows in TIERS[1:]:
+        here = _same_place(dict(a, shows=shows), line)
+        off = "" if here else _date_off(a.get("made"), line.get("periods") or (), line.get("film") or ())
+        if off:                                              # another century's version of the thing (WORLD_RULE)
+            shows, c = "no", dict(c, date_off=off)
+        elif a.get("same") is False and shows != "exact" and not here:
+            shows, c = "no", dict(c, not_same=True)
     tier = TIERS.index(shows) if shows in TIERS else NO      # "" - refused for its reason, what it shows not said
     bad = ([k for k in ("text", "frame", "banned") if a.get(k)] + ([] if a.get("real") else ["not real"])
            + ([f"modern: {a['modern']}"] if a.get("modern") else []) + (["warped"] if ai and a.get("warped") else []))
@@ -2752,7 +3252,8 @@ def _verdict(c: dict, a, *, ai: bool = False, exact_ok: bool = True, known=(), l
     return dict(c, shows=shows, tier=tier, bad=bad, clean=not bad, score=_SCORE_OF[tier] if not bad else min(2.0, _SCORE_OF[tier]),
                 depiction=_DEPICTION[tier], flags=list(bad),
                 reason=(f"{shows or '?'}: {a.get('subject') or '?'}" + (f"; {', '.join(bad)}" if bad else "")
-                        + (f"; another era: {a.get('made') or '?'}" if c.get("other_era") else "")),
+                        + (f"; another time ({off}): {a.get('made') or '?'}" if off else "")
+                        + ("; not the line's kind of thing" if c.get("not_same") else "")),
                 subject=a.get("subject", ""), person=bool(a.get("person")), studio=bool(a.get("studio")),
                 anchor=(a.get("x", 0.5), a.get("y", 0.5)), looked=looked)
 
@@ -2791,11 +3292,12 @@ def _aspect(p) -> float:
         return 0.0
 
 
-def _checked(store, items: list, ask, dirt=lambda a: "") -> dict:
+def _checked(store, items: list, ask, dirt=lambda a: "", model: str = "") -> dict:
     """{question: (answer or None, how)} for items [(.., question)] - how: stored, dirty:<what>, asked, claude, failed.
     The store answers first; a question another thread is asking, or a picture it is taking its first look at, is
     waited for (never asked twice at once; a picture found with added text or a frame is not sent again); the rest go
-    in one call: ask(items) -> ({question: answer}, who answered). Only Gemini's complete answers are kept."""
+    in one call: ask(items) -> ({question: answer}, who answered). Only Gemini's complete answers are kept, filed under
+    the `model` that answered (JUDGE_MODEL unless said)."""
     keys = [it[-1] for it in items]
     res = {}
     how = lambda via: "claude" if via == "claude" else "asked"
@@ -2815,7 +3317,7 @@ def _checked(store, items: list, ask, dirt=lambda a: "") -> dict:
         if todo:
             got, via = ask(todo)
             if via == "gemini":
-                store.put([(*k, a, dirt(a), JUDGE_MODEL) for k, a in got.items()])
+                store.put([(*k, a, dirt(a), model or JUDGE_MODEL) for k, a in got.items()])
             res.update({it[-1]: (got.get(it[-1]), how(via) if it[-1] in got else "failed") for it in todo})
     finally:
         store.release(list(mine))
@@ -2829,8 +3331,10 @@ def _checked(store, items: list, ask, dirt=lambda a: "") -> dict:
 
 
 def _ask_pictures(engine, lead: str, prompt: str, items: list, era: bool, ai: bool, purpose: str, media: str,
-                  px: int) -> tuple:
-    """One request (and one more for what it left unanswered): ({question: answer}, who answered)."""
+                  px: int, same: bool = False, model: str = "", thinking: str = "") -> tuple:
+    """One request (and one more for what it left unanswered): ({question: answer}, who answered). On JUDGE_MODEL at
+    JUDGE_THINKING unless `model` / `thinking` say otherwise (the AI checks: AI_CHECK_MODEL); `same`: the line's
+    kind-of-thing question was asked (SAME_Q)."""
     got, via = {}, ""
     for attempt in range(2):
         todo = [it for it in items if it[-1] not in got]
@@ -2843,14 +3347,14 @@ def _ask_pictures(engine, lead: str, prompt: str, items: list, era: bool, ai: bo
         try:
             with _timed("AI checks" if ai else "judging"):
                 raw = engine.pick_vision(prompt, small, max_tokens=4000,
-                                         model=JUDGE_MODEL, thinking=JUDGE_THINKING, purpose=purpose, media=media,
-                                         lead=lead, labels=labels, info=info)
+                                         model=model or JUDGE_MODEL, thinking=thinking or JUDGE_THINKING,
+                                         purpose=purpose, media=media, lead=lead, labels=labels, info=info)
         except Exception:                                            # noqa: BLE001 - asked once more
             raw = ""
         via = info.get("via") or via or "gemini"
         _vcount("calls")
         _vcount("sent", len(todo))
-        for j, a in _answers(raw, len(todo), era, ai).items():
+        for j, a in _answers(raw, len(todo), era, ai, same).items():
             if info.get("via") != "claude" or j < CLAUDE_EYES:
                 got[todo[j][-1]] = a
         if info.get("via") == "claude":          # Claude's answer is used once, never asked of it twice
@@ -2870,7 +3374,9 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
     (_verdict); a shot that names nothing has no "exact". Every answer is kept (verdicts.py): one asked before for this
     line comes from the store, a picture found with added text or a frame is not sent again, two shots never ask the
     same question at once. Candidates come back sorted by _rank. MRTRUTH_JUDGE=score: the old judge, read as tiers.
-    `purpose` names the calls in the Gemini spend ("frame recheck": a cropped photo asked again, _crop_recheck)."""
+    `purpose` names the calls in the Gemini spend ("frame recheck": a cropped photo asked again, _crop_recheck).
+    The century rule is code's (round 2, 2026-10-11): each answer names when its thing was made ("made"), and on a
+    specific line (_line_when) _verdict compares that with the line's own time and asks "same" (SAME_Q)."""
     if not cands:
         return []
     if JUDGE_MODE == "score":
@@ -2880,6 +3386,8 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
     era, stand = _era(row, dossier), _stand_in(row, dossier)
     names = _names_of(row, stand)
     lkey = _line_key("shot", row, before, after, era, names, stand)
+    line = _line_when(row, dossier, before, after, names, stand)    # specific? its own time? (the century rule)
+    spec = line["specific"]
     media = verdicts.media_rank(JUDGE_MEDIA)
     out, items = [], []
     for c, p in cands:
@@ -2902,17 +3410,20 @@ def judge(engine, row: dict, cands: list, dossier: dict, before: str = "", after
             _vcount("pixel_glossy_soft")
         items.append((len(out) + len(items), base, p, (base["pid"], _QSET, lkey, media)))
     lead = (CHECK_RULES + "\n" + _check_film(dossier) + "\n\n" + _shot_block(row, before, after, names, stand)
-            + (("\n" + ERA_Q.format(era=era) + "\n" + OTHER_ERA_Q.format(era=era)) if era else "") + "\n")
-    prompt = FORMAT.format(extra='"modern": "", ' if era else "", after_made='"other_era": false, ' if era else "")
+            + (("\n" + _era_q(era)) if era else "") + (("\n" + SAME_Q) if spec else "") + "\n")
+    prompt = FORMAT.format(extra=_extra_fields(bool(era), same=spec))
     res = _checked(store, items, lambda part: _ask_pictures(engine, lead, prompt, part, bool(era), False,
-                                                             purpose, JUDGE_MEDIA, JUDGE_PX),
+                                                             purpose, JUDGE_MEDIA, JUDGE_PX, same=spec),
                    dirt=lambda a: ",".join(k for k in ("text", "frame") if a.get(k)))
     for _k, base, _p, key in items:
         a, how = res.get(key, (None, "failed"))
         if how.startswith("dirty:"):
             out.append(_verdict(base, None, known=how[6:].split(","), looked="dirty"))
         else:
-            out.append(_verdict(base, a, exact_ok=bool(names or stand), looked=how))
+            v = _verdict(base, a, exact_ok=bool(names or stand), looked=how, line=line)
+            out.append(v)
+            if v.get("date_off") or v.get("not_same"):
+                _vcount("date_off" if v.get("date_off") else "not_same")
         _vcount(how.split(":")[0])
     # the time each was checked against ("" when the period was not asked): the gate reads it, never asks again
     return sorted((dict(c, era_asked=era) for c in out), key=_rank)
@@ -3557,6 +4068,13 @@ _SHOP_URL = re.compile(
     r"|poshmark|worthpoint|hobbydb|liveauctioneers|invaluable|catawiki|fineartamerica|pixels|displate|allposters"
     r"|posterazzi)\.", re.I)
 _SHOP_TITLE = re.compile(r"\b(for sale|buy now|add to cart|free shipping)\b", re.I)
+# ticket and tour sellers and facsimile shops (2026-10-11, round 2): every picture of theirs among the local films'
+# is stock or a glossy tourist shot - thevaticantickets.com's 7 distinct ones (an Unsplash library with Edison bulbs,
+# the HDR Sistine Hall, St Peter's Square under a blue sky, tourists on the Bramante stairs, a stock pile of books) and
+# headout.com's 5 (HDR halls, a Christmas-lit St Peter's) - and facsimiles.com's product shot of a facsimile carries the
+# seller's watermark. Refused before the museum-and-library pass: "vaticanmuseum-tickets.com" is not a museum
+_TICKET_HOST = re.compile(r"(?:^|\.)[\w-]*tickets?[\w-]*\.|(?:^|\.)(?:headout|tiqets|getyourguide|viator|klook|civitatis|"
+                          r"musement|facsimiles|ziereis-facsimiles)\.", re.I)
 PRINT_WORDS = re.compile(r"\b(photos?|photographs?|prints?|engravings?|lithographs?|etchings?|woodcuts?|postcards?|"
                          r"carte de visite|cabinet card|daguerreotypes?|tintypes?|albumen|stereoviews?|paintings?|"
                          r"portraits?|drawings?|antique|manuscripts?|codex|leaf|folio|incunabula?|maps?)\b", re.I)
@@ -3564,12 +4082,16 @@ PRINT_WORDS = re.compile(r"\b(photos?|photographs?|prints?|engravings?|lithograp
 
 def _web_ok(c: dict) -> bool:
     """One filter for every web picture, Bing's and Brave's, before anything is downloaded: no stock library, AI-picture
-    farm, video thumbnail, image farm, free-stock or clip-art page, no merchandise or toy, and a shop or auction listing
-    only of a photo, print or old object. A museum, library, archive or university page always passes."""
+    farm, video thumbnail, image farm, free-stock or clip-art page, ticket or tour seller or facsimile shop
+    (_TICKET_HOST), no merchandise or toy, and a shop or auction listing only of a photo, print or old object. Any other
+    museum, library, archive or university page passes."""
     import photofx
     url, page, thumb = (str(c.get(k) or "") for k in ("url", "source", "thumb"))
     title = str(c.get("title") or "")
     page_host = re.sub(r"^https?://", "", page).split("/")[0].lower()
+    url_host = re.sub(r"^https?://", "", url).split("/")[0].lower()
+    if _TICKET_HOST.search(page_host) or _TICKET_HOST.search(url_host):
+        return False
     if _ARCHIVE_HOST.search(page_host):
         return True
     where = f"{page} {url}".lower()
@@ -4685,20 +5207,23 @@ def _verdict_report(engine, job: Path, rows: list) -> dict:
             shown[t] = shown.get(t, 0) + 1
     out = {"checks": v, "tokens": dict(tok, usd=round(tok["usd"], 3)), "shown_tiers": shown, "mode": JUDGE_MODE,
            "frame_rechecks": _crop_stats(v, crop),
-           "media": JUDGE_MEDIA, "model": JUDGE_MODEL, "check_v": CHECK_V, "store": st.stats() if st else {}}
+           "media": JUDGE_MEDIA, "model": JUDGE_MODEL, "ai_check_model": AI_CHECK_MODEL, "check_v": CHECK_V,
+           "store": st.stats() if st else {}}
     k = lambda n: f"{n / 1000:.0f}k"
     engine.log(f"    picture checks ({JUDGE_MODE}, {JUDGE_MODEL}, {JUDGE_MEDIA}): {v.get('calls', 0)} calls, "
                f"{v.get('sent', 0)} pictures sent; {v.get('stored', 0)} from stored verdicts, {v.get('dirty', 0)} "
                f"skipped as known-dirty, {v.get('waited', 0)} waited for another shot, {v.get('later', 0)} not needed, "
                f"{v.get('blank', 0)} blank, {v.get('pixel_frame', 0)} framed and {v.get('pixel_glossy', 0)} glossy by the "
-               f"pixel test (not sent; {v.get('pixel_glossy_soft', 0)} more ranked lower as glossy); "
+               f"pixel test (not sent; {v.get('pixel_glossy_soft', 0)} more ranked lower as glossy), "
+               f"{v.get('date_off', 0)} of another time and {v.get('not_same', 0)} not the line's kind (in code); "
                f"{v.get('failed', 0)} unanswered, {v.get('claude', 0)} answered by Claude "
                f"(not kept); in {k(tok['in'])} / out {k(tok['out'] + tok['think'])} tokens (~${tok['usd']:.2f}); "
                f"frame rechecks {v.get('crop_rechecks', 0)} ({v.get('crop_asked', 0)} asked, {v.get('crop_passed', 0)} "
                f"passed, {v.get('crop_small', 0)} too small after the crop"
                + (f", {v['crop_capped']} over MRTRUTH_CROP_MAX {CROP_MAX}" if v.get("crop_capped") else "")
                + f", ~${crop['usd']:.3f}); on screen: "
-               + ", ".join(f"{t} {shown.get(t, 0)}" for t in ("exact", "kind", "generic", "no", "ai")))
+               + ", ".join(f"{t} {shown.get(t, 0)}" for t in ("exact", "kind", "generic", "no", "ai"))
+               + f"; AI-picture checks on {AI_CHECK_MODEL} ({AI_CHECK_MEDIA})")
     _dump(job / "mrtruth" / "verdicts.json", out)
     return out
 
@@ -4777,7 +5302,8 @@ def _ai_ok(engine, dest: Path, row: dict, dossier: dict, before: str = "", after
            nobody: bool = False) -> tuple:
     """(ok, why, verdict): a generated stand-in is checked with the candidates' questions (AI_RULES: real as a
     photograph, the owner's text rule word for word, a drawn frame, and warped faces, hands or figures), one picture a
-    call, a 1280-px copy at AI_CHECK_MEDIA. Used only when nothing is wrong and it shows the line's kind of thing or
+    call, a 1280-px copy at AI_CHECK_MEDIA, on AI_CHECK_MODEL (3.8 unless set: it stays on the stronger checker when
+    the candidates' checks run on Flash-Lite). Used only when nothing is wrong and it shows the line's kind of thing or
     better - `loose` (the second drawing, the subject shown through its objects): generic is enough. `nobody` (a place
     drawn for a line about the stand-in beside a shot that already shows a person): no stand-in in the question, and a
     person in view refuses it. (Audit 2026-10-08: garbled pseudo-script on 'manuscripts', burnt photo borders, a
@@ -4790,10 +5316,12 @@ def _ai_ok(engine, dest: Path, row: dict, dossier: dict, before: str = "", after
     key = (_photo_id(dest), _AI_QSET, _line_key("ai", row, before, after, era, names, stand), media)
     lead = (AI_RULES + "\n" + _check_film(dossier) + "\n\n" + _shot_block(row, before, after, names, stand, ai=True)
             + (("\n" + AI_ERA_Q.format(era=era)) if era else "") + "\n")
-    prompt = FORMAT.format(extra=('"modern": "", ' if era else "") + '"warped": false, ', after_made="")
+    prompt = FORMAT.format(extra=_extra_fields(bool(era), ai=True))
     item = (0, {"title": "a drawn stand-in"}, dest, key)
     res = _checked(_store(engine), [item], lambda part: _ask_pictures(engine, lead, prompt, part, bool(era), True,
-                                                                       "AI check", AI_CHECK_MEDIA, AI_CHECK_PX))
+                                                                       "AI check", AI_CHECK_MEDIA, AI_CHECK_PX,
+                                                                       model=AI_CHECK_MODEL, thinking=AI_CHECK_THINKING),
+                   model=AI_CHECK_MODEL)
     a, how = res.get(key, (None, "failed"))
     if a is None:
         return False, f"not checked ({how})", {}

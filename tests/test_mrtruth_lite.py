@@ -1,9 +1,8 @@
-"""Mr Truth: the Flash-Lite fixes (2026-10-11) - the century/tradition rule ("made", then the yes/no "other_era" that
-code turns into "no"), the four-edge frame list, a
-print's margin title as text, every field up to studio always given (and a refusal without "shows" read as a refusal),
-the AI check's fake border and garbled lettering first, CHECK_V 2, and the free pixel tests (bars, mounts, parts, gloss)
-before any paid question. Synthetic data, plus the comparison's real pictures when they are on this machine.
-No network, no paid call.
+"""Mr Truth: the Flash-Lite fixes (2026-10-11) - "made" before "shows" (round 2: the century itself is decided in
+code, tests/test_mrtruth_lite2.py), the four-edge frame list, a print's margin title as text, every field up to studio
+always given (and a refusal without "shows" read as a refusal), the AI check's fake border and garbled lettering first,
+and the free pixel tests (bars, mounts, parts, gloss) before any paid question. Synthetic data, plus the comparison's
+real pictures when they are on this machine. No network, no paid call.
 
     .venv/bin/python -m unittest tests.test_mrtruth_lite -v
 """
@@ -128,22 +127,13 @@ class Parser(unittest.TestCase):
         v = M._verdict({"title": "t"}, {"real": True, "text": False, "frame": False, "banned": False, "shows": ""})
         self.assertTrue(v.get("unjudged"))
 
-    def test_other_era_is_a_no_decided_in_code(self):
+    def test_other_era_is_no_longer_asked_or_read(self):
+        """Round 2: the century yes/no is gone - an old-style answer's other_era is ignored, never a refusal."""
         a = M._answer(base(modern="", other_era=True, shows="kind", made="c.1320 Gothic charter"), era=True)
+        self.assertNotIn("other_era", a)
         v = M._verdict({"title": "t"}, a)
-        self.assertEqual((v["shows"], v["tier"], v["clean"], v["other_era"], v["bad"]), ("no", M.NO, True, True, []))
-        self.assertIn("another era: c.1320 Gothic charter", v["reason"])
-        self.assertFalse(M._usable({"text": "x"}, v))
-        v = M._verdict({}, M._answer(base(modern="", other_era=True, shows="exact"), era=True))
-        self.assertEqual(v["tier"], M.NO)                                      # the named thing too (names are often loose)
-        a = M._answer(base(modern="", other_era=True), era=True)              # no shows: decided anyway
-        self.assertEqual(M._verdict({}, a)["tier"], M.NO)
-        for x in (base(modern="", shows="kind"), base(modern="", other_era="false", shows="kind")):
-            v = M._verdict({}, M._answer(x, era=True))                         # not said, or false: as answered
-            self.assertEqual((v["tier"], v.get("other_era")), (M.KIND, None))
-        self.assertNotIn("other_era", M._answer(base(shows="kind", other_era=True), era=False))   # not asked: not read
-        self.assertNotIn("other_era", M._answer(base(modern="", warped=False, shows="kind", other_era=True), era=True,
-                                                ai=True))                     # never asked of a drawing
+        self.assertEqual((v["shows"], v["tier"], v["clean"]), ("kind", M.KIND, True))
+        self.assertIsNone(M._answer(base(modern="", other_era=True), era=True))   # no shows, nothing wrong: asked again
 
     def test_made_is_kept_and_answers_mixed(self):
         a = M._answer(base(made=" c.1320  Gothic\ncharter ", shows="no"), era=False)
@@ -175,32 +165,44 @@ class Prompt(unittest.TestCase):
                      "strips stacked or side by side", "torn or burnt edges", "a ruler or colour chart",
                      "a viewer's or tool's window around the picture (a screenshot)",
                      "A title or caption printed in the margin of a print or plate counts as text",
-                     "made: roughly when and in what tradition", 'decided after "made"', "SPECIFIC", "ABSTRACT",
-                     "not merely something of the same general world", "not the centuries between",
-                     "a 1320 charter for a 4th-century codex",
-                     "on an ABSTRACT line, anything outside the film's world", "glossy or HDR tourist picture"):
+                     "made: when the main thing shown was made - the thing, not the photo: a year or century, then its "
+                     "tradition, at most 5 words", '"11th-c. Byzantine mosaic"',
+                     "any real view of it, of any date", "for a line that is a mood or an idea, anything of this "
+                     "film's world: its times and places (the <film> block) or one of its motifs",
+                     "a 1320 charter for a 4th-century codex", "glossy or HDR tourist picture"):
             self.assertIn(want, r)
+        for gone in ("other_era", "not the centuries between", "1990s photo of a 16th-c. hall", "SPECIFIC"):
+            self.assertNotIn(gone, r)
         self.assertIn(M.WORLD_RULE, M.CHECK_RULES)
         self.assertIn(M.WORLD_RULE, M.AI_RULES)
         self.assertLess(r.index("made:"), r.index("shows:"))
+        self.assertNotIn("made:", M.AI_RULES)                                  # a drawing has no date to check
 
     def test_format_every_field_up_to_studio(self):
-        f = M.FORMAT.format(extra='"modern": "", ', after_made='"other_era": false, ')
+        f = M.FORMAT.format(extra=M._extra_fields(True, same=True))
         self.assertTrue(f.endswith("Always give every field from real to studio, including shows; only subject, x and y "
                                    "may be left out."))
         self.assertNotIn("leave out subject", f)
-        order = [f.index(k) for k in ('"modern"', '"made"', '"other_era"', '"shows"', '"studio"')]
+        order = [f.index(k) for k in ('"modern"', '"made"', '"same"', '"shows"', '"studio"')]
         self.assertEqual(order, sorted(order))                                 # the date first, then the yes/no, then shows
-        json.loads(f.split("\n")[1].replace('"..."', '""'))                    # the example is valid JSON
-        json.loads(M.FORMAT.format(extra="", after_made="").split("\n")[1].replace('"..."', '""'))
+        for extra in (M._extra_fields(True, same=True), M._extra_fields(False), M._extra_fields(True, ai=True)):
+            json.loads(M.FORMAT.format(extra=extra).split("\n")[1].replace('"..."', '""'))   # the example is valid JSON
+        self.assertNotIn('"made"', M._extra_fields(True, ai=True))
+        self.assertNotIn('"same"', M._extra_fields(True))
 
-    def test_other_era_question(self):
-        q = flat(M.OTHER_ERA_Q.format(era="4th-5th century, origin"))
-        for want in ("true when the thing shown was MADE in a clearly different century or tradition than 4th-5th "
-                     "century, origin", "a 1320 charter, an 11th-century book or an 1893 painting for a 4th-century "
-                     "subject", "the thing, not the photo", "a person in the dress of their role",
-                     "on an ABSTRACT line anything of a time or place the <film> block names or one of its motifs"):
+    def test_same_and_era_questions(self):
+        q = flat(M.SAME_Q)
+        for want in ("same (asked for this shot): true when it shows the kind of thing this line is about, in its "
+                     "tradition", "a codex for a codex (not a library hall or a fresco)", "a papyrus (not a jar or a "
+                     "relief)", "for a person or an institution, that kind of person or its place"):
             self.assertIn(want, q)
+        self.assertIn("the lamps, blinds and fittings of an old building, do not count", flat(M.ERA_Q))
+        near = flat(M.ERA_Q_NEAR.format(era="late 1980s"))
+        self.assertIn("did not exist yet then (a smartphone, a flat screen, a face mask, today's fashions)", near)
+        self.assertNotIn("banned", near)
+        self.assertIn("did not exist yet", M._era_q("late 1980s, Vatican Library"))
+        self.assertIn("cars on the street", M._era_q("4th-5th century, origin"))
+        self.assertIn("cars on the street", M._era_q("Late antique (4th-5th century) through the present day"))
         self.assertNotEqual(M._qset("check"), M._qset("ai"))
 
     def test_ai_check_asks_the_fake_border_and_garbled_lettering_first(self):
@@ -223,17 +225,19 @@ class Prompt(unittest.TestCase):
         self.assertNotIn("its motifs", M._check_film({"topic": "t", "visualBrief": {"tone": "dark"}}))
 
     def test_prompt_stays_short(self):
-        # countTokens on the comparison's 39 check calls, captured from judge() (2026-10-11): 1,907.5 text tokens a call
-        # before, 2,054.8 now (+7.7%, the century question included); AI checks 1,803.7 -> 1,794.7. A guard, in letters:
-        self.assertLess(len(M.CHECK_RULES), 4100)
-        self.assertLess(len(M.AI_RULES), 4100)
-        self.assertLess(len(M.OTHER_ERA_Q), 560)
+        # countTokens on the round-1 comparison's 39 check calls, captured from judge() (round 2, 2026-10-11): 2,054.8
+        # text tokens a call at 8697813, 1,893.5 now (-7.9%; the round-2 sample's 51 calls 2,067.7 -> 1,908.9); AI checks
+        # 1,794.7 -> 1,670.7. A guard, in letters:
+        self.assertLess(len(M.CHECK_RULES), 3900)
+        self.assertLess(len(M.AI_RULES), 3700)
+        self.assertLess(len(M.SAME_Q), 320)
+        self.assertLess(len(M.ERA_Q_NEAR), 300)
         self.assertLess(len(M.FORMAT), 380)
 
     def test_new_question_set_and_card_answers_kept(self):
-        self.assertEqual(M.CHECK_V, 2)
-        self.assertNotEqual(M._qset("check"), M._qset("check", v=1))
-        self.assertNotEqual(M._qset("ai"), M._qset("ai", v=1))
+        self.assertEqual(M.CHECK_V, 3)
+        self.assertNotEqual(M._qset("check"), M._qset("check", v=2))
+        self.assertNotEqual(M._qset("ai"), M._qset("ai", v=2))
         card = hashlib.sha1("|".join(map(str, ["card", 1, M.JUDGE_MODEL, M.JUDGE_THINKING, M.AI_CHECK_PX, M.CARD_RULES,
                                                M.CARD_FORMAT])).encode()).hexdigest()[:12]
         self.assertEqual(M._CARD_QSET, card)                                 # the label check's answers still count
@@ -347,22 +351,24 @@ class InJudge(Tmp):
         self.assertEqual([(c["title"], c.get("glossy", False)) for c in out], [("plain", False), ("half", True)])
         self.assertEqual(M.VSTAT.get("pixel_glossy_soft"), 1)
 
-    def test_the_century_question_rides_with_the_era_question(self):
-        gem = FakeGemini(lambda cap: {"other_era": True, "made": "c.1320 charter"} if cap == "charter" else {})
+    def test_the_century_is_decided_in_code_and_same_rides_on_a_specific_line(self):
+        gem = FakeGemini(lambda cap: {"made": "c.1320 charter"} if cap == "charter" else {"made": "4th-c. codex"})
         e = Engine(gem)
         pics = [({"title": "charter"}, textured(self.d / "pics" / "c.jpg", 11)),
                 ({"title": "codex"}, textured(self.d / "pics" / "d.jpg", 12))]
-        out = M.judge(e, self.row, pics, self.dossier)
+        row = dict(self.row, entities=["Codex Example"])                      # names something: a specific line
+        out = M.judge(e, row, pics, self.dossier)
         call = gem.calls[0]
-        self.assertIn("other_era (asked for this shot): true when the thing shown was MADE in a clearly different "
-                      "century or\n  tradition than 4th century", call["lead"])
-        self.assertIn('"made": "...", "other_era": false, "shows"', call["prompt"])
-        self.assertEqual({c["title"]: (c["shows"], c.get("other_era", False)) for c in out},
-                         {"charter": ("no", True), "codex": ("kind", False)})
+        self.assertNotIn("other_era", call["lead"] + call["prompt"])
+        self.assertIn("same (asked for this shot)", call["lead"])
+        self.assertIn('"made": "...", "same": true, "shows"', call["prompt"])
+        self.assertEqual({c["title"]: (c["shows"], c.get("date_off")) for c in out},
+                         {"charter": ("no", "made later"), "codex": ("kind", None)})
+        self.assertIn("another time (made later): c.1320 charter", next(c for c in out if c["title"] == "charter")["reason"])
         self.assertEqual(out[0]["title"], "codex")
         gem2 = FakeGemini()
         M.judge(Engine(gem2), {"text": "Tourists fill the hall today.", "era": "today"}, pics, {})
-        self.assertNotIn("other_era", gem2.calls[0]["lead"] + gem2.calls[0]["prompt"])
+        self.assertNotIn("same (asked", gem2.calls[0]["lead"])                 # an abstract line: no "same"
         self.assertIn('"made": "...", "shows"', gem2.calls[0]["prompt"])
 
     def test_a_refusal_without_shows_is_kept_and_not_asked_again(self):
