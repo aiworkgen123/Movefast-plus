@@ -534,7 +534,11 @@ class Pacing(Base):
         self.assertEqual(rec["result"], "REPAIRED")
 
     def test_an_average_over_four_point_six_cuts_long_plain_shots(self):
+        # each 6.4 s shot says two whole sentences (owner 2026-10-11: the average is cut back at a sentence start)
         rows = film(n=40, ms=6400)
+        for r in rows:
+            ws = r["text"].split()
+            r["text"] = " ".join(ws[:3]) + ". " + " ".join(ws[3:])
         found, _ = self.find(rows)
         self.assertTrue(any(x["rule"] == "average" for x in found))
         rec, _ = self.gate(rows, halves=True)
@@ -542,6 +546,18 @@ class Pacing(Base):
         self.assertLessEqual(rows[-1]["endMs"] / 1000 / len(rows), M.GATE_AVG_S[1])
         self.assertTrue(all(r.get("pick") for r in rows))
         self.assertTrue(any(r.get("step") == "split-spare" for r in rows))
+
+    def test_a_slow_average_never_cuts_inside_a_sentence_after_the_opening(self):
+        # one 6.4 s sentence a shot, said in two halves: only the first 30 s may be cut inside one; the average stays
+        # over 4.6 s as a warning, never a stop (owner 2026-10-11, protect long sentences)
+        rows = film(n=40, ms=6400)
+        before = {r["startMs"] for r in rows}
+        rec, _ = self.gate(rows, halves=True)
+        self.assertNotEqual(rec["result"], "STOPPED")
+        cuts = [r["startMs"] for r in rows if r["startMs"] not in before]
+        mids = {(r["startMs"] + r["endMs"]) // 2 for r in film(n=40, ms=6400)}
+        self.assertTrue(all(c < M.PACE_OPEN_S * 1000 or c not in mids for c in cuts), cuts)
+        self.assertTrue(any(w.startswith("pacing: the average shot") for w in rec["warnings"]), rec["warnings"])
 
 
 class Pictures(Base):
