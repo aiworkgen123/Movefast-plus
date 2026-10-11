@@ -6371,12 +6371,14 @@ def _denoise_voice(mp3: Path, style: str = "") -> Path:
 def _final_mux(job: Path, mp3: Path, srt: Path, burn_subs: bool, add_qr: bool = False,
                vignette: bool = False, no_dust_ranges: list = None,
                sub_center: bool = False, no_sub_ranges: list = None, vignette_ranges: list = None,
-               look_ranges: list = None, cta_times: list = None, cuts: list = None) -> None:
+               look_ranges: list = None, cta_times: list = None, cuts: list = None,
+               audio_bitrate: str = "192k") -> None:
     """Screen-blend the dust overlay, optional black vignette, burn subtitles,
     overlay the QR bottom-right, add voiceover. no_dust_ranges = [(start,end)] time
     windows where the dust is suppressed (e.g. mindmap segments). vignette_ranges: a softer vignette only inside
     these windows (the documentary's film look), instead of the whole video. cuts: the planned shot starts in
-    seconds, when the style has a plan (the stall check then knows a cut from a slow shot, see _picture_stalls)."""
+    seconds, when the style has a plan (the stall check then knows a cut from a slow shot, see _picture_stalls).
+    audio_bitrate: the AAC rate of the final sound (a channel whose own sound effects peak at full scale asks more)."""
     sty_f = job / "style.txt"
     job_style = sty_f.read_text(encoding="utf-8").strip() if sty_f.exists() else ""
     # a channel may bring its own overlay (VHS tape noise instead of film dust) and a still laid over every frame
@@ -6529,7 +6531,7 @@ def _final_mux(job: Path, mp3: Path, srt: Path, burn_subs: bool, add_qr: bool = 
     # NEVER leave a truncated video.mp4 that later looks "cached".
     tail = ["-pix_fmt", "yuv420p",
             "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-            "-c:a", "aac", "-b:a", "192k", "-shortest",
+            "-c:a", "aac", "-b:a", audio_bitrate, "-shortest",
             "-t", f"{total_len:.3f}", "_video_tmp.mp4"]
     soft = ff + ["-c:v", "libx264", *_x264_final(job_style)] + tail
     ff = (ff + _hw_final_encoder() + tail) if _hw_final_encoder() else soft

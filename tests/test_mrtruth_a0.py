@@ -409,7 +409,7 @@ class Finish(unittest.TestCase):
             def _concat_segments(self, paths, out):
                 test.joined = [Path(p).name for p in paths]
 
-            def _final_mux(self, job, audio, srt, burn, add_qr=False, vignette=False, cuts=None):
+            def _final_mux(self, job, audio, srt, burn, add_qr=False, vignette=False, cuts=None, **kw):
                 test.cuts = cuts                 # the saved plan's shot starts go to the stall check (lane B)
                 (job / "video.mp4").write_bytes(b"x")
         self.engine = E()

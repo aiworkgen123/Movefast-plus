@@ -96,16 +96,17 @@ LIBRARY = {
     # least (until he rules): his 45-frame build and then 2 s of the settled date (his own shot holds it 78 frames)
     "date-stamp":     (False, 1, 3.5, 8.0, None, "any", [], {}),
     # the owner's map animation (2026-10-11, renderer LocationMap.tsx, planning half mrtruth_map.py), copied 1:1 with
-    # his sound (MAP_SFX): in the library and previewable, NOT placed yet, the same way. His shot is 8.0 s; on 7-8 s the
-    # camera move fills the shot and the ring and name keep his frames. Not shorter: his sound follows his camera (its
-    # whoosh peaks 0.8 s after the camera's fastest moment) and is cut with the shot; on 7 s the camera runs at most
-    # 1.14x his speed and the cut lands at -46.6 dBFS (his last 200 ms there; -52.6 at his 8 s), on 5 s it fell in the
-    # loudest whoosh (-23.7 dBFS) after the camera had stopped. Its one picture is the place's satellite plate.
+    # his sound (MAP_SFX): in the library and previewable, NOT placed yet, the same way. His shot is 8.0 s; on 7.5-8 s
+    # the camera move fills the shot and the ring and name keep his frames. Not shorter: his sound is his, never
+    # time-scaled, and its whoosh follows his camera's fastest moment (his 4.0 s); the move squeezed into the shot
+    # brings that moment n/2 frames in, 0.25 s early at 7.5 s (0.5 s at 7 s, 1.5 s at 5 s, where the cut also fell in
+    # his loudest whoosh, -23.7 dBFS; at 7.5 s it lands at -48.6, -52.6 at his 8 s). Fix round 2 raised the floor from
+    # 7 s. Its one picture is the place's satellite plate.
     # FOR THE PLANNER, when his rulings come: the place's name as the narration says it (mrtruth_map.label_fits), its
-    # coordinates from the dossier or Claude, and the shot whose words name it (7-8 s); then at planning time
+    # coordinates from the dossier or Claude, and the shot whose words name it (7.5-8 s); then at planning time
     # pick = mrtruth_map.build_place(name, lat, lon, <job>/mrtruth/maps, <output>/_shared) - None (the geocoder unsure,
     # no imagery) keeps the photograph - and row["device"] = {"id": "location-map", "label": name}
-    "location-map":   (False, 1, 7.0, 8.0, None, "any", [], {"label": 32}),
+    "location-map":   (False, 1, 7.5, 8.0, None, "any", [], {"label": 32}),
 }
 AWAITING_RULINGS = {"date-stamp", "location-map"}     # drawn and previewed, never placed, until the owner rules where they go
 # his two clips cut in and cut out hard: transitions() gives a shot carrying one of these a cut in (no flash, burn or
@@ -204,13 +205,14 @@ SFX_MIN_GAP_S = 12.0
 # Stereo, as his (it is wide: folded to mono it loses 6 LU). Never thinned by SFX_MIN_GAP_S; a transition sound that
 # would land on the map shot is left out, so his plays as it is. On a shot shorter than his 8 s it is cut
 # MAP_SFX_TAIL_S after the shot's last frame (his own cut) with a MAP_SFX_FADE_S fade; on a longer one it simply ends.
-# A limiter at full scale catches only the overs of voice + boom. After the film's AAC encode it measures -14.3 LUFS: the
-# native encoder trims his 0 dBFS boom by 0.3 dB (his own encode measured -13.6 decoded); limiting it to -1 dBFS first
-# would cost 1.1 LU, so it is not done.
+# A limiter at full scale catches only the overs of voice + boom. At the film's usual 192 kbps the native AAC encoder
+# trimmed his 0 dBFS boom by 0.3 dB (-14.3 LUFS; his own 317 kbps encode measured -13.6 decoded), so a film that carries
+# his sound is encoded at MAP_AUDIO_BITRATE, which keeps his peak; limiting it to -1 dBFS first would cost 1.1 LU.
 MAP_SFX, MAP_SFX_DB = "map_location.wav", 0.0
 MAP_SFX_RATE, MAP_SFX_OFFSET_SAMPLES, MAP_SFX_SAMPLES = 48000, 5431, 380899
 MAP_SFX_OFFSET_S = MAP_SFX_OFFSET_SAMPLES / MAP_SFX_RATE          # 0.113146 s
 MAP_SFX_TAIL_S, MAP_SFX_FADE_S = 0.0485, 0.04
+MAP_AUDIO_BITRATE = "320k"                 # the film's final AAC when his map sound is in it (assemble: 192k drops his peak)
 
 # P03's headline is set at 92px in a 1120px column, two lines at most (devices.ts p03HeadlineFits)
 _P03_EM = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -.,:;!?&/()'\"",
@@ -7023,11 +7025,12 @@ def _content_draw(text: str) -> float:
     return int(hashlib.sha256(text.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
 
 
-def transitions(rows: list) -> None:
+def transitions(rows: list) -> list:
     """transitionIn/Out per shot: a dip to black at a section turn, then (keyed on each shot's own words, never
     periodic) a film burn, flash, push or slide at the repo's shares; everything else a hard cut. A shot with one of the
-    owner's hard-cut templates (HARD_CUT_DEVICES) is cut into, and the shot after it never burns over its end."""
-    last_burn, run = -1e9, 0
+    owner's hard-cut templates (HARD_CUT_DEVICES) is cut into, and the shot after it never burns over its end. A section
+    turn that lands on one loses its dip (and the dip's thud) until he rules: the notes returned name each, for the log."""
+    last_burn, run, notes = -1e9, 0, []
     burns_by_min = {}
     for i, r in enumerate(rows):
         r["tin"], r["tout"] = {"type": "cut", "durationFrames": 0}, None
@@ -7037,6 +7040,9 @@ def transitions(rows: list) -> None:
         t = r["startMs"] / 1000.0
         dev = (r.get("device") or {}).get("id")
         if dev in HARD_CUT_DEVICES:
+            if r.get("section_turn") or dev == "chapter-title":
+                notes.append(f"  transitions: shot {i} ({t:.1f}s) turns a section but carries his {dev} - cut in hard, "
+                             f"its dip to black and thud left out (until he rules)")
             run = 0
             continue
         if r.get("section_turn") or dev == "chapter-title":
@@ -7063,6 +7069,7 @@ def transitions(rows: list) -> None:
             r["tin"] = {"type": "pushCut", "durationFrames": PUSH_FRAMES}
         elif v < FLASH_SHARE + PUSH_SHARE + SLIDE_SHARE and prev_pic and r.get("pick"):
             r["tin"] = {"type": "slide", "durationFrames": SLIDE_FRAMES}
+    return notes
 
 
 _MOVES = [(1.0, 1.08, -0.15, 0.0, 0.0, 0.0), (1.1, 1.02, 0.0, 0.12, 0.04, 0.0), (1.02, 1.1, 0.12, -0.08, 0.0, -0.04),
@@ -7477,8 +7484,11 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
                    "(dynaudnorm) evens out his map sound too: his boom and riser are not 1:1 (USE_SOUND_BED=0 keeps them)")
     # the planned cuts go with it: a freeze is a failed read only if it runs to the end across one of them (a slow
     # move on a dark photo or a 13 s planned hold ends at its own cut; owner 2026-10-10, three needless re-muxes)
+    # his map sound peaks at full scale: at 192 kbps the AAC encode took 0.3 dB off his boom (peak 0.951 against his
+    # 1.001; his own file is AAC at 317 kbps), at 320 kbps it keeps it (1.0005). Only a film that carries it pays for it
     engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False,
-                      cuts=[sc["startFrame"] / FPS for sc in sc_list])
+                      cuts=[sc["startFrame"] / FPS for sc in sc_list],
+                      **({"audio_bitrate": MAP_AUDIO_BITRATE} if _map_sounds(sc_list) else {}))
     (job / "_visual.mp4").unlink(missing_ok=True)
     if audio != mp3:
         audio.unlink(missing_ok=True)
@@ -7560,7 +7570,8 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     left = _gaps(rows)
     engine.log(f"  words on screen: {len(marks) - 2} overlays, longest stretch without "
                f"{max(b - a for a, b in zip(marks, marks[1:])) / 1000:.0f}s" + (f" ({len(left)} over {OVERLAY_MAX_GAP_S:.0f}s)" if left else ""))
-    transitions(rows)
+    for note in transitions(rows) or []:         # a section turn's dip given up for his clip, said in the log
+        engine.log(note)
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
     _gate_scenes(engine, job, rows, sc_list)     # the gate's last look, at the scenes as drawn (effects, moves, frames)

@@ -127,9 +127,12 @@ export function LocationMap({ src, label }: LocationMapProps): ReactNode {
               style={{ position: 'absolute', left: b.x0 * d, top: b.y0 * d, overflow: 'visible' }}
             >
               <defs>
-                {/* The marker's, on a box just round it (the dot and the ring reach 39 units). */}
-                <filter id={`${uid}-soft-mark`} filterUnits="userSpaceOnUse" x={-50} y={-50} width={100} height={100}>
-                  <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.marker} />
+                {/* The marker's, on a box just round it (the dot and the ring reach 39 units); the ring's is smaller. */}
+                <filter id={`${uid}-soft-dot`} filterUnits="userSpaceOnUse" x={-50} y={-50} width={100} height={100}>
+                  <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.dot} />
+                </filter>
+                <filter id={`${uid}-soft-ring`} filterUnits="userSpaceOnUse" x={-50} y={-50} width={100} height={100}>
+                  <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.ring} />
                 </filter>
                 <filter id={`${uid}-soft-line`} {...REGION}>
                   <feGaussianBlur stdDeviation={LOCATION_MAP.overlaySoft.line} />
@@ -182,7 +185,8 @@ function Marker({ frame, uid }: { frame: number; uid: string }): ReactNode {
   /* A circle's stroke starts at 3 o'clock and runs clockwise on screen: his east, south, west, north. Drawn closed
      (ring and shadow) once `ringClosedAt` of it is, so no hairline gap shows where it meets its start. */
   const dash = sweep >= m.ringClosedAt ? undefined : `${circumference * sweep} ${circumference * 2}`
-  const soft = `url(#${uid}-soft-mark)`
+  const softDot = `url(#${uid}-soft-dot)`
+  const softRing = `url(#${uid}-soft-ring)`
   const rs = m.ringShadow
   /* The square's 1.6-unit linear edge as a Gaussian of the same variance (a uniform ramp: width / sqrt 12). */
   const clipBlur = rs.clipSoft / Math.sqrt(12)
@@ -219,7 +223,7 @@ function Marker({ frame, uid }: { frame: number; uid: string }): ReactNode {
             opacity={m.dotShadow.opacity}
             filter={`url(#${uid}-dot-shadow)`}
           />
-          <circle cx={0} cy={0} r={m.dotRadius} fill={m.colour} filter={soft} />
+          <circle cx={0} cy={0} r={m.dotRadius} fill={m.colour} filter={softDot} />
         </g>
       )}
       {sweep > 0 && (
@@ -244,7 +248,7 @@ function Marker({ frame, uid }: { frame: number; uid: string }): ReactNode {
             stroke={m.colour}
             strokeWidth={m.ringStroke}
             strokeDasharray={dash}
-            filter={soft}
+            filter={softRing}
           />
         </>
       )}

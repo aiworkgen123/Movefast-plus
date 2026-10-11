@@ -46,9 +46,9 @@ class Planner(unittest.TestCase):
         on, pics, lo, hi, cap, pos, chain, lim = M.LIBRARY["location-map"]
         self.assertFalse(on)                                   # the table's never-placed mark
         self.assertIn("location-map", M.AWAITING_RULINGS)
-        self.assertEqual((pics, lo, hi, cap, chain, lim), (1, 7.0, 8.0, None, [], {"label": 32}))
+        self.assertEqual((pics, lo, hi, cap, chain, lim), (1, 7.5, 8.0, None, [], {"label": 32}))
         self.assertEqual(M.BUILD_FRAMES["location-map"], 51)   # his name settles on frame 51
-        self.assertAlmostEqual(M._need_s("location-map"), 7.3)
+        self.assertAlmostEqual(M._need_s("location-map"), 7.8)
         row = next(p for p in M.PREVIEW if p[0] == "location-map")
         self.assertEqual(row[2], 240)                          # his shot: 8.000 s
         self.assertEqual(row[3], "map:Lake Monoun:5.58:10.585:5.5729:10.5853")   # centred on his own ground
@@ -85,7 +85,7 @@ class Planner(unittest.TestCase):
         # every 3rd shot carries one of his two clips, some on a section turn; over many films the shots around them
         # still burn, flash and dip, but nothing lies over his own frames: a cut in, never a burn out
         self.assertEqual(M.HARD_CUT_DEVICES, {"location-map", "date-stamp"})
-        seen, kinds = 0, set()
+        seen, kinds, said, turns = 0, set(), [], 0
         for seed in range(60):
             rows, _ = film_rows(n=30, secs=8.0)
             for i, r in enumerate(rows):
@@ -96,16 +96,32 @@ class Planner(unittest.TestCase):
                     r["section_turn"] = (i + seed) % 5 == 0
                 elif i % 7 == 3:
                     r["section_turn"] = True
-            M.transitions(rows)
+            said += M.transitions(rows)
             for i, r in enumerate(rows):
                 if (r.get("device") or {}).get("id") in M.HARD_CUT_DEVICES:
                     seen += 1
+                    turns += bool(i and r.get("section_turn"))
                     self.assertEqual(r["tin"], {"type": "cut", "durationFrames": 0}, (seed, i))
                     self.assertIsNone(r["tout"], (seed, i))                    # the next shot never burns over it
                 else:
                     kinds.add(r["tin"]["type"])
         self.assertGreater(seen, 500)
         self.assertTrue({"filmBurn", "flash", "dipToBlack", "cut"} <= kinds, kinds)   # the others still get theirs
+        # a section turn's dip given up for his clip is said in the plan log, once each (fix round 2)
+        self.assertGreater(turns, 50)
+        self.assertEqual(len(said), turns)
+        self.assertTrue(all("turns a section but carries his" in s and "dip" in s for s in said), said[:2])
+
+    def test_a_film_with_his_sound_is_encoded_to_keep_his_peak(self):
+        # at 192 kbps the AAC encode took 0.3 dB off his boom (his file is 317 kbps); a film with his sound gets 320k,
+        # every other film keeps the engine's 192k
+        import inspect
+        import make_video
+        self.assertEqual(inspect.signature(make_video._final_mux).parameters["audio_bitrate"].default, "192k")
+        self.assertIn('"-b:a", audio_bitrate', inspect.getsource(make_video._final_mux))
+        self.assertEqual(M.MAP_AUDIO_BITRATE, "320k")
+        src = inspect.getsource(M.assemble)
+        self.assertIn('**({"audio_bitrate": MAP_AUDIO_BITRATE} if _map_sounds(sc_list) else {})', src)
 
 
 # ── his sound ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -136,14 +152,16 @@ class Sound(unittest.TestCase):
         self.assertIn(f"adelay={round(short[0] * 48000)}S:all=1", chain)      # to the sample
 
     def test_the_shortest_seat_cuts_only_his_tail(self):
-        # on 7 s (the library's floor) his sound is cut where it is already down to -46.6 dBFS (rms of its last 200 ms;
-        # -52.6 at his 8 s); on 5 s it was cut in the loudest whoosh (-23.7 dBFS) - why the floor is 7 s
+        # on 7.5 s (the library's floor since fix round 2) his sound is cut where it is already down to -48.6 dBFS (rms
+        # of its last 200 ms; -52.6 at his 8 s); on 5 s it was cut in the loudest whoosh (-23.7 dBFS). The floor is 7.5
+        # s, not 7: the camera's fastest moment comes n/2 frames in, 0.25 s before his whoosh expects it at 7.5 s
         import numpy as np
         with wave.open(str(R / "sfx" / M.MAP_SFX)) as w:
             a = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, 2).astype(np.float64) / 32768
         db = lambda end: 20 * np.log10(np.sqrt((a[int((end - 0.2) * 48000):int(end * 48000)] ** 2).mean()))
         keep = lambda secs: M._map_sounds([shot(0, round(secs * M.FPS), dev=MAPDEV)])[0][1]
-        self.assertLess(db(keep(M.LIBRARY["location-map"][2])), -46)
+        self.assertLess(db(keep(M.LIBRARY["location-map"][2])), -48)
+        self.assertGreaterEqual(M.LIBRARY["location-map"][2] * M.FPS, 240 - 15)            # at most 0.25 s early
         self.assertGreater(db(keep(5.0)), -30)
 
     def test_a_music_bed_that_would_level_his_sound_is_named(self):
@@ -352,8 +370,68 @@ class Plate(unittest.TestCase):
         self.assertEqual(out[-1], (255, 255, 255))             # his cloud puffs are white
         for c in range(3):
             self.assertTrue(all(b[c] >= a[c] for a, b in zip(out, out[1:])))   # never inverts a tone
-        g = MAP.grade(Image.new("RGB", (1, 1), (57, 70, 61))).getpixel((0, 0))  # S2's mean on his region
-        self.assertTrue(abs(g[0] - 72) < 6 and abs(g[1] - 91) < 6 and abs(g[2] - 49) < 6, g)  # -> his mean look
+        g = MAP.grade(Image.new("RGB", (1, 1), (53, 67, 58))).getpixel((0, 0))  # S2's mean on his view, haze off
+        self.assertTrue(abs(g[0] - 71) < 3 and abs(g[1] - 92) < 3 and abs(g[2] - 50) < 3, g)  # -> his mean look
+
+    @staticmethod
+    def _ground(haze=True, lake=True):
+        """A small plate (TPU 0.25) in Monoun's S2 colours: wet forest over the west third, mixed ground in the middle,
+        savanna on the east third, a flat dark lake in the middle and (haze) a mottled blue-grey bank over the forest."""
+        import numpy as np
+        rng = np.random.default_rng(7)
+        h, w = 390, 550
+        a = np.empty((h, w, 3), np.float32)
+        a[:] = (46, 62, 52)
+        a[:, :180] = (44, 62, 55)
+        a[:, 370:] = (67, 76, 61)
+        a += rng.normal(0, 3.5, (h, w, 1)).astype(np.float32) * (1, 1.2, 1)
+        yy, xx = np.mgrid[0:h, 0:w]
+        if lake:
+            a[(yy - 195) ** 2 + (xx - 275) ** 2 < 14 ** 2] = (37, 49, 52)
+        if haze:
+            mottle = 0.6 + 0.4 * rng.random((h // 4 + 1, w // 4 + 1))[yy // 4, xx // 4]
+            a[:, :180] += ((12.0, 13.0, 17.0) * mottle[:, :180, None]).astype(np.float32)
+        return a.clip(0, 255), (yy - 195) ** 2 + (xx - 275) ** 2 < 8 ** 2
+
+    def test_the_haze_is_found_by_scale_and_taken_off(self):
+        # a texel of haze and a texel of lake or forest overlap in colour; a bank 45 units wide does not
+        import numpy as np
+        hazy, lake = self._ground()
+        out, info = MAP.dehaze(hazy, TPU)
+        self.assertFalse(info.get("skipped"), info)
+        clear, _ = self._ground(haze=False)
+        west, mid = (slice(20, 370), slice(10, 160)), (slice(20, 370), slice(215, 350))
+        before = hazy[west].reshape(-1, 3).mean(0) - clear[west].reshape(-1, 3).mean(0)
+        after = out[west].reshape(-1, 3).mean(0) - clear[west].reshape(-1, 3).mean(0)
+        self.assertTrue((before > 8).all(), before)
+        # most of it off, toward the forest under it (what is measured is the airlight over the plate's own clear ground)
+        self.assertTrue((after < 0.5 * before).all() and (after > -6).all(), (before, after))
+        self.assertLess(float(out[west].std()), float(hazy[west].std()))         # the mottle goes with it
+        d = np.abs(out[mid] - hazy[mid])                                         # the clear ground is not touched
+        self.assertLess((float(d.mean()), float(d.max())), (0.1, 2.0))
+        self.assertLess(float(np.abs(out[:, 400:] - hazy[:, 400:]).max()), 0.5)  # nor the savanna
+        self.assertLess(float(np.abs(out[lake] - hazy[lake]).max()), 0.5)        # nor the lake
+        out, info = MAP.dehaze(clear, TPU)                      # no haze: next to nothing moves (wet forest is a
+        self.assertLess(float(np.abs(out - clear).mean()), 1.0)  # little blue in S2, but no brighter than clear ground)
+        dry = np.empty((390, 550, 3), np.float32)
+        dry[:] = (150, 130, 100)                                 # a desert: no blue anywhere, left as it is
+        same, info = MAP.dehaze(dry, TPU)
+        self.assertTrue(info.get("skipped"))
+        self.assertIs(same, dry)
+
+    def test_open_water_is_found_and_given_his_teal(self):
+        import numpy as np
+        from PIL import Image
+        a, lake = self._ground(haze=False)
+        w = MAP.water(a, TPU)
+        self.assertGreater(float(w[lake].min()), 0.8)                            # the lake, one patch
+        self.assertLess(float(w[:, :200].mean()), 0.02)                          # textured forest is not water
+        self.assertLess(float(w[:, 400:].max()), 0.01)                           # savanna never
+        out, k, info = MAP.look(Image.fromarray(a.astype(np.uint8)), TPU)
+        o = np.asarray(out, np.float32)[lake].mean(0)
+        g = np.asarray(MAP.grade(Image.fromarray(a.astype(np.uint8))), np.float32)[lake].mean(0)
+        np.testing.assert_allclose(o / g, MAP.WATER_TONE, atol=0.06)             # less red, as his lakes
+        self.assertGreater(info["water"], 0)
 
 
 # ── the place check ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -457,7 +535,12 @@ class Geocode(unittest.TestCase):
             d = Path(self.tmp.name)
             pick = MAP.build_place("Lake Monoun", 5.58, 10.585, d / "maps", d / "shared", get=get, say=lambda m: None)
             self.assertTrue(Path(pick["photo"]).exists())
-            self.assertEqual((pick["license"], pick["url"]), ("CC BY 4.0", "https://cloudless.eox.at"))
+            self.assertEqual((pick["license"], pick["url"]), ("CC BY 4.0", "https://maps.eox.at"))   # EOX::Maps asks a link back
+            self.assertIn("https://cloudless.eox.at", pick["title"])
+            M._credits(d, [{"pick": pick, "companions": []}])          # the film's credits carry it as given
+            cr = json.loads((d / "credits.json").read_text(encoding="utf-8"))
+            self.assertEqual((cr[0]["url"], cr[0]["license"]), ("https://maps.eox.at", "CC BY 4.0"))
+            self.assertIn("EOX::Maps", cr[0]["title"])
             self.assertIn("EOX IT Services GmbH", pick["title"])
             self.assertIn("Copernicus Sentinel data 2016", pick["title"])
             self.assertIn("OpenStreetMap", pick["title"])
@@ -541,8 +624,11 @@ class Renderer(unittest.TestCase):
                      "vignette: { r0: 0.6135, r1: 1.6559, ex: 0.9234, ey: 0.9255, amount: [0.591, 0.6796, 0.4277] as const }",
                      f"metresPerUnit: {MAP.M_PER_UNIT}", "LOCATION_MAP_BUILD_END_FRAMES = 51"):
             self.assertIn(want, clock)
-        for want in ("overlaySoft: { marker: 0.4, line: 0.25, label: 0.55 }", "ringClosedAt: 0.99", "minDrawn: 4"):
-            self.assertIn(want, clock)                         # fix round 1: his softness, his closed ring, no sliver
+        for want in ("overlaySoft: { dot: 0.4, ring: 0.25, line: 0.25, label: 0.55 }", "ringClosedAt: 0.99", "minDrawn: 4"):
+            self.assertIn(want, clock)                         # fix rounds 1-2: his softness, his closed ring, no sliver
+        # fix round 2: the ring shadow refitted on our render, his clip square's edge bands weighted; clipSoft kept
+        self.assertIn("ringShadow: { opacity: 0.65, sigma: 12.644, dx: -0.372, dy: 10.0, clipHalfW: 43.545, "
+                      "clipHalfH: 43.65, clipSoft: 1.76 }", clock)
         x0, x1, y0, y1 = MAP.PLATE
         self.assertIn(f"plate: {{ x0: {x0}, x1: {x1}, y0: {y0}, y1: {y1} }}", clock)
         # his camera covers the plate on every frame (the end frame turned 13 deg needs +-1056.8 x +-741.9)
@@ -555,10 +641,10 @@ class Renderer(unittest.TestCase):
         self.assertIn("useId()", tsx)
         self.assertNotIn('id="lm-', tsx)                       # no fixed document ids left
         self.assertNotIn("url(#lm-", tsx)
-        for f in ("soft-mark", "soft-line", "soft-label"):
+        for f in ("soft-dot", "soft-ring", "soft-line", "soft-label"):
             self.assertEqual(tsx.count("id={`${uid}-" + f + "`}"), 1, f)
             self.assertEqual(tsx.count("url(#${uid}-" + f + ")"), 1, f)
-        self.assertEqual(tsx.count("filter={soft}"), 2)        # the dot and the ring
+        self.assertEqual((tsx.count("filter={softDot}"), tsx.count("filter={softRing}")), (1, 1))   # each its own
         self.assertIn("if (length < l.minDrawn) return null", tsx)
         self.assertIn("sweep >= m.ringClosedAt ? undefined", tsx)
 

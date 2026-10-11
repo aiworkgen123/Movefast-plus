@@ -17,10 +17,21 @@ here, stored in the job like any other picture and never fetched at render time.
             at least that, downsampled with Lanczos. Fallback: one zoom lower (softer), then no plate - the template is
             not used and the shot stays a photograph. A zoom gives up at its first tile that fails all its tries, and
             after PLATE_DEADLINE_S in all, so a service that hangs instead of refusing costs about a minute a zoom.
-  grade     his look, fitted on his end frame against the same S2 imagery registered under it: per channel
-            gain * x^gamma + offset (GRADE). Mean RGB 71.6/91.2/48.6 vs his 71.9/91.6/49.2, median hue 90 deg, saturation
-            0.47 and value 0.36 for both. A smooth curve, not his region's histogram, so a desert or a city keeps its own
-            colours under the same look.
+  haze      Sentinel-2 cloudless keeps a thin blue-grey haze over wet tropical forest (Monoun: a mottled bank over the
+            plate's west quarter, read as a separate cloud next to his smooth green haze). Haze and lakes overlap in
+            colour texel by texel, so it is found by SCALE: where the plate is blue (blue over the mean of red and green)
+            across HAZE["scale"] units - a lake is too small and too dark to count - and there the airlight above the
+            plate's clear ground (its dark channel over HAZE["clear_pct"]% of the haze-free ground) is taken off, per
+            texel at a 2-unit scale so the mottle goes with it, never below the darkest clear ground (`dehaze`). A plate
+            with too little clear ground or haze is left as it is (Texoma 2% haze, Qumran a few levels).
+  grade     his look, fitted on his end frame against the same S2 imagery registered under it (the haze taken off): per
+            channel gain * x^gamma + offset (GRADE). His end view's west / middle / east thirds within 1.5-3 levels (the
+            haze left the west 8 levels bright and, fitted with it, the east 5-7 dark). A smooth curve, not his region's
+            histogram, so a desert or a city keeps its own colours under the same look.
+  water     his lakes are dark teal; S2's, through his curve, grey-olive and 12 levels too red. Open water is found by
+            what it is - dark (or darker than the ground round it, a reservoir's arm), blue at least about green, and
+            FLAT where dark forest is textured - and spread so a lake is one patch; it gets WATER_TONE after the grade
+            (Monoun's lake, darkest 5%: (26, 50, 32) vs his (24, 45, 30), was (34, 51, 29)).
   exposure  his curve was fitted on green tropical ground (mean luma ~82 in his end view); on a bright place it lifts
             the ground to near white (Qumran: 182 over the end view, 225 behind the line and name), where his white line
             and name stop reading. So a plate whose end view is brighter than VIEW_LUMA_MAX, or whose line-and-name
@@ -33,7 +44,7 @@ here, stored in the job like any other picture and never fetched at render time.
 
 FOR THE PLANNER (not written yet - the owner rules on placement later; nothing places this template today). To seat a
 location-map on a shot the planner needs: the place's name as the narration says it (the label, `label_fits`), its
-coordinates from the dossier or Claude (lat, lon), and the moment - the shot whose words name the place, 7-8 s long.
+coordinates from the dossier or Claude (lat, lon), and the moment - the shot whose words name the place, 7.5-8 s long.
 Then, at planning time: `pick = build_place(name, lat, lon, <job>/mrtruth/maps, <output>/_shared, say=engine.log)`;
 a pick -> row["pick"] = pick, row["device"] = {"id": "location-map", "label": name}; None -> the shot keeps its
 photograph. The sound is cued by mrtruth._sfx_audio from the device alone.
@@ -61,10 +72,13 @@ HERE = Path(__file__).resolve().parent
 LAYER = "s2cloudless_3857"                 # EOX Sentinel-2 cloudless 2016, Web Mercator: CC BY 4.0 (2018+ are NC)
 TILE_URL = "https://tiles.maps.eox.at/wmts/1.0.0/" + LAYER + "/default/g/{z}/{y}/{x}.jpg"
 ATTRIBUTION = ("EOxCloudless 2016 https://cloudless.eox.at by EOX IT Services GmbH (Contains modified Copernicus "
-               "Sentinel data 2016)")
+               "Sentinel data 2016), served by EOX::Maps https://maps.eox.at")
 LICENSE = "CC BY 4.0"
 LICENSE_URL = "https://creativecommons.org/licenses/by/4.0/"
-SOURCE_URL = "https://cloudless.eox.at"
+# the pick's link (credits.json `url`): maps.eox.at asks an application using its tiles for "a link back to EOX::Maps as
+# well as appropriate attribution"; the layer's own page is in ATTRIBUTION. No credit is drawn on screen (his clip has
+# none) - whether one should be is the owner's ruling
+SOURCE_URL = "https://maps.eox.at"
 PLACE_CREDIT = "place located with OpenStreetMap Nominatim (data (c) OpenStreetMap contributors, ODbL)"
 USER_AGENT = (os.environ.get("MRTRUTH_MAP_USER_AGENT") or
               "MoveFast-MrTruth/1.0 (location-map template; +https://github.com/aiworkgen123/video-generator)")
@@ -88,7 +102,26 @@ EARTH_M_PER_PX0 = 156543.03392804097       # Web Mercator ground metres per pixe
 # his look on the 2016 mosaic: out = 255 * clip(gain * (in/255)^gamma + offset), per channel, with gain + offset = 1 so
 # white stays white (his cloud puffs are white). Fitted 2026-10-11 on this module's own plate (z11, softened) laid under
 # his de-vignetted end frame: quantiles 1-99% within 1.2 / 1.3 / 2.1 levels (R / G / B)
-GRADE = {"R": (0.5285, 1.3093, -0.3093), "G": (0.3633, 1.7267, -0.7267), "B": (0.5182, 1.5418, -0.5418)}
+GRADE = {"R": (0.596, 1.1894, -0.1894), "G": (0.3651, 1.6715, -0.6715), "B": (0.2642, 2.5, -1.5)}
+# 2026-10-11 (fix round 2): refitted on the plate with its haze taken off (HAZE); quantiles 1-99% within 2.1 / 1.8 / 2.3
+# levels (blue at the fit's bound, offset -1.5). The first fit (0.5285, 1.3093 / 0.3633, 1.7267 / 0.5182, 1.5418) was
+# made with the haze in.
+# the haze (see `haze` above), in plate units at one texel a unit: found over `scale`, where the blue index's local mean
+# rises from blue[0] to blue[1]; the clear ground's dark channel is its `clear_pct` percentile; `omega` of the airlight
+# above it is taken off (more than all of it: the clear level is the plate's, and wet forest sits under it). Fitted on
+# Monoun against his west third. Its EDGE: found over `scale` units the bank fades out some 20 units before the haze
+# does where it meets savanna (not blue), and left a pale rim; within `edge_reach` of a bank the index over `edge`
+# units takes over, from `edge_blue` (haze over savanna is less blue than over forest; clear savanna is at -12..-18). The airlight is capped at the bank's own `cap_pct` percentile, so nothing small and bright-blue
+# (a roof, a salt pan) next to it is taken for haze
+HAZE = {"scale": 24.0, "blue": (0.0, 4.0), "clear_pct": 20.0, "omega": 1.3, "detail": 2.0, "min_texels": 1000,
+        "edge": 6.0, "edge_reach": 12.0, "edge_blue": (-6.0, -1.0), "cap_pct": 99.0,
+        "floor_soft": 5.0}
+# open water (see `water` above): B - G from bg[0] to bg[1], luma under luma (or contrast levels under the ground round
+# it, up to luma2), texture under tex; then pulled by WATER_TONE (R, G, B multipliers, measured on Monoun's lake: his
+# over ours (0.58, 0.85, 1.03)). Monoun: the lake and the reservoir's arms; Qumran: the sea and the Dead Sea; Texoma: the lake
+WATER = {"bg": (-4.0, 1.0), "luma": (48.0, 55.0), "tex": (1.2, 2.4), "contrast": (3.0, 7.0), "luma2": (53.0, 61.0),
+         "spread": 2.0}
+WATER_TONE = (0.6, 0.85, 1.0)
 # OURS, after his curve (see `exposure` above): the most a graded plate's mean luma (Rec. 709 weights, 0-255) may be
 # over his end view (M units -960..960 x -540..540) and over the line and name (x 77.5..620, y -80..60). His own end
 # view is ~82; at 110 / 120 the line keeps 84% / 77% of its contrast on Monoun over the ground behind it
@@ -222,6 +255,88 @@ def soften(im, sigma: float):
     return Image.fromarray(np.clip(v + 0.5, 0, 255).astype(np.uint8))
 
 
+def _blur(a, sigma: float):
+    """A Gaussian of `sigma` texels on a 2-D float array (edges held); past 4 texels it runs on a grid 4x coarser."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(a, np.float32)
+
+    def g1(x, sg, axis):
+        r = max(1, math.ceil(3 * sg))
+        t = np.arange(-r, r + 1, dtype=np.float32)
+        k = np.exp(-t * t / (2 * sg * sg))
+        k /= k.sum()
+        pad = [(0, 0), (0, 0)]
+        pad[axis] = (r, r)
+        p = np.pad(x, pad, mode="edge")
+        n = x.shape[axis]
+        out = np.zeros_like(x)
+        for i in range(2 * r + 1):
+            out += k[i] * (p[i:i + n, :] if axis == 0 else p[:, i:i + n])
+        return out
+    if sigma <= 4:
+        return g1(g1(a, max(sigma, 0.3), 0), max(sigma, 0.3), 1)
+    h, w = a.shape
+    small = np.asarray(Image.fromarray(a, "F").resize((max(1, w // 4), max(1, h // 4)), Image.BOX), np.float32)
+    small = g1(g1(small, sigma / 4, 0), sigma / 4, 1)
+    return np.asarray(Image.fromarray(small, "F").resize((w, h), Image.BILINEAR), np.float32)
+
+
+def _ramp(x, a: float, b: float):
+    """0 below a, 1 above b, smoothstep between."""
+    import numpy as np
+    t = np.clip((x - a) / (b - a), 0, 1)
+    return t * t * (3 - 2 * t)
+
+
+def dehaze(a, tpu: float = TEXELS_PER_UNIT):
+    """(array, info): the plate (float RGB 0-255, softened, before the grade) with the haze found by scale taken off
+    (HAZE; see `haze` above). Left as it is when it has under HAZE["min_texels"] texels of haze or of clear ground."""
+    import numpy as np
+    from PIL import Image, ImageFilter
+    h = HAZE
+    R, G, B = a[..., 0], a[..., 1], a[..., 2]
+    index = B - 0.5 * (R + G)
+    blue = _blur(index, h["scale"] * tpu)
+    gate = _ramp(blue, *h["blue"])
+    clear = (gate < 0.05) & (blue > h["blue"][0] - 3)            # haze-free ground that is not desert or rock
+    hazy = gate > 0.5
+    info = {"haze_share": round(float(hazy.mean()), 4)}
+    n = max(1, round(h["min_texels"] * tpu * tpu))
+    if int(clear.sum()) < n or int(hazy.sum()) < n:
+        return a, dict(info, skipped=True)
+    dark = np.asarray(Image.fromarray(a.min(2).astype(np.float32), "F").filter(ImageFilter.MinFilter(3)), np.float32)
+    dark = _blur(dark, h["detail"] * tpu)
+    level = float(np.percentile(dark[clear], h["clear_pct"]))
+    cap = float(np.percentile(np.clip(dark - level, 0, None)[hazy], h["cap_pct"]))
+    near = np.clip(_blur(hazy.astype(np.float32), h["edge_reach"] * tpu) * 4, 0, 1)
+    gate = np.maximum(gate, _ramp(_blur(index, h["edge"] * tpu), *h["edge_blue"]) * near)  # out to the haze's own edge
+    eta = np.clip(dark - level, 0, cap) * gate                   # the airlight over the clear ground, per texel
+    fit = np.stack([eta[hazy], np.ones(int(hazy.sum()), np.float32)], 1)
+    air = np.array([np.linalg.lstsq(fit, _blur(a[..., c], h["detail"] * tpu)[hazy], rcond=None)[0][0] for c in range(3)],
+                   np.float32).clip(0.0, 2.0)                   # its colour: how each channel rises with it
+    floor = np.percentile(a[clear], 2, axis=0).astype(np.float32)          # never under the darkest clear ground
+    x = a - h["omega"] * eta[..., None] * air
+    k = h["floor_soft"]                                          # eased onto the floor, not clipped flat at it
+    soft = floor + k * np.logaddexp(0.0, (x - floor) / k)
+    out = np.where(eta[..., None] > 0, np.maximum(np.minimum(soft, a), np.minimum(a, floor)), a)
+    return out, dict(info, clear_level=round(level, 1), airlight=[round(float(v), 3) for v in air])
+
+
+def water(a, tpu: float = TEXELS_PER_UNIT):
+    """0..1 per texel: open water in the plate (float RGB, softened, before the haze step and the grade). See `water`."""
+    import numpy as np
+    w = WATER
+    R, G, B = a[..., 0], a[..., 1], a[..., 2]
+    luma = 0.2126 * R + 0.7152 * G + 0.0722 * B
+    near = _blur(luma, 1.5 * tpu)
+    texture = np.sqrt(_blur((luma - near) ** 2, 3.0 * tpu))
+    dark = np.maximum(1 - _ramp(near, *w["luma"]),
+                      _ramp(_blur(luma, 10.0 * tpu) - near, *w["contrast"]) * (1 - _ramp(near, *w["luma2"])))
+    m = _ramp(_blur(B - G, 1.5 * tpu), *w["bg"]) * (1 - _ramp(texture, *w["tex"])) * dark
+    return np.clip(_blur(m, w["spread"] * tpu) * 1.5, 0, 1)
+
+
 def grade(im):
     """His look (GRADE) on an RGB PIL image."""
     lut = []
@@ -268,13 +383,30 @@ def plate(lat: float, lon: float, out: Path, cache: Path, get=None, tpu: float =
             continue
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".part.jpg")
-        graded, k = expose(grade(soften(im, SOFTEN_UNITS * tpu)), tpu)
+        graded, k, info = look(soften(im, SOFTEN_UNITS * tpu), tpu)
+        if not info.get("skipped"):
+            say(f"      map plate: haze taken off {100 * info['haze_share']:.0f}% of the plate")
         if k < 1.0:
             say(f"      map plate: a bright place, the whole plate scaled by {k:.2f} so his white line and name read")
         graded.save(tmp, "JPEG", quality=92, subsampling=0, optimize=True)
         os.replace(tmp, out)
-        return {"zoom": z, "size": list(im.size), "soft": z < z0, "exposure": k}
+        return {"zoom": z, "size": list(im.size), "soft": z < z0, "exposure": k, "haze": info.get("haze_share", 0.0)
+                if not info.get("skipped") else 0.0, "water": info["water"]}
     return None
+
+
+def look(soft, tpu: float = TEXELS_PER_UNIT):
+    """(image, exposure, info): a softened plate given his look - the haze off, his curve, his water, a bright place
+    brought down."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(soft.convert("RGB"), np.float32)
+    wet = water(a, tpu)
+    clear, info = dehaze(a, tpu)
+    g = np.asarray(grade(Image.fromarray(np.clip(clear + 0.5, 0, 255).astype(np.uint8))), np.float32)
+    g = g * (1 - wet[..., None] * (1 - np.asarray(WATER_TONE, np.float32)))
+    graded, k = expose(Image.fromarray(np.clip(g + 0.5, 0, 255).astype(np.uint8)), tpu)
+    return graded, k, dict(info, water=round(float((wet > 0.5).mean()), 4))
 
 
 # ── the place check ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -401,7 +533,8 @@ def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=p
     if at is not None:
         g = dict(g, lat=float(at[0]), lon=float(at[1]))
     tag = hashlib.sha1((f"{LAYER}|{g['lat']:.5f}|{g['lon']:.5f}|{TEXELS_PER_UNIT}|{SOFTEN_UNITS}|{json.dumps(GRADE)}|{PLATE}"
-                        f"|{VIEW_LUMA_MAX}|{LABEL_LUMA_MAX}").encode()).hexdigest()[:10]
+                        f"|{VIEW_LUMA_MAX}|{LABEL_LUMA_MAX}|{json.dumps(HAZE)}|{json.dumps(WATER)}|{WATER_TONE}").encode()
+                       ).hexdigest()[:10]
     out = folder / f"map_{_slug(name)}_{tag}.jpg"
     meta = out.with_suffix(".json")
     info = None

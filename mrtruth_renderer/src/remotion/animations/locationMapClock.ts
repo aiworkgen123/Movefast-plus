@@ -46,9 +46,11 @@ import { LOCATION_MAP_ADVANCES, LOCATION_MAP_CHARS, LOCATION_MAP_KERNING } from 
  * exactly. On any other length the move is compressed or stretched to the shot
  * (it always ends on the last frame, as his does), the build (dot, ring, label,
  * line) keeps his absolute frames from the shot's start and is never cut, and the
- * label's exit keeps its place relative to the END. The planner seats it on 7-8 s:
- * shorter, the camera runs more than 1.14x his speed and his sound (which
- * follows his camera) would be cut in its loudest whoosh.
+ * label's exit keeps its place relative to the END. The planner seats it on
+ * 7.5-8 s: his sound is never time-scaled and its whoosh follows his camera's
+ * fastest moment (his frame 120), which a squeezed move brings in at n/2 - 0.25
+ * s early at 7.5 s; shorter, the lag grows (0.5 s at 7 s) and on 5 s his sound
+ * was cut in its loudest whoosh.
  *
  * SOFT, AS HIS (`overlaySoft`). His dot, ring, line and name are an end-size
  * raster magnified by the camera: their edges are soft early and sharpen as the
@@ -103,8 +105,18 @@ export const LOCATION_MAP = {
      * Black, cut off by a square (his layer's bounds) that leaves a faint darker
      * square round the ring; the clip edge is a 1.6-unit ramp. The ring and its
      * shadow sit above the dot, which is why his dot ends ~4% darker.
+     *
+     * Refitted 2026-10-11 (fix round 2) ON OUR RENDER - a flat grey plate drawn
+     * through Chromium at frames 100-239, against his shading map - with the four
+     * bands just inside the clip edges weighted 6x: his square reads because the
+     * shadow just inside its bottom edge is dark (0.87 of the ground) and the
+     * edge sits a little lower than the first fit drew it. Inside the bottom edge
+     * now 0.875 / 0.874 / 0.884 at 2 / 3 / 4 units in (his 0.870 / 0.873 /
+     * 0.874; was 0.883 / 0.883 / 0.893), the sides within 0.01 of his, inside
+     * the ring 0.849 (his 0.843, was 0.857); clipSoft as it was. The first fit:
+     * opacity 0.604, dy 8.491, clipHalfH 43.266.
      */
-    ringShadow: { opacity: 0.604, sigma: 12.644, dx: -0.372, dy: 8.491, clipHalfW: 43.545, clipHalfH: 43.266, clipSoft: 1.76 },
+    ringShadow: { opacity: 0.65, sigma: 12.644, dx: -0.372, dy: 10.0, clipHalfW: 43.545, clipHalfH: 43.65, clipSoft: 1.76 },
   },
   line: {
     colour: '#FFFFFF',
@@ -171,15 +183,18 @@ export const LOCATION_MAP = {
    * The softness of his dot and ring, his line and his name: a Gaussian of this
    * sigma in M units, in the map plane (see the box above). Fitted on our render
    * through the film's encode against his frames, 10-90% edge widths:
-   *   marker  the ring's outer edge and the dot's edge along radial lines, local
-   *           34-237: ring 3.95-4.4 px vs his 3.5-4.25 (2.7-2.9 sharp), dot
-   *           4.5-5.2 vs his 4.5-5.3 (2.65-3.3 sharp).
+   *   dot     its edge along radial lines, local 34-237: 4.5-5.2 px vs his
+   *           4.5-5.3 (2.65-3.3 sharp).
+   *   ring    its outer edge, the same lines: his 3.5-4.25 px. At the dot's 0.4
+   *           ours was 3.95-4.6 and took in more ground late in the shot (its
+   *           centre line (237, 227, 86) at local 200 against his (246, 229,
+   *           67)); fix round 2 gives it its own, smaller sigma.
    *   line    its top edge across x 150-260, local 45-225: his 1.1-1.2 units.
    *   label   the L's left stem, local 45-200: his 1.7-1.9 units (0.7-1.0 sharp).
    * Any filter at all adds about a pixel of resampling softness in Chromium, so
    * these are smaller than a Gaussian alone would need.
    */
-  overlaySoft: { marker: 0.4, line: 0.25, label: 0.55 },
+  overlaySoft: { dot: 0.4, ring: 0.25, line: 0.25, label: 0.55 },
   /** Screen-fixed, over everything: V = 1 - amount * smoothstep(r0, r1, rho), rho over an ellipse. */
   vignette: { r0: 0.6135, r1: 1.6559, ex: 0.9234, ey: 0.9255, amount: [0.591, 0.6796, 0.4277] as const },
 } as const
