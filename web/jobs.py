@@ -963,7 +963,7 @@ class Studio:
     @staticmethod
     def _why(tail) -> str:
         for line in reversed(tail):
-            if any(w in line for w in ("Error", "error", "stopped", "exit=1", "exit=2", "Traceback")):
+            if any(w in line for w in ("Error", "error", "stopped", "exit=1", "exit=2", "Traceback", "upload failed")):
                 return line[9:200].strip()
         return "see the machine's log"
 
@@ -1219,16 +1219,19 @@ if [ -n "$PK" ] && [ "$RC" -eq 0 ]; then
     PYTHONUNBUFFERED=1 .venv/bin/python run_test.py "$JS" "$JV" "$JT" "$JM" $SEGS > finish.log 2>&1; RF=$?
     T3=$(date +%s); say "FINISH exit=$RF seconds=$((T3-T2)) $(grep -o 'music: .*' finish.log | tail -1 | cut -c1-200)"; push_verdicts "after the finish"
     V=$(grep -o "FINAL .*" finish.log | tail -1 | cut -d" " -f2-)
-    [ -n "$V" ] && [ -f "$V" ] && curl -sf -m 1800 -X PUT -H "Content-Type: video/mp4" --data-binary @"$V" "$VID_PUT" && say "video uploaded $(du -h "$V" | cut -f1)"
+    # tried again on a storage hiccup: one lost here lost a finished film (the 5-films test, 2026-10-12)
+    if [ -z "$V" ] || [ ! -f "$V" ]; then say "video upload failed: no finished video (${V:-no FINAL line})"
+    elif curl -sf -m 1800 --retry 5 --retry-all-errors -X PUT -H "Content-Type: video/mp4" --data-binary @"$V" "$VID_PUT"; then say "video uploaded $(du -h "$V" | cut -f1)"
+    else say "video upload failed (curl exit $?)"; fi
   fi
 fi
 W=$(ls -d output/*/_work/* 2>/dev/null | head -1)
 .venv/bin/python testin/summarize.py $W/mrtruth plan.log summary.json >/dev/null 2>&1
 tar czf /root/res.tgz plan.log render.log finish.log summary.json $(find $W/mrtruth -maxdepth 1 -name "*.json") 2>/dev/null
-curl -s -m 300 -X PUT --data-binary @/root/res.tgz "$RES_PUT"
+curl -s -m 300 --retry 3 --retry-all-errors -X PUT --data-binary @/root/res.tgz "$RES_PUT"
 push_verdicts "at the end"
 curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT"
-echo "{\"ok\":$(grep -q 'video uploaded' /root/log.txt && echo true || echo false),\"plan_s\":$((T1-T0))}" | curl -s -X PUT --data-binary @- "$DONE_PUT"
+echo "{\"ok\":$(grep -q 'video uploaded' /root/log.txt && echo true || echo false),\"plan_s\":$((T1-T0))}" | curl -s --retry 3 --retry-all-errors -X PUT --data-binary @- "$DONE_PUT"
 rm -f .env; sleep 3600
 '''
 

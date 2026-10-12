@@ -421,6 +421,12 @@ class Runner(unittest.TestCase):
         self.s._judge_speed(jid, self.b, self.s.store.job(jid), log)
         self.assertEqual(M.AVOID, {})
 
+    def test_a_failed_video_upload_is_the_reason_given(self):
+        tail = ["21:22:01 FINISH exit=0 seconds=63 ", "21:22:02 verdicts: 285 answers saved",
+                "21:22:03 video upload failed (curl exit 22)", "21:22:04 verdicts: 285 answers saved (at the end)"]
+        self.assertEqual(self.J.Studio._why(tail), "video upload failed (curl exit 22)")
+        self.assertIn("--retry 5 --retry-all-errors -X PUT -H \"Content-Type: video/mp4\"", self.J.PLAN_SCRIPT)
+
     def test_a_film_done_while_the_site_was_down_past_its_limit_is_read_back(self):
         jid = self.job()
         run = "web-x-1"
