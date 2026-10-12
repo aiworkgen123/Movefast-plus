@@ -23,7 +23,7 @@ machines carry on and the film appears when it is done.
 Keep some money on both accounts (RunPod and Vast.ai) and turn on automatic top-up: at $0 RunPod switches every machine
 off and the films in progress are lost. The page shows both balances, in red when they run low.
 
-The same goes for Claude (console.anthropic.com, Plans & Billing): a 3-minute film uses about $0.30 of it, a 20-minute
+The same goes for Claude (console.anthropic.com, Plans & Billing): a 3-minute film uses about $0.35-0.40 of it, a 20-minute
 film about $1.80, and a film whose Claude account runs dry while it plans stops. A film checks Claude before it rents a
 machine and waits (up to an hour) while the account is empty; "Test keys" in Settings checks it too.
 
