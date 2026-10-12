@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -23,7 +24,7 @@ import mrtruth as M  # noqa: E402
 import mrtruth_map as MAP  # noqa: E402
 import mrtruth_spots as S  # noqa: E402
 from test_mrtruth_a0 import Engine  # noqa: E402
-from test_mrtruth_gate import Base, DOSSIER, film, write_job  # noqa: E402
+from test_mrtruth_gate import Base, DOSSIER, film, first, write_job  # noqa: E402
 
 
 def cues_for(sentences, secs=5.0):
@@ -51,7 +52,7 @@ def filler(n, start=0):
     return [FILLER[(start + k) % len(FILLER)].format(NOUNS[(start + k) % len(NOUNS)]) for k in range(n)]
 
 
-def fake_claude(no=(), coords=None, ranks=None, dates_no=(), texts=None):
+def fake_claude(no=(), coords=None, ranks=None, dates_no=(), texts=None, not_dates=()):
     """Claude's answer for the places-and-dates prompt: every place a place (but `no`), every date important (but
     `dates_no`), the code's own reading as its text (or `texts`)."""
     coords, ranks, texts = coords or {}, ranks or {}, texts or {}
@@ -60,13 +61,15 @@ def fake_claude(no=(), coords=None, ranks=None, dates_no=(), texts=None):
         assert "PLACES and the DATES" in prompt
         places, dates = [], []
         for pid, name in re.findall(r'^(p\d+) \([\d.]+s\) "([^"]+)"', prompt, re.M):
-            lat, lon = coords.get(name, (10.0, 20.0))
+            h = zlib.crc32(name.encode())                   # every place its own point (none in another's area)
+            lat, lon = coords.get(name, (10.0 + h % 40, 20.0 + (h >> 8) % 40))
             places.append({"id": pid, "use": name not in no, "label": name, "lat": lat, "lon": lon, "kind": "city",
                            "terrain": "green", "rank": ranks.get(name, 3), "why": "a test"})
         for did, said, big, small in re.findall(r"^(d\d+) \([\d.]+s\) \"([^\"]+)\" reads as '([^']*)'(?: / '([^']*)')?",
                                                 prompt, re.M):
             b, s = texts.get(said, (big, small))
-            dates.append({"id": did, "use": said not in dates_no, "date": b, "year": s, "why": "a test"})
+            dates.append({"id": did, "use": said not in dates_no and said not in not_dates, "date": b, "year": s,
+                          "why": "a test", **({"not_date": True} if said in not_dates else {})})
         return json.dumps({"places": places, "dates": dates})
     return answer
 
@@ -231,12 +234,12 @@ class Step(unittest.TestCase):
             ["He counted 1500 manuscripts in 1994."] + filler(4, 8)
         rows, md, eng = self.run_step(s, fake_claude(dates_no=("1500",)))
         dates = self.spots(rows, "date")
-        self.assertEqual([d["device"]["date"] for d in dates], ["1994"])        # a year alone: the big line alone
+        self.assertEqual([d["device"]["date"] for d in dates], ["1947", "1994"])   # a year alone: the big line alone
         why = {x["said"]: x["why"] for x in md["dates"]}
         self.assertIn("decade", why["the late 1980s"])
         self.assertIn("relative", why["Six months later"])
-        self.assertIn("in passing", why["1947"])
-        self.assertIn("in passing", why["1952"])
+        self.assertIn("reads as '1947' [said close together with", eng.calls[0])          # both asked, marked (review 2026-10-12)
+        self.assertIn("the date at", why["1952"])                              # its words fall on 1947's shot
         self.assertIn("Claude", why["1500"])
         self.assertNotIn("1980s", eng.calls[0].split("DATE CANDIDATES")[1])   # code's refusals are never asked
 
@@ -428,10 +431,27 @@ class Dates(unittest.TestCase):
     def test_a_list_is_said_in_passing(self):
         toks, _ = toks_for(["In 1947, 1952 and 1956 the scrolls moved.", "Nothing happened for a while.",
                             "Then in 1961 they were sold."])
-        got = {c["said"]: c["skip"] for c in S.date_candidates(toks)}
-        for y in ("1947", "1952", "1956"):
-            self.assertIn("in passing", got[y])
-        self.assertEqual(got["1961"], "")
+        cs = {c["said"]: c for c in S.date_candidates(toks)}
+        self.assertEqual(cs["1947"]["skip"], "")                               # a list's first is asked, marked
+        self.assertIn("the first of 3 dates", cs["1947"]["note"])
+        for y in ("1952", "1956"):
+            self.assertIn("in passing", cs[y]["skip"])
+        self.assertEqual((cs["1961"]["skip"], cs["1961"]["note"]), ("", ""))
+
+    def test_two_dates_said_close_together_are_both_asked(self):
+        # review 2026-10-12: the owner leaves dates said in passing to Claude, and these are often important
+        for s in (["He was born in 1921 and died in 1994."], ["The war ran from 1939 until 1945."],
+                  ["The file was opened in 1962.", "It was closed in 1964."]):
+            cs = S.date_candidates(toks_for(s, secs=2.0)[0])
+            self.assertEqual(len(cs), 2, s)
+            for c in cs:
+                self.assertEqual(c["skip"], "", s)
+                self.assertIn("said close together with", c["note"])
+
+    def test_fall_of_a_year_is_marked(self):
+        c = S.date_candidates(toks_for(["The city fell in the fall of 1453 after a long siege."])[0])[0]
+        self.assertEqual((c["big"], c["small"]), ("Fall", "1453"))
+        self.assertIn("the fall of a place", c["note"])
 
     def test_his_format_checked(self):
         self.assertEqual(S.date_ok("March", "2026"), "")
@@ -658,3 +678,151 @@ class Gate(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ── the review of 2026-10-12 ───────────────────────────────────────────────────────────────────────────────────────
+class Review(unittest.TestCase):
+    setUp, tearDown, run_step, spots = Step.setUp, Step.tearDown, Step.run_step, Step.spots
+
+    def test_words_no_near_shot_says_move_after_the_map_never_dropped(self):
+        # ruling 4: a displaced block moves to the nearest free shot (not dropped); its words now fall under the map
+        s = filler(3) + ["Later he went to Caddo Lake with his ledger notes."] + filler(8, 3)
+        rows = rows_for(s)
+        rows[3]["device"] = {"id": "shadow-up", "line": "Ledger notes"}
+        rows, md, eng = self.run_step(s, rows=rows)
+        m = self.spots(rows, "map")[0]
+        moved = [r for r in rows if (r.get("device") or {}).get("id") == "shadow-up"]
+        self.assertEqual(len(moved), 1)
+        x = moved[0]
+        self.assertGreaterEqual(x["startMs"], m["endMs"])                      # after the map
+        self.assertLessEqual(x["startMs"] - m["endMs"], M.SPOT_MOVE_AFTER_MS)
+        self.assertIsNotNone(x.get("_md_moved"))
+        self.assertTrue(m.get("_took_words"))
+        self.assertTrue(any("moved after the map" in b["how"] for b in md["blocks"]), md["blocks"])
+        self.assertFalse(any("dropped" in b.get("how", "") for b in md["blocks"]), md["blocks"])
+        # sync pins it on its own shot's start (its words were said under the map), not back onto them
+        heard = M._word_times(cues_for(s))
+        self.assertEqual(M._said_at(x, heard, x["startMs"] - 12000, x["endMs"] + 12000, (x["startMs"], x["endMs"])),
+                         x["startMs"] + M.SYNC_LEAD_MS)
+        # the fillers see the film as it was: the map marks the block's time, the moved block does not mark its own
+        self.assertIn(m["startMs"], M._text_times(rows))
+        self.assertNotIn(x["startMs"], M._text_times(rows))
+        self.assertIn(x["startMs"], M._text_times(rows, True))                 # it is on screen all the same
+        self.assertNotIn(m["startMs"] + 1, M._text_times(rows, True))
+
+    def test_a_short_rest_before_the_spot_goes_to_the_shot_before(self):
+        # a 1.0-1.5 s flash before a map read as flicker (review 2026-10-12): the shot before says it when it can
+        s = filler(3) + ["They waited, then Harlow Sound held the boat for many days."] + filler(8, 3)
+        rows, md, _ = self.run_step(s)
+        m = self.spots(rows, "map")[0]
+        k = rows.index(m)
+        self.assertGreaterEqual(rows[k - 1]["endMs"] - rows[k - 1]["startMs"], M.SPOT_HEAD_MIN_MS)
+        self.assertEqual(rows[k - 1]["endMs"], m["startMs"])
+        self.assertIn("then", rows[k - 1]["text"])                             # its words go with the time
+
+    def test_places_in_one_area_get_one_map(self):
+        s = filler(2) + ["He worked at Fenmoor Abbey for a year."] + filler(14, 2) + \
+            ["Later he wrote from Harlow Town nearby."] + filler(4, 3)
+        ans = fake_claude(coords={"Fenmoor Abbey": (41.905, 12.455), "Harlow Town": (41.893, 12.483)})
+        rows, md, eng = self.run_step(s, ans)
+        self.assertEqual([r["device"]["label"] for r in self.spots(rows, "map")], ["Fenmoor Abbey"])
+        why = {x["name"]: x["why"] for x in md["places"]}
+        self.assertIn("the same area as the map of Fenmoor Abbey", why["Harlow Town"])
+
+    def test_a_date_not_shown_keeps_its_year_card(self):
+        s = filler(3) + ["In 1994 the reader opened the sealed box."] + filler(3, 3) + \
+            ["He counted 1500 manuscripts that week."] + filler(4, 6)
+        rows = rows_for(s)
+        rows[3]["device"] = {"id": "P12", "year": "1994", "eraLabel": "", "detail": ""}
+        rows[7]["device"] = {"id": "P12", "year": "1500", "eraLabel": "", "detail": ""}
+        rows, md, eng = self.run_step(s, fake_claude(dates_no=("1994",), not_dates=("1500",)), rows=rows)
+        self.assertFalse(self.spots(rows, "date"))
+        cards = [r["device"]["year"] for r in rows if (r.get("device") or {}).get("id") == "P12"]
+        self.assertEqual(cards, ["1994"])                                      # said in passing: its card stays
+        self.assertEqual(M._md_years(md["dates"]), {"1500"})                   # no date: the gate's note leaves it
+        self.assertNotIn("1994", M._md_years(md["dates"]))                     # the gate's note still sees 1994
+        self.assertTrue(any("not a date" in x["how"] for x in md["year_cards"]), md["year_cards"])
+        self.assertEqual(M._md_years([{"said": "in 1994", "status": "placed"}, {"said": "1962", "status": "skipped"},
+                                      {"said": "1971", "status": "skipped", "again": True}]), {"1994", "1971"})
+
+    def test_a_name_that_may_be_the_city_is_asked(self):
+        toks, _ = toks_for(["He moved to New York for work.", "She flew to Washington the next week.",
+                            "He lived in Albany, New York for years.", "Texas was hot."])
+        got = {c["name"]: c for c in S.place_candidates(toks)}
+        for name in ("New York", "Washington"):
+            self.assertEqual(got[name]["skip"], "", name)
+            self.assertIn("may be the city", got[name]["note"])
+        self.assertEqual(got["Albany, New York"]["skip"], "")                  # still a city and its state
+        self.assertIn("state alone", got["Texas"]["skip"])
+        rows, md, eng = self.run_step(filler(2) + ["He moved to New York for work."] + filler(8, 2))
+        self.assertIn('"New York" [may be the city', eng.calls[0])
+
+    def test_the_answer_has_room(self):
+        seen = []
+        real = M._ask
+        with mock.patch.object(M, "_ask", lambda eng, p, n, model=None: (seen.append(n), real(eng, p, n, model=model))[1]):
+            self.run_step(filler(2) + ["He went to Caddo Lake in 1994."] + filler(8, 2))
+        self.assertEqual(seen, [M.MD_ANSWER_TOKENS])
+        self.assertGreaterEqual(M.MD_ANSWER_TOKENS, 12000)
+
+    def test_the_date_shot_gets_no_dark_patch(self):
+        self.assertNotIn("date-stamp", M.TYPE_BAND)                            # ruling 8: clean and bright
+        self.assertNotIn("date-stamp", M.TITLE_CEILING)
+
+
+class MovedGate(Base):
+    def test_the_gate_notes_a_block_moved_after_a_spot(self):
+        rows = film()
+        k = next(k for k in range(12, 40) if not rows[k].get("device") and not rows[k].get("typedCaption")
+                 and not rows[k - 1].get("device"))
+        rows[k]["device"] = {"id": "shadow-up", "line": first(k - 1, 2)}       # words said on the shot before
+        rows[k]["_md_moved"] = rows[k - 1]["startMs"]
+        found, ctx = self.find(rows)
+        self.assertFalse([x for x in found if x["rule"] == "words" and x.get("k") == k], found)
+        self.assertTrue(any("moved after the map or date" in n for n in ctx["notes"]), ctx["notes"])
+        del rows[k]["_md_moved"]                                               # any other block that late: a break
+        found, _ = self.find(rows)
+        self.assertTrue([x for x in found if x["rule"] == "words" and x.get("k") == k], found)
+
+
+class Sea(unittest.TestCase):
+    """The mosaic's flat sea fill and the swaths' seams: one smooth tone past the shore band (review 2026-10-12)."""
+
+    def plate(self, fill=True):
+        import numpy as np
+        rng = np.random.default_rng(1)
+        h, w = 300, 400
+        a = np.zeros((h, w, 3), np.float32)
+        a[:] = (100, 100, 80) + rng.normal(0, 9, (h, w, 1))                   # land: textured
+        a[:, :260] = (32, 50, 72) + rng.normal(0, 0.8, (h, 260, 1))           # imaged coastal water
+        a[:, 120:150] += 14                                                     # a swath's seam
+        if fill:
+            a[:, :90] = (24, 44, 78)                                            # the flat fill, cut hard
+        return np.clip(a, 0, 255)
+
+    def test_the_fill_and_the_seams_go(self):
+        import numpy as np
+        a = self.plate()
+        m = MAP.sea(a)
+        self.assertIsNotNone(m)
+        self.assertGreater(m[:, :230].mean(), 0.9)                              # fill and imaged water are one sea
+        self.assertLess(m[:, 300:].mean(), 0.05)                                # the land is not
+        g = MAP.calm(a.copy(), m)
+        row = g[150, :200, 2]
+        self.assertLess(np.abs(np.diff(row)).max(), 1.0)                       # no hard edge, no seam
+        self.assertGreater(np.abs(np.diff(a[150, :200, 2])).max(), 5.0)        # (there were both)
+        np.testing.assert_allclose(g[:, 330:], a[:, 330:], atol=1e-3)          # the land as it was
+
+    def test_a_plate_with_no_fill_is_left_alone(self):
+        self.assertIsNone(MAP.sea(self.plate(fill=False)))
+
+    def test_a_warm_ground_near_white_is_eased_a_cloud_is_not(self):
+        import numpy as np
+        g = np.zeros((80, 160, 3), np.float32)
+        g[:, :80] = (255, 250, 190)                                             # desert under his curve
+        g[:, 80:] = (250, 250, 250)                                             # a cloud
+        out = MAP.ease_bright(g)
+        self.assertLess(out[40, 20].mean(), 230)
+        np.testing.assert_allclose(out[40, 150], g[40, 150], atol=1.0)
+        self.assertTrue((out <= g + 1e-3).all())
+

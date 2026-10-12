@@ -207,7 +207,7 @@ class Sound(unittest.TestCase):
         self.assertEqual(cmd.count(str(R / "sfx" / "impact.wav")), 1)   # 4 s dip kept; the next one is inside the gap rule
         self.assertIn(f"adelay={round((6.0 + 5431 / 48000) * 48000)}S:all=1", fc)
         self.assertIn("pan=stereo|c0=c0|c1=c0", fc)            # the mono voice to both sides at full level
-        self.assertIn("alimiter=limit=1:", fc)                 # only overs are touched
+        self.assertIn(f"alimiter=limit={M.MIX_CEILING}:", fc)                 # only overs are touched
         self.assertIn("amix=inputs=3:normalize=0", fc)
 
     def test_a_film_without_a_map_mixes_as_before(self):
@@ -233,7 +233,11 @@ class Sound(unittest.TestCase):
             mix, his = dec(out), dec(R / "sfx" / M.MAP_SFX)
         k = 45 * 1600 + 5431                                   # 1.5 s + his offset, in samples
         self.assertFalse(np.abs(mix[:k]).max())                # nothing before his first sample
-        np.testing.assert_allclose(mix[k:k + len(his)], his, atol=2e-4)
+        seg = mix[k:k + len(his)]
+        self.assertLessEqual(np.abs(seg).max(), M.MIX_CEILING + 2e-3)      # the limiter's ceiling (no overs after AAC)
+        d = np.abs(seg - his)
+        self.assertLess((d > 2e-4).mean(), 0.05)                          # his sound as cut, but round the boom's top
+        self.assertLess(d.max(), 1.0 - M.MIX_CEILING + 5e-3)              # only its top 0.3 dB taken off
 
 
 # ── the plate: tiles, stitching, cache, fallback ───────────────────────────────────────────────────────────────────────

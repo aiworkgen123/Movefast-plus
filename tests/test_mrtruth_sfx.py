@@ -223,7 +223,7 @@ class Mix(unittest.TestCase):
         self.assertIn("adelay=21499:all=1", fc)                     # the flash at 21.5 s: as before, whole ms
         self.assertNotIn("adelay=22499", fc)                        # the next flash 1 s later: thinned, as before
         self.assertIn("pan=stereo|c0=c0|c1=c0", fc)                 # the mono voice to both sides at full level
-        self.assertIn("alimiter=limit=1:", fc)                      # only overs are touched
+        self.assertIn(f"alimiter=limit={M.MIX_CEILING}:", fc)                      # only overs are touched
         self.assertIn("amix=inputs=12:normalize=0", fc)
         self.assertIn("volume=0.0dB", fc)
 

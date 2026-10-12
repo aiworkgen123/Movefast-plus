@@ -65,7 +65,9 @@ class Planner(unittest.TestCase):
         # his ruling 8 (2026-10-11): clean and bright like his reference - no shadow look, vignette, grain or move
         self.assertEqual(sc[2]["grade"], {"lut": M.GRADE["lut"], "vignette": 0.0, "grain": 0.0})
         m = sc[2]["motion"]
-        self.assertEqual((m["fromScale"], m["toScale"], m["fromX"], m["toX"], m["fromY"], m["toY"]), (1.0, 1.0, 0, 0, 0, 0))
+        s = M.DATE_STILL_SCALE                                 # still, a little over the frame (its scan margins off)
+        self.assertEqual((m["fromScale"], m["toScale"], m["fromX"], m["toX"], m["fromY"], m["toY"]), (s, s, 0, 0, 0, 0))
+        self.assertTrue(1.0 < s <= 1.08)
         self.assertIn("shadow", sc[1]["grade"])                # the shots round it keep the house look
 
 

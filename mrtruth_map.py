@@ -32,6 +32,14 @@ here, stored in the job like any other picture and never fetched at render time.
             what it is - dark (or darker than the ground round it, a reservoir's arm), blue at least about green, and
             FLAT where dark forest is textured - and spread so a lake is one patch; it gets WATER_TONE after the grade
             (Monoun's lake, darkest 5%: (26, 50, 32) vs his (24, 45, 30), was (34, 51, 29)).
+  sea       the 2016 mosaic fills the open sea with one flat colour cut on a staircase edge, and its imaged coastal
+            water carries the satellite swaths' seams (review 2026-10-12: Alexandria, Rome, the Vatican). Where a plate
+            holds that flat fill, the sea is found from it - the fill, and the dark, blue-enough, flat water joined to it
+            (SEA) - and beyond a short band at the shore (kept as imaged) it takes one smooth tone: the graded water
+            blurred over SEA["sigma"] texels. The fill's edge and the seams are gone; a plate with no fill (a lake, the
+            ready-made plates) is left as it is.
+  bright    a warm ground near white (a desert under his curve: Alexandria's at the widest framing) is eased down over
+            BRIGHT["knee"] luma; white clouds (neutral) keep his white.
   exposure  his curve was fitted on green tropical ground (mean luma ~82 in his end view); on a bright place it lifts
             the ground to near white (Qumran: 182 over the end view, 225 behind the line and name), where his white line
             and name stop reading. So a plate whose end view is brighter than VIEW_LUMA_MAX, or whose line-and-name
@@ -122,6 +130,16 @@ HAZE = {"scale": 24.0, "blue": (0.0, 4.0), "clear_pct": 20.0, "omega": 1.3, "det
 WATER = {"bg": (-4.0, 1.0), "luma": (48.0, 55.0), "tex": (1.2, 2.4), "contrast": (3.0, 7.0), "luma2": (53.0, 61.0),
          "spread": 2.0}
 WATER_TONE = (0.6, 0.85, 1.0)
+# the open sea (see `sea` above), on the softened plate before the grade: the mosaic's flat fill is `seed` (texture under
+# seed_tex over 8 units, B - G over seed_bg, luma under seed_luma), at least seed_share of the plate; the sea is what is
+# joined to it through water (luma under luma, B - G over bg, texture under tex); past `reach` units from the shore
+# (core: the shore band fades out from 0.75 to 0.97 of the blurred mask) it takes the graded water blurred over `sigma`
+SEA = {"seed_tex": 0.15, "seed_bg": 20.0, "seed_luma": 60.0, "seed_share": 0.005, "luma": 90.0, "bg": -6.0, "tex": 6.0,
+       "reach": 20.0, "core": (0.75, 0.97), "sigma": 80.0}
+# a warm ground near white (see `bright` above): luma over knee is pulled to knee + (luma - knee) * slope, as far as the
+# ground round it is warm - red over blue by `warm` levels, averaged over `scale` units (a clipped white texel in a desert
+# goes with it; a cloud, neutral, keeps his white)
+BRIGHT = {"knee": 185.0, "slope": 0.45, "warm": (15.0, 45.0), "scale": 16.0}
 # OURS, after his curve (see `exposure` above): the most a graded plate's mean luma (Rec. 709 weights, 0-255) may be
 # over his end view (M units -960..960 x -540..540) and over the line and name (x 77.5..620, y -80..60). His own end
 # view is ~82; at 110 / 120 the line keeps 84% / 77% of its contrast on Monoun over the ground behind it
@@ -342,6 +360,61 @@ def water(a, tpu: float = TEXELS_PER_UNIT):
     return np.clip(_blur(m, w["spread"] * tpu) * 1.5, 0, 1)
 
 
+def sea(a, tpu: float = TEXELS_PER_UNIT):
+    """0..1 per texel: the open sea joined to the mosaic's flat fill (SEA; see `sea` above), or None when the plate holds
+    no fill (the plate is then left as it is)."""
+    import numpy as np
+    from PIL import Image
+    s_ = SEA
+    R, G, B = a[..., 0], a[..., 1], a[..., 2]
+    luma = 0.2126 * R + 0.7152 * G + 0.0722 * B
+    tex = np.sqrt(_blur((luma - _blur(luma, 6 * tpu)) ** 2, 8 * tpu))
+    seed = (tex < s_["seed_tex"]) & (B - G > s_["seed_bg"]) & (luma < s_["seed_luma"])
+    if seed.mean() < s_["seed_share"]:
+        return None
+    cand = seed | (luma < s_["luma"]) & (B - G > s_["bg"]) & (tex < s_["tex"])
+    h, w = luma.shape
+    f = 4                                        # joined on a grid 4x coarser (a flood from the fill, 4-connected)
+    small = lambda m: np.asarray(Image.fromarray(m.astype(np.uint8) * 255).resize((max(1, w // f), max(1, h // f)),
+                                                                                   Image.BOX)) > 127
+    reach, ok = small(seed), small(cand)
+    reach &= ok
+    while True:
+        d = reach.copy()
+        d[1:] |= reach[:-1]
+        d[:-1] |= reach[1:]
+        d[:, 1:] |= reach[:, :-1]
+        d[:, :-1] |= reach[:, 1:]
+        d &= ok
+        if (d == reach).all():
+            break
+        reach = d
+    up = np.asarray(Image.fromarray(reach.astype(np.uint8) * 255).resize((w, h), Image.BILINEAR), np.float32) / 255
+    return np.clip(up * 2 - 0.5, 0, 1) * cand
+
+
+def calm(g, m, tpu: float = TEXELS_PER_UNIT):
+    """The graded plate `g` (float RGB) with its open sea `m` (from `sea`) given one smooth tone past the shore band."""
+    import numpy as np
+    core = _ramp(_blur(m, SEA["reach"] * tpu), *SEA["core"])
+    wsum = np.maximum(_blur(m, SEA["sigma"] * tpu), 1e-3)
+    tone = np.stack([_blur(g[..., c] * m, SEA["sigma"] * tpu) / wsum for c in range(3)], -1)
+    return g * (1 - core[..., None]) + tone * core[..., None]
+
+
+def ease_bright(g, tpu: float = TEXELS_PER_UNIT):
+    """A warm ground near white eased down (BRIGHT; see `bright` above); clouds and everything under the knee as they are."""
+    import numpy as np
+    b = BRIGHT
+    luma = 0.2126 * g[..., 0] + 0.7152 * g[..., 1] + 0.0722 * g[..., 2]
+    if not (luma > b["knee"]).any():
+        return g
+    warm = _ramp(_blur(g[..., 0] - g[..., 2], b["scale"] * tpu), *b["warm"])
+    eased = np.where(luma > b["knee"], b["knee"] + (luma - b["knee"]) * b["slope"], luma)
+    k = 1 + warm * (eased / np.maximum(luma, 1.0) - 1)
+    return g * k[..., None]
+
+
 def grade(im):
     """His look (GRADE) on an RGB PIL image."""
     lut = []
@@ -396,7 +469,7 @@ def plate(lat: float, lon: float, out: Path, cache: Path, get=None, tpu: float =
         graded.save(tmp, "JPEG", quality=92, subsampling=0, optimize=True)
         os.replace(tmp, out)
         return {"zoom": z, "size": list(im.size), "soft": z < z0, "exposure": k, "haze": info.get("haze_share", 0.0)
-                if not info.get("skipped") else 0.0, "water": info["water"]}
+                if not info.get("skipped") else 0.0, "water": info["water"], "sea": info.get("sea", 0.0)}
     return None
 
 
@@ -410,8 +483,13 @@ def look(soft, tpu: float = TEXELS_PER_UNIT):
     clear, info = dehaze(a, tpu)
     g = np.asarray(grade(Image.fromarray(np.clip(clear + 0.5, 0, 255).astype(np.uint8))), np.float32)
     g = g * (1 - wet[..., None] * (1 - np.asarray(WATER_TONE, np.float32)))
+    m = sea(a, tpu)                              # the mosaic's flat sea fill and its seams: one smooth tone (review
+    if m is not None:                            # 2026-10-12)
+        g = calm(g, m, tpu)
+    g = ease_bright(g, tpu)
     graded, k = expose(Image.fromarray(np.clip(g + 0.5, 0, 255).astype(np.uint8)), tpu)
-    return graded, k, dict(info, water=round(float((wet > 0.5).mean()), 4))
+    return graded, k, dict(info, water=round(float((wet > 0.5).mean()), 4),
+                           sea=round(float((m > 0.5).mean()), 4) if m is not None else 0.0)
 
 
 # ── the place check ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -565,7 +643,8 @@ def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=p
     if at is not None:
         g = dict(g, lat=float(at[0]), lon=float(at[1]))
     tag = hashlib.sha1((f"{LAYER}|{g['lat']:.5f}|{g['lon']:.5f}|{TEXELS_PER_UNIT}|{SOFTEN_UNITS}|{json.dumps(GRADE)}|{PLATE}"
-                        f"|{VIEW_LUMA_MAX}|{LABEL_LUMA_MAX}|{json.dumps(HAZE)}|{json.dumps(WATER)}|{WATER_TONE}").encode()
+                        f"|{VIEW_LUMA_MAX}|{LABEL_LUMA_MAX}|{json.dumps(HAZE)}|{json.dumps(WATER)}|{WATER_TONE}"
+                        f"|{json.dumps(SEA)}|{json.dumps(BRIGHT)}").encode()
                        ).hexdigest()[:10]
     out = folder / f"map_{_slug(name)}_{tag}.jpg"
     meta = out.with_suffix(".json")

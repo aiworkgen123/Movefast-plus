@@ -10,13 +10,18 @@ here calls a service or touches the film's rows.
             Not a candidate: a person the dossier names, a title before a name ("Father ..."), a describing word
             ("Sicilian", "Egyptian traditions"), a common word that opens a sentence, a month or a weekday. A US state
             alone or a country alone ("Texas", "Egypt") or a continent is listed and refused here, never asked (the
-            owner's rule); a city-state (the Vatican, Monaco) is a place.
+            owner's rule); a city-state (the Vatican, Monaco) is a place; a name that is a state or a country and also
+            its best-known city (AMBIGUOUS: "New York", "Washington", "Panama") is asked, marked, and the geocoder's own
+            kind still refuses the state or country reading.
   dates     his format: the big line is the month or season as said ("March", "Spring"), the small line the year;
             the day is dropped; a year alone is the big line alone ("1994"). Found: month (day) year, day month year,
             season year, a year alone (digits, "AD"/"BC", or said in words: "nineteen ninety-four"). Listed and refused
-            here: a decade, a century, a relative date ("six months later"), a month with no year, and two or more
-            dates said within DATE_LIST_S of each other (said in passing: a list). The same date said again: its first
-            time only (mrtruth decides on the answers).
+            here: a decade, a century, a relative date ("six months later"), a month with no year, and the second and
+            later of DATE_LIST_MIN or more dates listed in one sentence, each within DATE_LIST_S of the next (a list
+            said in passing; its first is asked, marked). Two dates said close together ("born in 1921 and died in
+            1994", "from 1939 until 1945", or in two sentences) are both asked, marked: Claude decides which are said
+            in passing (the owner's rule). The same date said again: its first time only (mrtruth decides on the
+            answers).
   plates    the ready-made map plates a place falls back to when its own imagery cannot be had (terrain types).
   corner    where the map's name crosses the date's corner while the camera pulls back (a date shares a map's shot only
             once the name is clear of it).
@@ -120,6 +125,11 @@ CONTINENTS = ["Africa", "Europe", "Asia", "Antarctica", "Oceania", "North Americ
 # cannot show)
 CITY_STATES = {"vatican", "vatican city", "the vatican", "holy see", "monaco", "san marino", "singapore", "hong kong",
                "macau", "macao", "gibraltar", "liechtenstein"}
+# a US state or a country that is also its best-known city, said the same way: in narration usually the city ("he moved
+# to New York"), which the owner wants mapped. Asked with a note, never refused in code (review 2026-10-12); the
+# geocoder's own kind (state, country) still refuses the other reading
+AMBIGUOUS = {"new york", "washington", "luxembourg", "panama", "kuwait", "djibouti", "guatemala"}
+AMBIGUOUS_NOTE = "may be the city (yes) or the state/country (no)"
 _LOWER = lambda xs: {x.lower().removeprefix("the ") for x in xs}
 _STATES, _COUNTRIES, _CONTINENTS = _LOWER(US_STATES), _LOWER(COUNTRIES) - CITY_STATES, _LOWER(CONTINENTS)
 # words that name a kind of place: a capitalised run with one of them is a place's name more than anything else, and
@@ -186,10 +196,15 @@ def _bare_word(w: str) -> str:
     return w.strip("\"'“”‘’()[],.;:!?…")
 
 
-def _place_kind(name: str) -> str:
-    """'state', 'country' or 'continent' for a name that is only that (the owner's rule), else ''."""
+def _key(name: str) -> str:
     n = re.sub(r"^the\s+", "", re.sub(r"\s+", " ", str(name or "").strip()).lower())
-    n = n.rstrip(".")
+    return n.rstrip(".")
+
+
+def _place_kind(name: str) -> str:
+    """'state', 'country' or 'continent' for a name that is only that (the owner's rule), else ''. A name in AMBIGUOUS
+    reads as its state or country here (after a comma: "Albany, New York"); place_candidates asks it alone."""
+    n = _key(name)
     if n in CITY_STATES:
         return ""
     if n in _STATES:
@@ -304,16 +319,18 @@ def place_candidates(toks: list, dossier: dict = None) -> list:
         if len(out) >= PLACE_MAX:
             continue
         seen[key] = len(out)
-        kind = _place_kind(name) if how == "run" else ""
+        amb = how == "run" and _key(name) in AMBIGUOUS
+        kind = _place_kind(name) if how == "run" and not amb else ""
         out.append({"id": f"p{len(out) + 1}", "name": name, "at_ms": toks[i]["ms"], "tok": i, "said": sentence_of(toks, i),
-                    "how": how, "mentions": [toks[i]["ms"]],
+                    "how": how, "mentions": [toks[i]["ms"]], "note": AMBIGUOUS_NOTE if amb else "",
                     "skip": f"a {kind} alone (the owner: never a US state or a country alone)" if kind in
                     ("state", "country") else "a continent or a wide region" if kind == "continent" else ""})
     return out
 
 
 # ── dates ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-DATE_LIST_S = 4.0                   # two dates said closer than this are a list, said in passing (owner 2026-10-11)
+DATE_LIST_S = 4.0                   # dates said closer than this are said close together (marked for Claude)
+DATE_LIST_MIN = 3                   # this many or more of them in one sentence are a list: only its first is asked
 DATE_MAX = 80
 _UNITS = {"zero": 0, "oh": 0, "o": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
           "eight": 8, "nine": 9}
@@ -498,21 +515,36 @@ def date_candidates(toks: list) -> list:
                     c["skip"] = "not a date the overlay can say"
                 out.append(c)
     out.sort(key=lambda c: (c["at_ms"], c["tok"]))
-    # a list said in passing: two or more dates within DATE_LIST_S of each other
+    for n, c in enumerate(out):
+        c["id"], c["note"] = f"d{n + 1}", ""
+    # dates said close together (each within DATE_LIST_S of the next): two, or across sentences, are asked with a note
+    # (Claude decides which are said in passing - the owner's rule); DATE_LIST_MIN or more in one sentence are a list,
+    # its first asked (marked) and the rest refused here
     real = [c for c in out if c["kind"] in ("dmy", "mdy", "my", "sy", "y", "y_era", "md") and c["dated"]]
     k = 0
     while k < len(real):
         j = k
         while j + 1 < len(real) and real[j + 1]["at_ms"] - real[j]["at_ms"] <= DATE_LIST_S * 1000:
             j += 1
-        if j > k:
-            span = (real[j]["at_ms"] - real[k]["at_ms"]) / 1000
-            for c in real[k:j + 1]:
-                if not c["skip"] or c["kind"] == "md":
-                    c["skip"] = f"said in passing: {j - k + 1} dates within {span:.1f}s (a list)"
+        run = real[k:j + 1]
+        for sent in sorted({toks[c["tok"]]["s"] for c in run}):
+            lst = [c for c in run if toks[c["tok"]]["s"] == sent]
+            if len(lst) >= DATE_LIST_MIN:
+                span = (lst[-1]["at_ms"] - lst[0]["at_ms"]) / 1000
+                if not lst[0]["skip"]:
+                    lst[0]["note"] = f"the first of {len(lst)} dates listed in one sentence"
+                for c in lst[1:]:
+                    if not c["skip"] or c["kind"] == "md":
+                        c["skip"] = f"said in passing: {len(lst)} dates listed within {span:.1f}s (a list; its first is asked)"
+        ask = [c for c in run if not c["skip"]]
+        for c in ask:
+            if not c["note"] and len(ask) > 1:
+                c["note"] = "said close together with " + ", ".join(
+                    f"{o['id']} ({abs(o['at_ms'] - c['at_ms']) / 1000:.1f}s apart)" for o in ask if o is not c)
         k = j + 1
-    for n, c in enumerate(out[:DATE_MAX]):
-        c["id"] = f"d{n + 1}"
+    for c in out:                                # "the fall of 1453": a siege's end as often as autumn (review 2026-10-12)
+        if c["big"] == "Fall" and not c["skip"]:
+            c["note"] = "; ".join(x for x in (c["note"], "'fall' may be the fall of a place or a regime, not autumn") if x)
     return out[:DATE_MAX]
 
 
