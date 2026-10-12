@@ -14,6 +14,7 @@ botocore's on the official AWS test vectors — run it if you ever touch this fi
 from __future__ import annotations
 
 import datetime as _dt
+import email.utils
 import hashlib
 import hmac
 import os
@@ -267,6 +268,20 @@ class Bucket:
             return True
         except S3Error:
             return False
+
+    def stat(self, key: str):
+        """When the object was last written (seconds since 1970), or None when it is not there. Another failure
+        raises S3Error (unknown, not "missing")."""
+        try:
+            r = self._request("HEAD", key)
+        except S3Error as e:
+            if "HTTP 404" in str(e):
+                return None
+            raise
+        try:
+            return email.utils.parsedate_to_datetime(r.headers.get("Last-Modified", "")).timestamp()
+        except (TypeError, ValueError):
+            return None
 
     def delete(self, key: str) -> None:
         self._request("DELETE", key)

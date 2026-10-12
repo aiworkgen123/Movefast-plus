@@ -1,10 +1,10 @@
 """Where the films are made: the website's job runner.
 
-The website only takes the files and keeps the records; a film is made elsewhere - today on a rented RunPod machine
-(a "pod"), later on your own PC or GPU machine too (RUN_ON: each place is one runner). The runner here does what
-scratchpad fullrun.py did by hand (the launcher every pod render so far went through): the code package and the
-film's three files go to your R2 storage, one pod is rented with the keys as private settings, it plans the film, draws
-every shot, finishes it and uploads the video straight to R2, and is switched off.
+The website only takes the files and keeps the records; a film is made elsewhere - today on rented machines (RunPod
+and Vast.ai, web/machines.py), later on your own PC or GPU machine too (RUN_ON: each place is one runner). The code
+package and the film's three files go to your R2 storage; a planning machine is rented with the keys as private
+settings, plans the film, draws its share of the shots (drawing machines draw the rest), finishes it, uploads the video
+straight to R2, and every machine is switched off.
 
 Everything a running film needs to be picked up again is in its row (store.py): the pod's id, the run's name, the R2
 keys follow from the film's id. So the website can restart at any moment: Studio.tick() finds every film still marked
@@ -30,12 +30,13 @@ import requests
 CODE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CODE))
 from farm.s3 import Bucket, S3Error  # noqa: E402
-from farm.runpod import RunPod  # noqa: E402
 from web import verdict_sync as VS  # noqa: E402
+from web.machines import Sources, REST, GRAPHQL, GPUS  # noqa: E402,F401  (REST: the Settings test)
 
 # the keys the website keeps (keys.env in its data folder, never in the code): name, label, needed, where to get it
 KEYS = [
     ("RUNPOD_API_KEY", "RunPod", True, "runpod.io → Settings → API Keys"),
+    ("VAST_API_KEY", "Vast.ai (cheap machines)", False, "cloud.vast.ai → Account → Keys; empty = RunPod only"),
     ("FARM_BUCKET_ENDPOINT", "R2 endpoint", True, "https://<account id>.r2.cloudflarestorage.com"),
     ("FARM_BUCKET", "R2 bucket name", False, "empty = videos"),
     ("FARM_BUCKET_KEY_ID", "R2 access key ID", True, "Cloudflare → R2 → Manage API tokens"),
@@ -47,20 +48,15 @@ KEYS = [
     ("EUROPEANA_API_KEY", "Europeana (archive search)", False, "optional"),
 ]
 POD_KEYS = ("GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "WAVESPEED_API_KEY", "EUROPEANA_API_KEY", "ANTHROPIC_API_KEY")
-POD_PREFIX = "mrtruth-web-"                   # every pod this website rents is named so; the sweep owns only these
-# only when RunPod's price list cannot be read: tried in this order (roughly cheapest first)
-GPUS = ("NVIDIA GeForce RTX 3090", "NVIDIA RTX A4000", "NVIDIA RTX A4500", "NVIDIA RTX A5000", "NVIDIA A40",
-        "NVIDIA RTX A6000", "NVIDIA L4", "NVIDIA L40S", "NVIDIA GeForce RTX 4090", "NVIDIA L40",
-        "NVIDIA RTX PRO 4500 Blackwell", "NVIDIA A100-SXM4-40GB")
-REST = "https://rest.runpod.io/v1"
-GRAPHQL = "https://api.runpod.io/graphql"
+POD_PREFIX = "mrtruth-web-"                   # every machine this website rents is named so; the sweep owns only these
 # a film on several small machines (owner 2026-10-12: the 48-core machine cost $2.49/h and 64-core ones are rarely
 # free, while 16-core ones are plentiful at $0.13-0.30/h): one PLANNER plans the film (mostly waiting on the internet),
 # draws its own share and finishes it; MACHINES - 1 DRAWERS each draw one share of the shots. Every machine is the
-# cheapest one RunPod has in stock with at least SMALL_VCPU cores (_offers), never dearer than its limit.
+# cheapest one free with at least SMALL_VCPU cores across RunPod and Vast.ai, RunPod's processor-only machines only when
+# nothing cheaper is free (web/machines.py), never dearer than its limit.
 MACHINES_DEFAULT, MACHINES_MAX = 3, 5
 SMALL_VCPU = 16
-PLANNER_MAX_HR = 1.50                          # none free under this: the film waits for Try again (not a $3/h machine)
+PLANNER_MAX_HR = 1.50                          # none free under this: the film waits (never a $3/h machine)
 DRAWER_MAX_HR = 1.00                           # a drawer dearer than this is not rented: the planner draws that share
 # where a film can be made (the website's "Run on" list); a place that is not ready is shown but cannot be picked
 RUN_ON = [
@@ -72,7 +68,13 @@ RUN_ON = [
 # how long each part takes (the 11-minute render full-05f3c0: set-up 230 s, planning 1086 s, drawing 921 s), per
 # minute of film - only for the progress bar and "about N min left"
 SETUP_S, PLAN_S_MIN, DRAW_S_MIN, FINISH_S = 240, 100, 85, 150
-START_LIMIT_S = 20 * 60                       # a pod that has written no log line by then never started: switched off
+START_LIMIT_S = 25 * 60                       # a machine that has written no log line by then never started
+# reliability (owner 2026-10-12): a film waits for a machine instead of failing; a planner that dies, freezes or never
+# starts is replaced automatically (carrying on from the saved plan when there is one); a frozen drawer is replaced
+RENT_WAIT_S, RENT_RETRY_S = 60 * 60, 120       # how long a film waits for a planner, and how often it tries
+FROZEN_S = 12 * 60                             # no sign of life (the log is sent every 30-45 s) for this long: frozen
+AUTO_RETRIES = 2                               # replacements for a planning machine before the film stops
+BEAT_EVERY_S, CHECK_EVERY_S = 120, 300         # how often the log's age and a machine's state are looked at
 STAGES = [                                     # the pod's own log lines, latest first: stage, progress from, to
     ("video uploaded", "Saving the video", 98, 99),
     ("FINISH exit", "Saving the video", 96, 98),
@@ -142,6 +144,10 @@ class LocalBucket:
     def exists(self, key):
         return self._p(key).exists()
 
+    def stat(self, key):
+        p = self._p(key)
+        return p.stat().st_mtime if p.exists() else None
+
     def delete(self, key):
         self._p(key).unlink(missing_ok=True)
 
@@ -161,9 +167,10 @@ class Studio:
         self.threads, self.lock, self.pkg_lock = {}, threading.Lock(), threading.Lock()
         self.last_sweep, self.stop = 0.0, threading.Event()
         self.paused = False                          # the Update button holds the queue while it restarts the site
+        self.renting = set()                         # machine names being rented right now (the sweep leaves them)
+        self.money, self.money_at = {}, 0.0          # the sources' balances, read by the queue thread once a minute
+        self._src, self._src_keys = None, None
         (self.data / "jobs").mkdir(parents=True, exist_ok=True)
-
-    # ── keys and storage ──────────────────────────────────────────────────
 
     @property
     def keys_file(self) -> Path:
@@ -228,6 +235,17 @@ class Studio:
 
     def start(self) -> None:
         threading.Thread(target=self._loop, name="studio", daemon=True).start()
+        if not self.fake:
+            threading.Thread(target=self._money_loop, name="balances", daemon=True).start()
+
+    def _money_loop(self) -> None:
+        """The RunPod and Vast balances, read once a minute for the page (a slow answer never holds anything up)."""
+        while not self.stop.is_set():
+            try:
+                self.money, self.money_at = self.sources().balances(fresh=True), time.time()
+            except Exception:
+                self._note("balance", traceback.format_exc())
+            self.stop.wait(60)
 
     def _loop(self) -> None:
         while not self.stop.is_set():
@@ -276,12 +294,12 @@ class Studio:
             j = self.store.job(jid) or {}
             if not self.fake:
                 self._end_machines(jid)
-                if j.get("run"):                     # the render package and drawn shares are not needed any more
-                    try:
-                        self._drop_parts(self.keys_of(jid, j.get("title"), j["run"]), self.bucket(),
-                                         int(j.get("machines") or 1))
-                    except Exception:
-                        self._note(jid, traceback.format_exc())
+                try:                                 # the machines' start scripts hold the keys; the plan and the
+                    b = self.bucket()                # drawn shares stay, so Try again carries on without paying
+                    self._unboot(b, jid, j)          # for the planning again
+                    self._cleanup(jid, b)
+                except Exception:
+                    self._note(jid, traceback.format_exc())
             self.store.update(jid, status="failed", stage="Stopped", finished=time.time(),
                               error=f"{type(e).__name__}: {str(e)[:300]}")
 
@@ -296,14 +314,132 @@ class Studio:
 
     @staticmethod
     def keys_of(jid: str, title: str = "", run: str = "") -> dict:
-        """The film's R2 keys. Its uploaded files are shared by every attempt; what a pod reports (log, done, result)
-        lives under the attempt's own run name, so a Try again never reads an earlier attempt's answer."""
+        """The film's R2 keys. Its uploaded files are shared by every attempt; what a machine reports (log, done,
+        result, shares) lives under the attempt's own run name, so a Try again never reads an earlier attempt's answer
+        by mistake. An attempt's checkpoint (the saved plan) and render package let a later attempt carry on."""
         base = f"mrtruth/jobs/{jid}/"
         out = base + (f"{run}/" if run else "")
-        return {"base": base, "log": out + "log.txt", "done": out + "done.json", "result": out + "result.tgz",
-                "video": f"mrtruth/videos/{jid}/{slug(title)}.mp4", "rpkg": out + "render_package.tgz",
+        return {"base": base, "out": out, "log": out + "log.txt", "done": out + "done.json",
+                "result": out + "result.tgz", "video": f"mrtruth/videos/{jid}/{slug(title)}.mp4",
+                "rpkg": out + "render_package.tgz", "ckpt": out + "checkpoint.tgz",
                 "part": lambda k: out + f"parts/seg_{k}.tgz", "skip": lambda k: out + f"parts/skip_{k}",
-                "dlog": lambda k: out + f"parts/log_{k}.txt"}
+                "dlog": lambda k: out + f"parts/log_{k}.txt", "boot": lambda name: out + f"boot/{name}.sh"}
+
+    # ── machines ──────────────────────────────────────────────────────────
+
+    def sources(self) -> Sources:
+        """RunPod and Vast.ai, with the website's current keys (one object while the keys stay the same, so the
+        balances are read at most once a minute)."""
+        keys = self.keys()
+        if self._src is None or self._src_keys != keys:
+            self._src, self._src_keys = Sources(keys, note=lambda s: self._note("sources", s)), keys
+        return self._src
+
+    def balances(self) -> dict:
+        """The balances as last read by the queue thread (never a slow call from a page view)."""
+        return self.money
+
+    @staticmethod
+    def _name(jid, attempt) -> str:
+        """The planner's name for this attempt; a drawer adds -d<share> (a replacement -d<share>r<n>)."""
+        return f"{POD_PREFIX}{jid}-a{attempt}"
+
+    def _boot(self, b, K, ttl):
+        """For Vast: the start script (with its settings and keys) as a private link that works for the film's time
+        limit; the object is deleted once the machine has started, and at the film's end in any case."""
+        def put(name, text):
+            b.put_bytes(K["boot"](name), text.encode("utf-8"))
+            return b.presign(K["boot"](name), ttl)
+        return put
+
+    def _unboot(self, b, jid, j) -> None:
+        for r in json.loads(j.get("runs") or "[]"):
+            prefix = self.keys_of(jid, j.get("title"), r["run"])["out"] + "boot/"
+            for o in b.list(prefix):
+                try:
+                    b.delete(o["key"])
+                except S3Error:
+                    pass
+
+    def _state(self, mid) -> str:
+        return self.sources().state(mid) if mid else "gone"
+
+    def _stat(self, b, key):
+        """When an object was last written (seconds since 1970), or None if it is not there or cannot be read."""
+        try:
+            return b.stat(key)
+        except S3Error:
+            return None
+
+    # ── one film ──────────────────────────────────────────────────────────
+
+    def _plan_run(self, b, jid, title, runs, commit) -> str:
+        """The latest earlier attempt, made with this same version of the tool, whose plan was saved (checkpoint and
+        render package): a new attempt carries on from it - nothing is planned or paid for again."""
+        for r in reversed(runs):
+            if r.get("commit") != commit[:12]:
+                continue
+            P = self.keys_of(jid, title, r.get("plan") or r["run"])
+            if b.exists(P["ckpt"]) and b.exists(P["rpkg"]):
+                return r.get("plan") or r["run"]
+        return ""
+
+    def _earlier_part(self, b, jid, title, runs, plan, k) -> str:
+        """Share k drawn by an earlier attempt of the same plan (its R2 key), or ""."""
+        for r in reversed(runs):
+            if (r.get("plan") or r["run"]) == plan:
+                key = self.keys_of(jid, title, r["run"])["part"](k)
+                if b.exists(key):
+                    return key
+        return ""
+
+    def _drop_runs(self, b, jid, j, keep_commit=None) -> None:
+        """An attempt's big files in R2 (render package, checkpoint, drawn shares, start scripts: about 750 MB a
+        16-minute film): dropped once the film is finished, cancelled or deleted; on a failure only those of other
+        versions of the tool (they can never be carried on)."""
+        for r in json.loads(j.get("runs") or "[]"):
+            if keep_commit and r.get("commit") == keep_commit[:12]:
+                continue
+            K = self.keys_of(jid, j.get("title"), r["run"])
+            keys = [K["rpkg"], K["ckpt"]] + [o["key"] for p in ("parts/", "boot/") for o in b.list(K["out"] + p)]
+            for key in keys:
+                try:
+                    b.delete(key)
+                except S3Error:
+                    pass
+
+    def forget(self, jid) -> None:
+        """A deleted film: its video and every attempt's files in R2."""
+        j = self.store.job(jid)
+        if not j or self.fake:
+            return
+        b = self.bucket()
+        if j.get("video_key"):
+            try:
+                b.delete(j["video_key"])
+            except S3Error:
+                pass
+        self._drop_runs(b, jid, j)
+
+    def _lost(self, jid, why) -> None:
+        """The planning machine died, froze or never started: switch everything of this attempt off and start again on
+        another machine, carrying on from the saved plan when there is one (AUTO_RETRIES times; then the film stops)."""
+        j = self.store.job(jid)
+        retries = int(j.get("retries") or 0)
+        self._note(jid, f"planner {j.get('pod_id')} {why} (retry {retries + 1} of {AUTO_RETRIES})")
+        if retries >= AUTO_RETRIES:
+            raise RuntimeError(f"the machine {why}, and so did {retries} replacement(s) - press Try again")
+        self._end_machines(jid)
+        try:
+            self._cleanup(jid, self.bucket())
+        except S3Error:
+            pass
+        cost = dict(json.loads(j.get("cost") or "{}"), pod_earlier=self._machine_cost(j, time.time()))
+        if not self.store.update_if(jid, ("running", "starting"), status="queued", progress=1, pod_id=None,
+                                    pod_started=None, drawers=None, retries=retries + 1, cost=json.dumps(cost),
+                                    stage=f"The machine {why} - starting again on another machine "
+                                          f"(attempt {retries + 2})"):
+            return self._cancelled(jid)
 
     def machines(self) -> int:
         try:
@@ -331,13 +467,20 @@ class Studio:
         if missing:
             raise RuntimeError("missing keys in Settings: " + ", ".join(missing))
         keys, b = self.keys(), self.bucket()
-        run = f"web-{jid}-{int(time.time())}"                  # this attempt (a Try again is a new one)
+        run = f"web-{jid}-{int(time.time())}"                  # this attempt (an automatic or manual retry is a new one)
         K = self.keys_of(jid, j["title"], run)
         for name in ("result.tgz", "pod_log.txt"):              # an earlier attempt's read-back
             (self.folder(jid) / name).unlink(missing_ok=True)
         self.store.update(jid, stage="Uploading the code package", progress=1, run=run)
         pkg_key, commit = self.package(b)
-        self.store.update(jid, stage="Uploading your files", progress=2, commit_id=commit[:12])
+        runs = json.loads(j.get("runs") or "[]")
+        self._drop_runs(b, jid, j, keep_commit=commit)          # other versions' files can never be carried on
+        runs = [r for r in runs if r.get("commit") == commit[:12]]
+        plan = self._plan_run(b, jid, j["title"], runs, commit)
+        runs.append({"run": run, "commit": commit[:12], "plan": plan or run})
+        attempt = len(runs)
+        P = self.keys_of(jid, j["title"], plan or run)
+        self.store.update(jid, stage="Uploading your files", progress=2, commit_id=commit[:12], runs=json.dumps(runs))
         ins = self.inputs(jid)
         if "voice" not in ins or "script" not in ins:
             raise RuntimeError("the voiceover or the script is missing from the upload")
@@ -348,22 +491,33 @@ class Studio:
             if not b.exists(k):
                 b.put_file(k, p)
         max_min = max(150, 60 + 6 * int(j["minutes"] or 10))
-        ttl = (max_min + 90) * 60
+        ttl = (max_min + 90) * 60 + RENT_WAIT_S
         n = self.machines()
         env = {"PKG_URL": b.presign(pkg_key, ttl), "LOG_PUT": b.presign(K["log"], ttl, "PUT"),
-               "NPARTS": str(n), "RPKG_PUT": b.presign(K["rpkg"], ttl, "PUT"),
+               "NPARTS": str(n), "RPKG_PUT": b.presign(K["rpkg"], ttl, "PUT"), "CKPT_PUT": b.presign(K["ckpt"], ttl, "PUT"),
+               "PART_PUT_1": b.presign(K["part"](1), ttl, "PUT"),
                "RES_PUT": b.presign(K["result"], ttl, "PUT"), "VID_PUT": b.presign(K["video"], ttl, "PUT"),
                "DONE_PUT": b.presign(K["done"], ttl, "PUT"), "MAX_MIN": str(max_min),
                "JT": j["title"], "JM": str(j["minutes"] or 10),
                "VOICE_URL": b.presign(K["base"] + "inputs/" + names["voice"], ttl), "VOICE_NAME": names["voice"],
                "SCRIPT_URL": b.presign(K["base"] + "inputs/" + names["script"], ttl)}
+        if plan:                                       # carry on from the saved plan: nothing is planned again
+            env.update(CKPT_GET=b.presign(P["ckpt"], ttl), RPKG_GET=b.presign(P["rpkg"], ttl), RESUMED_FROM=plan)
         if "music" in ins:
             vol = j.get("music_vol")
             env.update(MUSIC_URL=b.presign(K["base"] + "inputs/" + names["music"], ttl), MUSIC_NAME=names["music"],
                        MUSIC_VOL=str(int(round(vol if vol is not None else 100))))
-        for k in range(2, n + 1):                      # the drawers' shares, and the marks for one that never came
-            env[f"PART_GET_{k}"] = b.presign(K["part"](k), ttl)
+        drawers, now = [], time.time()
+        for k in range(1, n + 1):                      # each share: drawn before (same plan), or this attempt's
+            had = self._earlier_part(b, jid, j["title"], runs[:-1], plan, k) if plan else ""
+            if k == 1:
+                env["PART_GET_1"] = b.presign(had, ttl) if had else ""
+                continue
+            env[f"PART_GET_{k}"] = b.presign(had or K["part"](k), ttl)
             env[f"SKIP_GET_{k}"] = b.presign(K["skip"](k), ttl)
+            if had:
+                drawers.append({"part": k, "id": None, "hr": 0, "desc": "drawn by an earlier attempt", "started": now,
+                                "ended": now, "state": "done", "why": "kept"})
         for k in POD_KEYS:
             env["K_" + k] = keys.get(k, "")
         self.store.update(jid, stage="Loading the saved picture checks", progress=3)
@@ -373,98 +527,55 @@ class Studio:
         env.update(venv)
         with open(self.folder(jid) / "keys_to_delete.json", "w") as f:
             json.dump(list(vk.values()), f)
-        if self.store.job(jid)["status"] == "cancelling":
-            return self._cancelled(jid)
-        self.store.update(jid, stage="Renting a machine", progress=4, machines=n, drawers="[]")
-        pod, desc = self._rent(keys["RUNPOD_API_KEY"], POD_PREFIX + jid, env, PLAN_SCRIPT,
-                               min_vcpu=SMALL_VCPU if n > 1 else 32, max_hr=PLANNER_MAX_HR, ram=32,
-                               stop=lambda: self.store.job(jid)["status"] == "cancelling", fallback=True)
-        if not pod:
-            if self.store.job(jid)["status"] == "cancelling":
-                return self._cancelled(jid)
-            raise RuntimeError(f"RunPod has no machine free under ${PLANNER_MAX_HR:.2f}/h right now - "
-                               "press Try again in a few minutes")
-        # the pod is saved first (so a cancel or a crash from here on switches it off), then the film becomes
-        # "running" only if nobody pressed Stop while it was being rented
-        self.store.update(jid, pod_id=pod["id"], pod_hr=float(pod.get("costPerHr") or 0), pod_desc=desc,
-                          pod_started=time.time())
+        self.store.update(jid, machines=n, drawers=json.dumps(drawers), pod_id=None)
+        name = self._name(jid, attempt)
+        deadline, tries = time.time() + RENT_WAIT_S, 0
+        try:
+            while True:                                # wait for a machine rather than fail (owner 2026-10-12)
+                if self.store.job(jid)["status"] == "cancelling":
+                    return self._cancelled(jid)
+                if not tries:                          # later tries keep the "Waiting for a machine" message
+                    self.store.update(jid, stage="Renting a machine", progress=4)
+                pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU if n > 1 else 32,
+                                        ram=32, max_hr=PLANNER_MAX_HR, fallback=True, ttl=ttl)
+                tries += 1
+                if pod:
+                    break
+                self._note(jid, f"no planner (try {tries}): " + "; ".join(tried)[:2000])
+                if self.store.job(jid)["status"] == "cancelling":
+                    return self._cancelled(jid)
+                money = [t for t in tried if "balance too low" in t]
+                why = (" and ".join(money) + " - please top up" if money else
+                       f"no machine free under ${PLANNER_MAX_HR:.2f}/h")
+                if time.time() >= deadline:
+                    raise RuntimeError(f"{why} for {RENT_WAIT_S // 60} minutes - press Try again later")
+                self.store.update(jid, stage=f"Waiting for a machine: {why} (tried {tries}x, trying again every "
+                                             f"{RENT_RETRY_S // 60} min)", progress=4)
+                self.stop.wait(RENT_RETRY_S)
+            # the machine is saved first (so a cancel or a crash from here on switches it off), then the film becomes
+            # "running" only if nobody pressed Stop while it was being rented
+            self.store.update(jid, pod_id=pod["id"], pod_hr=float(pod.get("hr") or 0), pod_desc=pod["desc"],
+                              pod_started=time.time(), log_tail=None)
+        finally:
+            self.renting.discard(name)
         if not self.store.update_if(jid, ("starting",), status="running", stage="Machine starting", progress=5):
             return self._cancelled(jid)
         self._watch(jid)
 
-    def _offers(self, api_key, min_vcpu, ram=32) -> list:
-        """What RunPod has in stock right now with at least `min_vcpu` cores and `ram` GB: [(dollars an hour, gpu
-        type, cloud)], cheapest first (its GraphQL lowestPrice; the GPU itself is not used - Mr Truth draws on the
-        processor)."""
-        out = []
-        for secure in (False, True):
-            q = ("query { gpuTypes { id lowestPrice(input:{gpuCount:1, minVcpuCount:%d, minMemoryInGb:%d, "
-                 "secureCloud:%s}) { uninterruptablePrice stockStatus } } }"
-                 % (int(min_vcpu), int(ram), "true" if secure else "false"))
-            r = requests.post(GRAPHQL, params={"api_key": api_key}, json={"query": q}, timeout=60)
-            r.raise_for_status()
-            for g in (r.json().get("data") or {}).get("gpuTypes") or []:
-                lp = g.get("lowestPrice") or {}
-                if lp.get("uninterruptablePrice") and lp.get("stockStatus"):
-                    out.append((float(lp["uninterruptablePrice"]), g["id"], "SECURE" if secure else "COMMUNITY"))
-        return sorted(out)
-
-    def _rent(self, api_key, name, env, script, min_vcpu=SMALL_VCPU, max_hr=None, ram=32, stop=lambda: False,
-              fallback=False):
-        """One machine: the cheapest in stock with at least `min_vcpu` cores and `ram` GB, never dearer than `max_hr`
-        when it is given. If RunPod's price list cannot be read, the fixed list is tried in order when `fallback` is
-        set (the planner: its price is then checked once it is made); otherwise nothing is rented (a drawer: the
-        planner draws its share)."""
-        body = {"name": name, "imageName": "node:22-bookworm", "gpuCount": 1, "minRAMPerGPU": ram,
-                "containerDiskInGb": 60, "volumeInGb": 0, "dockerEntrypoint": ["bash", "-c"],
-                "dockerStartCmd": [script], "ports": [], "minVCPUPerGPU": min_vcpu,
-                "env": dict(env, VCPU=str(min_vcpu))}
-        try:
-            offers = self._offers(api_key, min_vcpu, ram)
-        except (requests.RequestException, ValueError, KeyError, TypeError):
-            if not fallback:
-                return None, ""
-            offers = [(None, g, c) for c in ("COMMUNITY", "SECURE") for g in GPUS]
-        # one size is enough: a machine with more cores also matches "at least min_vcpu", so a type that has none
-        # free at this size has none at a bigger one either
-        for price, gpu, cloud in offers:
-            if max_hr is not None and price is not None and price > max_hr:
-                break                                        # cheapest first: the rest are dearer still
-            if stop():                                       # Stop pressed while renting: rent nothing
-                return None, ""
-            body.update(gpuTypeIds=[gpu], cloudType=cloud)
-            try:
-                r = requests.post(f"{REST}/pods", json=body, timeout=60,
-                                  headers={"Authorization": "Bearer " + api_key})
-                pod = r.json() if r.ok else None
-            except requests.ConnectTimeout:
-                continue                                     # never reached RunPod: nothing was made
-            except (requests.RequestException, ValueError):
-                # the answer was lost, not necessarily the pod: one made under this name is ours; if none shows,
-                # stop here rather than risk two (whatever was made is switched off with the film, by its name)
-                pod = next((p for p in self._pods(api_key) if p.get("name") == name), None)
-                if not pod:
-                    return None, ""
-            if not pod or not pod.get("id"):
-                continue
-            hr = float(pod.get("costPerHr") or price or 0)
-            if max_hr is not None and hr > max_hr:           # dearer than listed: not this one
-                self._terminate(pod["id"])
-                continue
-            return pod, f"{gpu.replace('NVIDIA ', '')}, {cloud.lower()}, {min_vcpu}+ CPUs, ${hr:.2f}/h"
-        return None, ""
-
-    @staticmethod
-    def _pods(api_key) -> list:
-        """Every pod on the RunPod account ([] when the list cannot be read)."""
-        try:
-            r = requests.get(f"{REST}/pods", timeout=60, headers={"Authorization": "Bearer " + api_key})
-            got = r.json() if r.ok else []
-        except (requests.RequestException, ValueError):
-            return []
-        if isinstance(got, dict):
-            got = got.get("pods", [])
-        return [p for p in got if isinstance(p, dict)] if isinstance(got, list) else []
+    def _rent(self, jid, K, name, env, script, min_vcpu=SMALL_VCPU, ram=32, max_hr=None, fallback=False, ttl=6 * 3600):
+        """One machine for this film, the cheapest good one free now across the sources (see web/machines.py), or one
+        already made under this exact name (an answer lost on the way, a website restart). The name stays in
+        self.renting until the caller has saved the machine (or given up), so the sweep never switches it off."""
+        self.renting.add(name)
+        src = self.sources()
+        have = next((m for m in src.list() if m["name"] == name and m.get("state") not in ("exited", "terminated")),
+                    None)
+        if have:
+            hr = float(have.get("hr") or 0)
+            return {"id": have["id"], "hr": hr, "desc": f"picked up again, ${hr:.2f}/h"}, ["already made"]
+        stop = lambda: (self.store.job(jid) or {}).get("status") == "cancelling"
+        return src.rent(name, env, script, min_vcpu=min_vcpu, ram=ram, max_hr=max_hr, fallback=fallback, stop=stop,
+                        boot=self._boot(self.bucket(), K, ttl))
 
     def _reattach(self, jid) -> None:
         j = self.store.job(jid)
@@ -473,9 +584,9 @@ class Studio:
         if self.fake:
             return self._fake_run(jid)
         if not j.get("pod_id"):
-            # lost between "starting" and a pod: anything it rented is switched off by the sweep
-            self.store.update(jid, status="failed", stage="Stopped", finished=time.time(),
-                              error="the website restarted while this film was starting - press Try again")
+            # lost between "starting" and a machine: back in the queue (nothing was paid for yet; the sweep switches
+            # off anything half-rented, and the next attempt has a new name)
+            self.store.update(jid, status="queued", stage="Waiting to start (the website restarted)")
             self.last_sweep = 0
             return
         if j["status"] == "starting":
@@ -485,11 +596,11 @@ class Studio:
     def _watch(self, jid) -> None:
         j = self.store.job(jid)
         b, K = self.bucket(), self.keys_of(jid, j["title"], j.get("run") or "")
-        rp = RunPod(self.keys().get("RUNPOD_API_KEY", ""))
         max_min = max(150, 60 + 6 * int(j["minutes"] or 10))
         started = j["pod_started"] or time.time()
         deadline = started + (max_min + 15) * 60
-        seen, last_pod_check, got_log = {}, time.time(), False
+        seen, last_check, last_beat = {}, time.time(), time.time()
+        got_log = bool(j.get("log_tail"))            # a film picked up again after a restart had started already
         while True:                                  # done.json first: a film that finished while the website was
             j = self.store.job(jid)                  # down past its time limit is still read back
             if j["status"] == "cancelling":
@@ -499,12 +610,19 @@ class Studio:
             if time.time() >= deadline:
                 if b.exists(K["video"]):             # the video arrived; done.json did not
                     break
-                raise RuntimeError("the film took longer than its time limit; the machine was switched off")
+                raise RuntimeError("the film took longer than its time limit; the machines were switched off")
+            log, missing = [], False
             try:
                 log = b.get_bytes(K["log"]).decode("utf-8", "replace").splitlines()
-            except S3Error:
-                log = []
+            except S3Error as e:
+                missing = "404" in str(e)            # no log yet (any other error: unknown, look again)
+            now = time.time()
             if log:
+                if not got_log:                      # started: its start script (with the keys) is not needed
+                    try:
+                        b.delete(K["boot"](self._name(jid, len(json.loads(j.get("runs") or "[]")))))
+                    except S3Error:
+                        pass
                 got_log = True
                 self._progress(jid, j, log, seen)
                 if int(j.get("machines") or 1) > 1:
@@ -512,16 +630,21 @@ class Studio:
                         self._drawers(jid, b, K, "\n".join(log))     # every share itself
                     except Exception:
                         self._note(jid, traceback.format_exc())
-            elif not got_log and time.time() - started > START_LIMIT_S:
-                raise RuntimeError("the machine never started working - press Try again")
-            if time.time() - last_pod_check > 300:     # a pod RunPod took back never writes done.json
-                last_pod_check = time.time()
-                if not self._pod_exists(j["pod_id"]):
+            elif missing and not got_log and now - started > START_LIMIT_S:
+                return self._lost(jid, "never started")
+            if got_log and now - last_beat >= BEAT_EVERY_S:    # the heartbeat: the planner sends its log every 45 s
+                last_beat = now
+                at = self._stat(b, K["log"])
+                if at and now - at > FROZEN_S and not b.exists(K["done"]):
+                    return self._lost(jid, f"stopped answering ({int((now - at) // 60)} min without a sign of life)")
+            if now - last_check >= CHECK_EVERY_S:    # a machine its source took back never writes done.json
+                last_check = now
+                if self._state(j["pod_id"]) in ("gone", "stopped"):
                     if b.exists(K["done"]) or b.exists(K["video"]):
                         break
-                    raise RuntimeError("the machine stopped unexpectedly (RunPod took it back) - press Try again")
+                    return self._lost(jid, "was taken back or switched off")
             self.stop.wait(20)
-        self._finish(jid, b, K, rp)
+        self._finish(jid, b, K)
 
     def _progress(self, jid, j, log, seen) -> None:
         text = "\n".join(log)
@@ -560,54 +683,56 @@ class Studio:
         return max(1, math.ceil(s / 60))
 
     def _drawers(self, jid, b, K, log: str) -> None:
-        """The drawing machines: rented once the planner's pictures are chosen (so they are set up by the time its
-        package is ready), then watched - a share that arrived, or that the planner took over, switches its machine
-        off; a machine that could not be rented, failed, vanished or never started gets a skip mark, and the planner
-        draws that share itself."""
+        """The drawing machines: wanted once the planner's pictures are chosen, rented (or tried again every
+        RENT_RETRY_S while one could still help), then watched. A share that arrived, or that the planner took over,
+        switches its machine off; one that failed, froze, vanished or never started gets a replacement while there is
+        time, else a skip mark - and the planner draws that share itself."""
         j = self.store.job(jid)
         n = int(j.get("machines") or 1)
         ds = json.loads(j.get("drawers") or "[]")
-        now = time.time()
-        want = [k for k in range(2, n + 1) if k not in {d["part"] for d in ds}]
-        if "PLAN exit=" in log and "PLAN exit=0 " not in log:
-            want = []                                        # planning failed: nothing to draw
-        if want and any(m in log for m in ("PART 1 drawn", "RENDER exit", "PACKAGE upload failed")):
-            for k in want:                                   # too late for a new machine: the planner draws it now
-                ds.append({"part": k, "id": None, "hr": 0, "desc": "none in time", "started": now, "ended": now,
-                           "state": "skipped", "why": "no machine in time",
-                           "mark": self._skip(b, K, k, "no machine in time")})
-            self.store.update(jid, drawers=json.dumps(ds))
-        elif want and any(m in log for m in ("PICTURES done", "PLAN exit", "PACKAGE uploaded")):
-            api = self.keys().get("RUNPOD_API_KEY", "")
-            ttl = (max(150, 60 + 6 * int(j["minutes"] or 10)) + 90) * 60
-            made = {p.get("name"): p for p in self._pods(api)}     # a drawer rented just before a restart
-            for k in want:
-                if self.store.job(jid)["status"] == "cancelling":
-                    break
-                pod = made.get(f"{POD_PREFIX}{jid}-d{k}")
-                if pod:
-                    hr = float(pod.get("costPerHr") or 0)
-                    ds.append({"part": k, "id": pod["id"], "hr": hr, "desc": f"picked up again, ${hr:.2f}/h",
-                               "started": now, "ended": None, "state": "running"})
-                    self.store.update(jid, drawers=json.dumps(ds))
-                    continue
-                env = {"PKG_GET": b.presign(K["rpkg"], ttl), "PART_PUT": b.presign(K["part"](k), ttl, "PUT"),
-                       "LOG_PUT": b.presign(K["dlog"](k), ttl, "PUT"), "PART": str(k), "NPARTS": str(n),
-                       "MAX_MIN": str(max(90, 30 + 3 * int(j["minutes"] or 10)))}
-                pod, desc = self._rent(api, f"{POD_PREFIX}{jid}-d{k}", env, DRAW_SCRIPT, min_vcpu=SMALL_VCPU,
-                                       max_hr=DRAWER_MAX_HR, ram=24,
-                                       stop=lambda: self.store.job(jid)["status"] == "cancelling")
-                if pod:
-                    ds.append({"part": k, "id": pod["id"], "hr": float(pod.get("costPerHr") or 0), "desc": desc,
-                               "started": time.time(), "ended": None, "state": "running"})
-                else:
-                    why = "none free under $%.2f/h" % DRAWER_MAX_HR
-                    ds.append({"part": k, "id": None, "hr": 0, "desc": "none free", "started": now, "ended": now,
-                               "state": "skipped", "why": why, "mark": self._skip(b, K, k, why)})
-                self.store.update(jid, drawers=json.dumps(ds))
-            return
-        changed = False
+        runs = json.loads(j.get("runs") or "[]")
+        planner = self._name(jid, len(runs))
+        P = self.keys_of(jid, j["title"], (runs[-1].get("plan") if runs else "") or j.get("run") or "")
+        now, changed = time.time(), False
+        failed_plan = "PLAN exit=" in log and "PLAN exit=0 " not in log
+        late = any(m in log for m in ("PART 1 drawn", "PART 1 kept", "RENDER exit", "PACKAGE upload failed"))
+        ready = any(m in log for m in ("PICTURES done", "PLAN exit", "PACKAGE uploaded"))
+        for k in range(2, n + 1):
+            if not any(d["part"] == k for d in ds):
+                ds.append({"part": k, "id": None, "hr": 0, "desc": "waiting for the plan", "started": now,
+                           "ended": None, "state": "wanted", "tries": 0, "next": 0})
+                changed = True
+        ttl = (max(150, 60 + 6 * int(j["minutes"] or 10)) + 90) * 60
         for d in ds:
+            if d["state"] != "wanted":
+                continue
+            k = d["part"]
+            if failed_plan:
+                d.update(state="ended", ended=now, why="planning failed")
+            elif late:                               # too late for a new machine: the planner draws it now
+                d.update(state="skipped", ended=now, why="no machine in time",
+                         mark=self._skip(b, K, k, "no machine in time"))
+            elif ready and now >= d.get("next", 0) and self.store.job(jid)["status"] != "cancelling":
+                name = f"{planner}-d{k}" + (f"r{d['replaces']}" if d.get("replaces") else "")
+                logkey = K["dlog"](f"{k}r{d['replaces']}" if d.get("replaces") else k)
+                env = {"PKG_GET": b.presign(P["rpkg"], ttl), "PART_PUT": b.presign(K["part"](k), ttl, "PUT"),
+                       "LOG_PUT": b.presign(logkey, ttl, "PUT"), "PART": str(k), "NPARTS": str(n),
+                       "MAX_MIN": str(max(90, 30 + 3 * int(j["minutes"] or 10)))}
+                try:
+                    pod, tried = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=SMALL_VCPU, ram=24,
+                                            max_hr=DRAWER_MAX_HR, ttl=ttl)
+                    d["tries"] = d.get("tries", 0) + 1
+                    if pod:
+                        d.update(state="running", id=pod["id"], hr=float(pod.get("hr") or 0), desc=pod["desc"],
+                                 started=time.time(), name=name, log=logkey)
+                    else:
+                        d.update(next=now + RENT_RETRY_S, desc=f"none free yet (tried {d['tries']}x)")
+                        self._note(jid, f"no drawer for share {k} (try {d['tries']}): " + "; ".join(tried)[:1500])
+                    self.store.update(jid, drawers=json.dumps(ds))
+                finally:
+                    self.renting.discard(name)
+            changed = True
+        for d in list(ds):
             if d["state"] == "skipped" and d.get("mark") is False and self._skip(b, K, d["part"], d.get("why", "")):
                 d["mark"], changed = True, True
             if d["state"] != "running":
@@ -620,29 +745,43 @@ class Studio:
             elif "PACKAGE upload failed" in log:
                 done, why = True, "taken over"              # no package for it: the planner draws every share
             else:
+                logkey = d.get("log") or K["dlog"](k)
                 dl, missing = "", False
                 try:
-                    dl = b.get_bytes(K["dlog"](k)).decode("utf-8", "replace")
+                    dl = b.get_bytes(logkey).decode("utf-8", "replace")
                     if not d.get("seen"):
                         d["seen"], changed = True, True
+                        try:                                # started: its start script (with links) is not needed
+                            b.delete(K["boot"](d.get("name") or f"{planner}-d{k}"))
+                        except S3Error:
+                            pass
                 except S3Error as e:
                     missing = "404" in str(e)                # no log yet (any other error: unknown, look again)
+                at = self._stat(b, logkey) if d.get("seen") else None
                 if f"PART {k} failed" in dl or "watchdog" in dl:
                     why = "failed"
                 elif missing and not d.get("seen") and now - d["started"] > START_LIMIT_S:
                     why = "never started"
-                elif now - d.get("checked", d["started"]) > 300:
+                elif at and now - at > FROZEN_S:
+                    why = "froze"
+                elif now - d.get("checked", d["started"]) >= CHECK_EVERY_S:
                     d["checked"] = now
                     changed = True
-                    if not self._pod_exists(d["id"]):
+                    if self._state(d["id"]) in ("gone", "stopped"):
                         why = "vanished"
-            if done or why:
-                if not done and not self._skip(b, K, k, why):
-                    continue                                  # the planner was not told: tried again next time
-                if not self._terminate(d["id"]):
-                    continue                                  # still on: switched off on the next look
-                d.update(state="done" if done else "skipped", ended=time.time(), why=why)
-                changed = True
+            if not (done or why):
+                continue
+            if not self._terminate(d["id"]):
+                continue                                     # still on: switched off on the next look
+            changed = True
+            if done:
+                d.update(state="done", ended=time.time(), why=why)
+            elif not late and not d.get("replaces"):         # a second machine while it can still help
+                d.update(state="ended", ended=time.time(), why=why)
+                ds.append({"part": k, "id": None, "hr": 0, "desc": f"replacing a machine that {why}", "started": now,
+                           "ended": None, "state": "wanted", "tries": 0, "next": 0, "replaces": 1})
+            else:
+                d.update(state="skipped", ended=time.time(), why=why, mark=self._skip(b, K, k, why))
         if changed:
             self.store.update(jid, drawers=json.dumps(ds))
 
@@ -657,15 +796,18 @@ class Studio:
             return False
 
     def _machine_cost(self, j: dict, now: float) -> float:
-        """Every machine of the film so far: the planner from its start, each drawer from its start to its end."""
-        total = (j.get("pod_hr") or 0) * (now - (j.get("pod_started") or now)) / 3600
+        """Every machine of the film so far: earlier attempts, the planner from its start, each drawer from its start
+        to its end."""
+        total = float(json.loads(j.get("cost") or "{}").get("pod_earlier") or 0)
+        total += (j.get("pod_hr") or 0) * (now - (j.get("pod_started") or now)) / 3600
         for d in json.loads(j.get("drawers") or "[]"):
-            total += (d.get("hr") or 0) * ((d.get("ended") or now) - d["started"]) / 3600
+            if d.get("id"):
+                total += (d.get("hr") or 0) * ((d.get("ended") or now) - d["started"]) / 3600
         return round(total, 2)
 
     def _end_machines(self, jid) -> bool:
-        """Switch off every machine of this film: the planner, each drawer still on, and any pod named for the film
-        (one rented in the moment before a crash). True when all said yes."""
+        """Switch off every machine of this film: the planner, each drawer still on, and any machine named for the
+        film (an earlier attempt's, one rented in the moment before a crash). True when all said yes."""
         j = self.store.job(jid)
         ok = self._terminate(j.get("pod_id")) if j.get("pod_id") else True
         ds = json.loads(j.get("drawers") or "[]")
@@ -675,20 +817,12 @@ class Studio:
                 d.update(state="ended", ended=time.time())
         if ds:
             self.store.update(jid, drawers=json.dumps(ds))
-        for p in self._pods(self.keys().get("RUNPOD_API_KEY", "")):
-            if str(p.get("name", "")).startswith(POD_PREFIX + jid) and p.get("id"):
-                ok = self._terminate(p["id"]) and ok
+        for m in self.sources().list():
+            if str(m.get("name", "")).startswith(POD_PREFIX + jid) and m.get("id"):
+                ok = self._terminate(m["id"]) and ok
         return ok
 
-    def _pod_exists(self, pod_id) -> bool:
-        try:
-            r = requests.get(f"{REST}/pods/{pod_id}", timeout=30,
-                             headers={"Authorization": "Bearer " + self.keys().get("RUNPOD_API_KEY", "")})
-            return r.status_code != 404
-        except requests.RequestException:
-            return True                              # unknown: keep watching
-
-    def _finish(self, jid, b, K, rp) -> None:
+    def _finish(self, jid, b, K) -> None:
         j = self.store.job(jid)
         d = self.folder(jid)
         done = {}
@@ -711,7 +845,7 @@ class Studio:
         tail = (d / "pod_log.txt").read_text("utf-8", "replace").splitlines()[-80:] if (d / "pod_log.txt").exists() else []
         fields = dict(finished=now, cost=json.dumps(cost), log_tail="\n".join(tail) or j["log_tail"])
         if not ok:
-            fields["error"] = "the machine did not confirm it was switched off - check runpod.io"
+            fields["error"] = "a machine did not confirm it was switched off - check runpod.io / vast.ai"
         has_video = False
         for _ in range(3):                           # the video object decides (the pod PUTs it whole or not at all)
             try:
@@ -721,13 +855,14 @@ class Studio:
             if has_video:
                 break
             self.stop.wait(5)
-        self._drop_parts(K, b, int(j.get("machines") or 1))
         if has_video and (done.get("ok") or not done):
+            self._drop_runs(b, jid, j)
             size = next((o["size"] for o in b.list(K["video"]) if o["key"] == K["video"]), 0)
             self.store.update(jid, status="done", stage="Finished", progress=100, video_key=K["video"],
                               video_mb=round(size / 1e6, 1), **fields)
             shutil.rmtree(d / "inputs", ignore_errors=True)   # the server's disk is small; R2 keeps a copy
-        else:
+        else:                                        # the plan and shares stay: Try again carries on from them
+            self._unboot(b, jid, j)
             why = done.get("why") or self._why(tail)
             self.store.update(jid, status="failed", stage="Stopped", error=f"the film did not finish: {why}"[:400],
                               **fields)
@@ -761,10 +896,8 @@ class Studio:
             out["ai_pictures"] = round(int(a[-1]) * 0.005, 2)
         return out
 
-    def _terminate(self, pod_id) -> bool:
-        if not pod_id:
-            return True
-        return RunPod(self.keys().get("RUNPOD_API_KEY", "")).terminate(pod_id)
+    def _terminate(self, mid) -> bool:
+        return self.sources().terminate(mid) if mid else True
 
     def _cancelled(self, jid) -> None:
         if not self.fake:
@@ -772,24 +905,13 @@ class Studio:
         j = self.store.job(jid)
         now = time.time()
         cost = json.loads(j["cost"] or "{}")
-        if j.get("pod_started"):
+        if j.get("pod_started") or cost.get("pod_earlier"):
             cost["pod"] = self._machine_cost(j, now)
         self.store.update(jid, status="cancelled", stage="Cancelled", finished=now, cost=json.dumps(cost))
         if not self.fake:
             b = self.bucket()
-            if j.get("run"):
-                self._drop_parts(self.keys_of(jid, j["title"], j["run"]), b, int(j.get("machines") or 1))
+            self._drop_runs(b, jid, j)
             self._cleanup(jid, b)
-
-    @staticmethod
-    def _drop_parts(K, b, n) -> None:
-        """The render package and the drawn shares in R2 (about 750 MB a 16-minute film): not needed once the
-        planner has finished (or the film stopped)."""
-        for key in [K["rpkg"]] + [f(k) for k in range(2, max(2, n) + 1) for f in (K["part"], K["skip"])]:
-            try:
-                b.delete(key)
-            except S3Error:
-                pass
 
     def _cleanup(self, jid, b) -> None:
         f = self.folder(jid) / "keys_to_delete.json"
@@ -802,14 +924,7 @@ class Studio:
             f.unlink(missing_ok=True)
 
     def delete_video(self, jid) -> None:
-        j = self.store.job(jid)
-        if j and j.get("video_key"):
-            try:
-                self.bucket().delete(j["video_key"])
-            except S3Error:
-                pass
-
-    # ── the code the pods run ─────────────────────────────────────────────
+        self.forget(jid)
 
     def package(self, b):
         """The code package for this website's version (git archive of the checked-out commit, the parts Mr Truth
@@ -849,40 +964,29 @@ class Studio:
         return key, commit
 
     def sweep(self) -> list:
-        """Switch off any pod of this website that no film in progress owns (a website restart mid-rent, a crash)."""
-        api = self.keys().get("RUNPOD_API_KEY", "")
-        if not api:
-            return []
-        own = {}
+        """Switch off any machine of this website that no film in progress counts on (a website restart mid-rent, a
+        crash, an earlier attempt's machine, a second machine from an answer that was lost)."""
+        own = set()
         for j in self.store.active():
             if j["status"] == "queued":                  # waiting: nothing of it should be running
                 continue
-            ds = json.loads(j.get("drawers") or "[]")
-            own[POD_PREFIX + j["id"]] = (j.get("pod_id"), {d.get("id") for d in ds if d.get("id")},
-                                         {d["part"] for d in ds})
+            own.add(j.get("pod_id"))
+            own.update(d.get("id") for d in json.loads(j.get("drawers") or "[]") if d.get("state") == "running")
+        own.discard(None)
         gone = []
-        for p in self._pods(api):
-            name = str(p.get("name", ""))
-            if name.startswith(POD_PREFIX) and p.get("id") and not self._owned(name, p["id"], own):
-                if self._terminate(p["id"]):
-                    gone.append(p["id"])
-                    self._note("sweep", f"switched off {p['id']} ({p.get('name')}): no film owns it")
+        for m in self.sources().list():
+            name = str(m.get("name", ""))
+            if name.startswith(POD_PREFIX) and m.get("id") and not self._owned(name, m["id"], own, self.renting):
+                if self._terminate(m["id"]):
+                    gone.append(m["id"])
+                    self._note("sweep", f"switched off {m['id']} ({name}): no film counts on it")
         return gone
 
     @staticmethod
-    def _owned(name, pid, own) -> bool:
-        """Does a film in progress count on this pod? Its planner (by id once saved, by name while it is being
-        rented) or a drawer (by id, or by name while its share has no drawer saved yet). A second pod under the same
-        name (a create whose answer was lost, an earlier attempt's) is not."""
-        for base, (planner, drawers, parts) in own.items():
-            if name == base:
-                return not planner or pid == planner
-            if name.startswith(base + "-d"):
-                k = name[len(base) + 2:]
-                return pid in drawers or (k.isdigit() and int(k) not in parts)
-        return False
-
-    # ── a no-cost trial run (MRTRUTH_WEB_FAKE=1) ──────────────────────────
+    def _owned(name, mid, own, renting) -> bool:
+        """Does a film in progress count on this machine? Its saved planner or a drawer still drawing (by id), or one
+        being rented right now (by name)."""
+        return mid in own or name in renting
 
     def _fake_run(self, jid) -> None:
         """Walks through the real stages in about a minute and makes a short test video from the voiceover."""
@@ -921,7 +1025,7 @@ say(){ echo "$(date +%T) $*" | tee -a /root/log.txt; }
 fail(){ say "STOPPED: $*"; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT"; echo "{\"ok\":false,\"why\":\"$*\"}" | curl -s -X PUT --data-binary @- "$DONE_PUT"; sleep 3600; exit 1; }
 ( n=0; while true; do sleep 45; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT" >/dev/null; n=$((n+1)); [ $((n % 13)) -eq 0 ] && push_verdicts "every 10 min"; done ) &
 ( sleep $((MAX_MIN*60)); say "watchdog: time limit"; push_verdicts watchdog; cd /root/mf; tar czf /root/res.tgz plan.log render.log finish.log 2>/dev/null; curl -s -m 120 -X PUT --data-binary @/root/res.tgz "$RES_PUT"; echo '{"ok":false,"why":"time limit"}' | curl -s -X PUT --data-binary @- "$DONE_PUT"; kill -TERM 1 ) &
-Q=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null | awk '$1!="max"{printf "%d", $1/$2}'); CPUS=${Q:-$VCPU}; [ "$CPUS" -gt "$(nproc)" ] && CPUS=$(nproc); [ "$CPUS" -lt 1 ] && CPUS=$VCPU
+Q=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null | awk '$1!="max"{x=$1/$2; y=int(x); if (x>y+0.05) y++; printf "%d", y}'); CPUS=${Q:-$VCPU}; [ "$CPUS" -gt "$(nproc)" ] && CPUS=$(nproc); [ "$CPUS" -lt 1 ] && CPUS=$VCPU
 MEMG=$(awk '$1!="max"{printf "%d", $1/1073741824}' /sys/fs/cgroup/memory.max 2>/dev/null); MEMG=${MEMG:-$(free -g | awk '/Mem/{print $2}')}
 workers(){ local w=$((CPUS/4)); [ $((MEMG/3)) -lt "$w" ] && w=$((MEMG/3)); [ "$w" -lt 1 ] && w=1; echo $w; }
 say "ip $(curl -s -m 10 https://api.ipify.org) nproc=$(nproc) cpus=$CPUS mem=${MEMG}GB node=$(node --version)"
@@ -944,24 +1048,51 @@ say "pip done: $(.venv/bin/python -c 'import faster_whisper, av, numpy; print("o
   echo "EUROPEANA_API_KEY=$K_EUROPEANA_API_KEY"; echo "ANTHROPIC_API_KEY=$K_ANTHROPIC_API_KEY";
   echo "CLAUDE_PROVIDER=anthropic"; echo "SCRIPT_PROVIDER=anthropic"; } > .env; chmod 600 .env
 seed_verdicts
-say "PLAN start"; T0=$(date +%s)
-( while [ ! -f /root/plan.over ]; do sleep 10; if grep -qE '^ *pictures in [0-9]+s \(search rounds' plan.log 2>/dev/null; then say "PICTURES done"; break; fi; done ) &
-MRTRUTH_SHOT_WORKERS=30 PYTHONUNBUFFERED=1 .venv/bin/python run_test.py "$JS" "$JV" "$JT" "$JM" --export > plan.log 2>&1; RC=$?; touch /root/plan.over
-T1=$(date +%s); say "PLAN exit=$RC seconds=$((T1-T0)) $(grep -o 'pictures in .*' plan.log | tail -1 | cut -c1-200)"
-[ "$RC" -ne 0 ] && say "planning error: $(grep -E 'Error|stopped|STOP' plan.log | tail -1 | cut -c1-300)"
-push_verdicts "after planning"
+if [ -n "${CKPT_GET:-}" ]; then
+  # another machine planned this film and was lost: carry on from its saved plan (nothing is planned or paid again)
+  say "PLAN start (carrying on from the saved plan of ${RESUMED_FROM:-an earlier attempt})"; T0=$(date +%s); RC=1
+  if curl -sf -m 900 --retry 5 --retry-all-errors "$CKPT_GET" -o /root/ckpt.tgz && tar xzf /root/ckpt.tgz -C /root/mf; then
+    JD=$(ls -d output/*/_work/* 2>/dev/null | head -1)
+    [ -n "$JD" ] && curl -sf -m 1800 --retry 5 --retry-all-errors "$RPKG_GET" -o "$JD/mrtruth/render_package.tgz" \
+      && tar tzf "$JD/mrtruth/render_package.tgz" >/dev/null 2>&1 && RC=0
+  fi
+  touch /root/plan.over
+  T1=$(date +%s); say "PLAN exit=$RC seconds=$((T1-T0)) resumed"
+  [ "$RC" -ne 0 ] && say "planning error: the saved plan could not be loaded"
+else
+  say "PLAN start"; T0=$(date +%s)
+  ( while [ ! -f /root/plan.over ]; do sleep 10; if grep -qE '^ *pictures in [0-9]+s \(search rounds' plan.log 2>/dev/null; then say "PICTURES done"; break; fi; done ) &
+  MRTRUTH_SHOT_WORKERS=30 PYTHONUNBUFFERED=1 .venv/bin/python run_test.py "$JS" "$JV" "$JT" "$JM" --export > plan.log 2>&1; RC=$?; touch /root/plan.over
+  T1=$(date +%s); say "PLAN exit=$RC seconds=$((T1-T0)) $(grep -o 'pictures in .*' plan.log | tail -1 | cut -c1-200)"
+  [ "$RC" -ne 0 ] && say "planning error: $(grep -E 'Error|stopped|STOP' plan.log | tail -1 | cut -c1-300)"
+  push_verdicts "after planning"
+fi
 PK=$(ls output/*/_work/*/mrtruth/render_package.tgz 2>/dev/null | head -1)
-if [ -n "$PK" ]; then
-  # the drawing machines take the package from R2; if it cannot be sent, every share is drawn here
-  if [ "$NPARTS" -gt 1 ]; then
+if [ -n "$PK" ] && [ "$RC" -eq 0 ]; then
+  JD=${PK%/mrtruth/render_package.tgz}
+  if [ -z "${CKPT_GET:-}" ]; then
+    # the saved plan, so a replacement machine can carry on without planning again (the pictures are in the package)
+    tar czf /root/ckpt.tgz --exclude="$JD/mrtruth/pictures" --exclude="$JD/mrtruth/segments" \
+      --exclude="$JD/mrtruth/render_package.tgz" "$JD" plan.log 2>/dev/null \
+      && curl -sf -m 900 --retry 3 --retry-all-errors -X PUT --data-binary @/root/ckpt.tgz "$CKPT_PUT" \
+      && say "CHECKPOINT saved $(du -h /root/ckpt.tgz | cut -f1)"
+    # the drawing machines (and a replacement) take the package from R2; if it cannot be sent, every share is drawn here
     if curl -sf -m 1800 --retry 3 --retry-all-errors -X PUT --data-binary @"$PK" "$RPKG_PUT"; then say "PACKAGE uploaded $(du -h "$PK" | cut -f1)"
-    else say "PACKAGE upload failed: every share is drawn here"; NOSEND=1; fi
+    elif [ "$NPARTS" -gt 1 ]; then say "PACKAGE upload failed: every share is drawn here"; NOSEND=1; fi
+  else
+    say "PACKAGE uploaded (kept from ${RESUMED_FROM:-an earlier attempt})"
   fi
   WK=$(workers)
   mkdir -p /root/rr && tar xzf "$PK" -C /root/rr && say "RENDER start: $(python3 -c "import json;print(len(json.load(open('/root/rr/manifest.json'))['tasks']))") shots in $NPARTS share(s), workers $WK here"
   draw1(){ (cd /root/rr && python3 remote_render.py --part "$1/$NPARTS" --out "/root/seg_$1.tgz" --workers $WK >> /root/mf/render.log 2>&1); }
   draw(){ draw1 "$1" || { say "share $1: one more try after an error ($(tail -1 /root/mf/render.log | cut -c1-200))"; draw1 "$1"; }; }
-  draw 1; RR=$?; T_OWN=$(( $(date +%s) - T1 )); say "PART 1 drawn here exit=$RR seconds=$T_OWN"
+  if [ -n "${PART_GET_1:-}" ] && curl -sf -m 900 "$PART_GET_1" -o /root/seg_1.tgz && tar tzf /root/seg_1.tgz >/dev/null 2>&1; then
+    RR=0; T_OWN=$(( $(date +%s) - T1 )); say "PART 1 kept from an earlier attempt"
+  else
+    draw 1; RR=$?; T_OWN=$(( $(date +%s) - T1 )); say "PART 1 drawn here exit=$RR seconds=$T_OWN"
+    # kept in R2 too, so a replacement machine need not draw it again
+    [ "$RR" -eq 0 ] && ( curl -sf -m 1800 --retry 3 --retry-all-errors -X PUT --data-binary @/root/seg_1.tgz "$PART_PUT_1" >/dev/null 2>&1 & )
+  fi
   SEGS="--segments /root/seg_1.tgz"
   if [ "$RR" -eq 0 ] && [ "$NPARTS" -gt 1 ]; then
     PENDING=$(seq 2 "$NPARTS"); UNTIL=$(( $(date +%s) + T_OWN / 2 + 900 ))     # the others started a little later
@@ -1016,7 +1147,7 @@ cd /root
 say(){ echo "$(date +%T) $*" | tee -a /root/log.txt; }
 ( while true; do sleep 30; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT" >/dev/null; done ) &
 ( sleep $((MAX_MIN*60)); say "watchdog: time limit"; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT"; kill -TERM 1 ) &
-Q=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null | awk '$1!="max"{printf "%d", $1/$2}'); CPUS=${Q:-$VCPU}; [ "$CPUS" -gt "$(nproc)" ] && CPUS=$(nproc); [ "$CPUS" -lt 1 ] && CPUS=$VCPU
+Q=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null | awk '$1!="max"{x=$1/$2; y=int(x); if (x>y+0.05) y++; printf "%d", y}'); CPUS=${Q:-$VCPU}; [ "$CPUS" -gt "$(nproc)" ] && CPUS=$(nproc); [ "$CPUS" -lt 1 ] && CPUS=$VCPU
 MEMG=$(awk '$1!="max"{printf "%d", $1/1073741824}' /sys/fs/cgroup/memory.max 2>/dev/null); MEMG=${MEMG:-$(free -g | awk '/Mem/{print $2}')}
 workers(){ local w=$((CPUS/4)); [ $((MEMG/3)) -lt "$w" ] && w=$((MEMG/3)); [ "$w" -lt 1 ] && w=1; echo $w; }
 W=$(workers)

@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY, user TEXT, title TEXT, status TEXT, stage TEXT, progress REAL DEFAULT 0,
   run_on TEXT, created REAL, started REAL, pod_started REAL, finished REAL, seconds REAL, minutes INTEGER,
   voice_name TEXT, music_name TEXT, music_db REAL, music_vol REAL, script_words INTEGER,
-  pod_id TEXT, pod_hr REAL, pod_desc TEXT, run TEXT, commit_id TEXT, machines INTEGER, drawers TEXT,
+  pod_id TEXT, pod_hr REAL, pod_desc TEXT, run TEXT, commit_id TEXT, machines INTEGER, drawers TEXT, runs TEXT,
+  retries INTEGER,
   video_key TEXT, video_mb REAL, cost TEXT, error TEXT, log_tail TEXT, deleted INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
 """
@@ -36,7 +37,8 @@ class Store:
         try:
             db.executescript(SCHEMA)
             have = {r[1] for r in db.execute("PRAGMA table_info(jobs)").fetchall()}
-            for col, kind in (("music_vol", "REAL"), ("machines", "INTEGER"), ("drawers", "TEXT")):   # added later
+            for col, kind in (("music_vol", "REAL"), ("machines", "INTEGER"), ("drawers", "TEXT"), ("runs", "TEXT"),
+                              ("retries", "INTEGER")):                  # added later
                 if col not in have:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {col} {kind}")
             db.commit()

@@ -10,13 +10,18 @@ already shown in the list as "coming".
 | Part | Where | Cost |
 |---|---|---|
 | The website, the list of films, the keys | your small server (DigitalOcean, Hetzner...) | about $6 a month |
-| Making a film | a few small RunPod machines per film (Settings → Machines per film, 3 by default), each the cheapest one free right now, switched off when done | about $0.30–0.60 per 20-minute film |
+| Making a film | a few small machines per film (Settings → Machines per film, 3 by default): the cheapest good one free right now on RunPod or Vast.ai, RunPod's processor-only machines as the backup, each switched off when done | about $0.25–0.60 per 20-minute film (up to about $1.20 on the backup) |
 | Your files and finished videos | your Cloudflare R2 storage | pennies |
 
 The small server never makes videos, so it does not slow them down. One machine plans the film and draws a share of
-the shots; the others only draw their share and are switched off as soon as it is sent. If one of them cannot be rented
-or fails, the planning machine draws that share itself, so the film still finishes (a little later). If the website
-restarts in the middle of a film, the machines carry on and the film appears when it is done.
+the shots; the others only draw their share and are switched off as soon as it is sent. If no machine is free, the film
+waits and tries again every 2 minutes (up to an hour). If a drawing machine cannot be rented or fails, another one is
+tried, or the planning machine draws that share itself. If the planning machine dies or freezes, a new one carries on
+from the saved plan, so nothing is planned or paid for twice. If the website restarts in the middle of a film, the
+machines carry on and the film appears when it is done.
+
+Keep some money on both accounts (RunPod and Vast.ai) and turn on automatic top-up: at $0 RunPod switches every machine
+off and the films in progress are lost. The page shows both balances, in red when they run low.
 
 ## Install (once)
 

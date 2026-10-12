@@ -171,7 +171,7 @@ def own_password():
 def _view(j: dict) -> dict:
     out = {k: j.get(k) for k in ("id", "user", "title", "status", "stage", "progress", "run_on", "created",
                                  "started", "finished", "seconds", "minutes", "voice_name", "music_name", "music_vol",
-                                 "pod_desc", "video_mb", "error", "commit_id", "machines")}
+                                 "pod_desc", "video_mb", "error", "commit_id", "machines", "retries")}
     ds = json.loads(j.get("drawers") or "[]")
     used = [d for d in ds if d.get("id")]
     if used:                                        # the drawing machines, shown with the planner's
@@ -188,7 +188,20 @@ def _view(j: dict) -> dict:
 @app.get("/api/jobs")
 @need()
 def list_jobs():
-    return jsonify(jobs=[_view(j) for j in store.jobs()], busy=len(store.active()), max_parallel=studio.max_parallel())
+    return jsonify(jobs=[_view(j) for j in store.jobs()], busy=len(store.active()), max_parallel=studio.max_parallel(),
+                   money=_money())
+
+
+def _money() -> list:
+    """The machine accounts' balances for the page: [{"name", "balance", "low"}] - low when under $5 or under two
+    hours of what it is spending now (RunPod switches every machine off at $0)."""
+    out = []
+    for src, b in (studio.balances() or {}).items():
+        bal, spend = b.get("balance"), b.get("spend_hr") or 0
+        if bal is not None:
+            out.append({"name": "RunPod" if src == "runpod" else "Vast.ai", "balance": round(bal, 2),
+                        "spend_hr": round(spend, 2), "low": bal < max(5.0, 2 * spend)})
+    return out
 
 
 @app.get("/api/jobs/<jid>/log")
@@ -309,7 +322,7 @@ def retry_job(jid):
     if not studio.inputs(jid).get("voice"):
         return jsonify(error="This film's files are gone; make it again."), 400
     store.update(jid, status="queued", stage="Waiting to start", progress=0, error=None, pod_id=None,
-                 pod_started=None, finished=None, cost=None, log_tail=None, drawers=None)
+                 pod_started=None, finished=None, cost=None, log_tail=None, drawers=None, retries=0)
     return jsonify(ok=True)
 
 
@@ -387,8 +400,18 @@ def test_keys():
 
     def runpod():
         r = requests.get(f"{J.REST}/pods", timeout=30, headers={"Authorization": "Bearer " + k.get("RUNPOD_API_KEY", "")})
-        return "ok" if r.ok else f"failed: HTTP {r.status_code}"
+        if not r.ok:
+            return f"failed: HTTP {r.status_code}"
+        bal = studio.sources().balances(fresh=True).get("runpod", {}).get("balance")
+        return f"ok (balance ${bal:.2f})" if bal is not None else "ok"
     run("RunPod", runpod)
+
+    def vast():
+        if not k.get("VAST_API_KEY"):
+            return "not set (optional: RunPod only)"
+        bal = studio.sources().balances(fresh=True).get("vast", {}).get("balance")
+        return f"ok (balance ${bal:.2f})" if bal is not None else "failed: the key was not accepted"
+    run("Vast.ai", vast)
 
     def gemini():
         r = requests.get("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash", timeout=30,
@@ -458,12 +481,11 @@ def _version() -> dict:
 @need("owner")
 def update_tool():
     """Fetch the newest version of the tool (git pull) and restart the website; running films carry on."""
-    with studio.lock:                                   # no film may start while the site restarts
-        studio.paused = True
-        busy = [j for j in store.active() if j["status"] == "starting"]
-    if busy or UPLOADS["n"]:
+    with studio.lock:                                   # no film may start while the site restarts (a film that
+        studio.paused = True                            # is starting goes back in the queue and starts again)
+    if UPLOADS["n"]:
         studio.paused = False
-        return jsonify(error="A film is starting or being uploaded right now; try again in a minute."), 400
+        return jsonify(error="A film is being uploaded right now; try again in a minute."), 400
     try:
         p = subprocess.run(["git", "-C", str(J.CODE), "pull", "--ff-only"], capture_output=True, text=True,
                            timeout=300)

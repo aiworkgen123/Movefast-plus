@@ -213,33 +213,68 @@ class Web(unittest.TestCase):
         self.assertIsNone(self.A.store.user("juan"))
 
 
-class Fixes(unittest.TestCase):
-    """The review of 2026-10-12: Try again, Stop while renting, a late read-back, sign-ins ending with a new password."""
+class FakeSources:
+    """RunPod and Vast.ai stand-in for the runner's tests: `free` machines can still be rented; machines by id."""
+
+    def __init__(self):
+        self.free, self.hr, self.made, self.ended, self.rents, self.states = 10, 0.13, {}, [], [], {}
+        self.money = {"runpod": {"balance": 50.0, "spend_hr": 0.0}}
+        self.on_rent, self.why = None, ["nothing free under the price limit"]
+
+    def rent(self, name, env, script, **kw):
+        self.rents.append((name, env, script, kw))
+        if self.on_rent:
+            self.on_rent(name, env)
+        if kw.get("stop", lambda: False)():
+            return None, ["stopped"]
+        if self.free <= 0:
+            return None, list(self.why)
+        self.free -= 1
+        mid = f"m{len(self.made) + 1}"
+        self.made[mid] = name
+        return {"id": mid, "hr": self.hr, "desc": f"test machine, ${self.hr}/h"}, []
+
+    def list(self):
+        return [{"id": m, "name": n, "hr": self.hr, "state": "running"} for m, n in self.made.items()
+                if m not in self.ended]
+
+    def state(self, mid):
+        return self.states.get(mid, "gone" if mid in self.ended else "running")
+
+    def terminate(self, mid):
+        self.ended.append(mid)
+        return True
+
+    def balances(self, fresh=False):
+        return self.money
+
+
+class Runner(unittest.TestCase):
+    """The film runner against a fake RunPod/Vast and a folder for R2: renting and waiting, the planner lost and
+    replaced, carrying on from a saved plan, a restart, the sweep, the clean-up."""
 
     def setUp(self):
         from web.jobs import Studio, LocalBucket
         from web.store import Store
+        import web.jobs as J
+        self.J = J
         self.d = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
         self.s = Studio(Store(self.d / "s.sqlite"), self.d)
         self.b = LocalBucket(self.d / "bucket")
+        self.src = FakeSources()
         self.s.bucket = lambda: self.b
+        self.s.sources = lambda: self.src
         self.s.missing_keys = lambda: []
         self.s.keys = lambda: {"RUNPOD_API_KEY": "k"}
-        self.s.package = lambda b: ("mrtruth/pkg/x.tgz", "abc123def456")
-        self.rented, self.ended = [], []
-        self.s._terminate = lambda pid: self.ended.append(pid) or True
-        self.s._pod_exists = lambda pid: True
-        self.s._pods = lambda api: []
+        self.s.package = lambda b: ("mrtruth/pkg/x.tgz", "abc123def456aa")
         self.s.stop.wait = lambda t=None: None
-        import web.jobs as J
-        self.J = J
         self.vs = mock.patch.object(J.VS, "env_for", lambda b, run, mf, keys, log=None: {"RUN_ID": run, "_mine": "m"})
         self.vs.start()
         self.addCleanup(self.vs.stop)
 
-    def job(self):
-        jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=1, seconds=60)
+    def job(self, minutes=1):
+        jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=minutes, seconds=60 * minutes)
         ins = self.s.folder(jid) / "inputs"
         ins.mkdir(parents=True)
         (ins / "voice.mp3").write_bytes(b"v")
@@ -247,62 +282,226 @@ class Fixes(unittest.TestCase):
         self.s.store.update(jid, status="starting")
         return jid
 
-    def rent(self, pod_writes=None):
-        def fake(api, name, env, script=None, stop=lambda: False, **kw):
-            if stop():
-                return None, ""
-            pid = f"pod{len(self.rented) + 1}"
-            self.rented.append(pid)
-            if pod_writes:
-                pod_writes(self.s.store.job(name[len(self.J.POD_PREFIX):]))
-            return {"id": pid, "costPerHr": 0.89}, "test"
-        self.s._rent = fake
+    def K(self, jid, run=None):
+        return self.s.keys_of(jid, "T", run or self.s.store.job(jid)["run"])
+
+    def answers(self, jid, video=True, ok=True):
+        """What a planner that finished writes: the video and done.json, in the current attempt's place."""
+        def write(name, env):
+            K = self.K(jid)
+            if video:
+                self.b.put_bytes(K["video"], b"video")
+            self.b.put_bytes(K["done"], json.dumps({"ok": ok, "why": "planning error: credit"}).encode())
+        self.src.on_rent = write
 
     def test_try_again_never_reads_the_earlier_attempts_answer(self):
         jid = self.job()
-        def failed_pod(j):
-            K = self.s.keys_of(jid, "T", j["run"])
-            self.b.put_bytes(K["done"], b'{"ok":false,"why":"planning error: credit"}')
-        self.rent(failed_pod)
+        self.answers(jid, video=False, ok=False)
         self.s._guard(jid, self.s._run)
         self.assertIn("credit", self.s.store.job(jid)["error"])
         self.s.store.update(jid, status="starting", pod_id=None, error=None)
         time.sleep(1.1)                                      # a new attempt name (seconds)
-        def good_pod(j):
-            K = self.s.keys_of(jid, "T", j["run"])
-            self.b.put_bytes(K["video"], b"video")
-            self.b.put_bytes(K["done"], b'{"ok":true}')
-        self.rent(good_pod)
+        self.answers(jid)
         self.s._guard(jid, self.s._run)
         j = self.s.store.job(jid)
         self.assertEqual((j["status"], j["error"]), ("done", None))
 
-    def test_stop_while_renting_switches_the_new_pod_off(self):
+    def test_stop_while_renting_switches_the_new_machine_off(self):
         jid = self.job()
-        self.rent(lambda j: self.s.store.update(jid, status="cancelling"))   # Stop pressed during the rent
+        real = self.src.rent
+        def rent(*a, **k):                                   # the machine is made, then Stop is pressed
+            got = real(*a, **k)
+            self.s.store.update(jid, status="cancelling")
+            return got
+        self.src.rent = rent
         self.s._guard(jid, self.s._run)
         self.assertEqual(self.s.store.job(jid)["status"], "cancelled")
-        self.assertEqual(self.ended, ["pod1"])
+        self.assertIn("m1", self.src.ended)
+
+    def test_a_film_waits_for_a_machine_instead_of_failing(self):
+        jid = self.job()
+        self.src.free = 0
+        stages = []
+        def free_later(name, env):
+            stages.append(self.s.store.job(jid)["stage"])
+            if len(self.src.rents) == 3:                     # the third try finds one, which finishes the film
+                self.src.free = 1
+                self.answers(jid)
+                self.src.on_rent(name, env)
+        self.src.on_rent = free_later
+        self.s._guard(jid, self.s._run)
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+        self.assertEqual(len(self.src.rents), 3)
+        self.assertTrue(any("Waiting for a machine: no machine free under $1.50/h" in s for s in stages), stages)
+
+    def test_a_film_gives_up_after_the_wait_and_says_why(self):
+        jid = self.job()
+        self.src.free = 0
+        self.src.why = ["RunPod balance too low"]
+        with mock.patch.object(self.J, "RENT_WAIT_S", 0):
+            self.s._guard(jid, self.s._run)
+        j = self.s.store.job(jid)
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("RunPod balance too low - please top up", j["error"])
 
     def test_a_film_done_while_the_site_was_down_past_its_limit_is_read_back(self):
         jid = self.job()
         run = "web-x-1"
-        K = self.s.keys_of(jid, "T", run)
+        K = self.K(jid, run)
         self.b.put_bytes(K["video"], b"video")
         self.b.put_bytes(K["done"], b'{"ok":true}')
         self.s.store.update(jid, status="running", pod_id="p", run=run, pod_started=time.time() - 10 * 3600)
         self.s._guard(jid, self.s._reattach)
         self.assertEqual(self.s.store.job(jid)["status"], "done")
 
-    def test_a_pod_that_never_logs_is_switched_off(self):
+    def test_a_planner_that_never_logs_is_replaced(self):
         jid = self.job()
         self.s.store.update(jid, status="running", pod_id="p", run="web-y-1",
                             pod_started=time.time() - self.J.START_LIMIT_S - 60)
         self.s._guard(jid, self.s._reattach)
         j = self.s.store.job(jid)
+        self.assertEqual((j["status"], j["retries"], j["pod_id"]), ("queued", 1, None))
+        self.assertIn("never started", j["stage"])
+        self.assertIn("p", self.src.ended)
+
+    def test_after_two_replacements_the_film_stops(self):
+        jid = self.job()
+        self.s.store.update(jid, status="running", pod_id="p", run="web-y-1", retries=self.J.AUTO_RETRIES,
+                            pod_started=time.time() - self.J.START_LIMIT_S - 60)
+        self.s._guard(jid, self.s._reattach)
+        j = self.s.store.job(jid)
         self.assertEqual(j["status"], "failed")
         self.assertIn("never started", j["error"])
-        self.assertEqual(self.ended, ["p"])
+
+    def test_a_frozen_or_vanished_planner_is_replaced(self):
+        for how in ("froze", "gone"):
+            jid = self.job()
+            K = self.K(jid, "web-z-1")
+            self.b.put_bytes(K["log"], b"10:00 PLAN start\n")
+            if how == "froze":                               # its log has not been sent for 13 minutes
+                self.s._stat = lambda b, key: time.time() - self.J.FROZEN_S - 60
+            else:
+                self.s._stat = lambda b, key: time.time()
+                self.src.states["p"] = "gone"
+            self.s.store.update(jid, status="running", pod_id="p", run="web-z-1", pod_started=time.time() - 400,
+                                log_tail="10:00 PLAN start")
+            with mock.patch.multiple(self.J, BEAT_EVERY_S=0, CHECK_EVERY_S=0):
+                self.s._guard(jid, self.s._reattach)
+            j = self.s.store.job(jid)
+            self.assertEqual((j["status"], j["retries"]), ("queued", 1), how)
+            self.assertIn("attempt 2", j["stage"])
+            self.assertIn("p", self.src.ended)
+
+    def test_a_restart_with_a_storage_blip_keeps_the_film(self):
+        jid = self.job()
+        K = self.K(jid, "web-r-1")
+        self.b.put_bytes(K["log"], b"10:00 PLAN start\n")
+        self.s.store.update(jid, status="running", pod_id="p", run="web-r-1", log_tail="10:00 PLAN start",
+                            pod_started=time.time() - self.J.START_LIMIT_S - 600)
+        get, calls = self.b.get_bytes, []
+        def flaky(key):                                      # the first read after the restart fails
+            calls.append(key)
+            if len(calls) == 1:
+                raise self.J.S3Error("Storage network request failed")
+            if len(calls) > 3:
+                self.b.put_bytes(K["video"], b"v")
+                self.b.put_bytes(K["done"], b'{"ok":true}')
+            return get(key)
+        self.b.get_bytes = flaky
+        self.s._guard(jid, self.s._reattach)
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+
+    def test_a_film_that_was_starting_during_a_restart_goes_back_in_the_queue(self):
+        jid = self.job()
+        self.s._guard(jid, self.s._reattach)
+        j = self.s.store.job(jid)
+        self.assertEqual(j["status"], "queued")
+        self.assertIn("restarted", j["stage"])
+
+    def test_a_new_attempt_carries_on_from_the_saved_plan(self):
+        jid = self.job()
+        first = "web-a-1"
+        Ka = self.K(jid, first)
+        for key in (Ka["ckpt"], Ka["rpkg"], Ka["part"](1), Ka["part"](2)):
+            self.b.put_bytes(key, b"x")
+        self.s.store.update(jid, runs=json.dumps([{"run": first, "commit": "abc123def456", "plan": first}]))
+        self.answers(jid)
+        self.s._guard(jid, self.s._run)
+        name, env, script, kw = self.src.rents[0]
+        self.assertEqual(name, f"mrtruth-web-{jid}-a2")
+        self.assertEqual(env["RESUMED_FROM"], first)
+        self.assertIn(Ka["ckpt"], env["CKPT_GET"])
+        self.assertIn(Ka["part"](1), env["PART_GET_1"])
+        self.assertIn(Ka["part"](2), env["PART_GET_2"])          # drawn before: taken, not drawn again
+        self.assertIn(self.K(jid)["part"](3), env["PART_GET_3"])
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+
+    def test_another_version_of_the_tool_plans_again_and_drops_the_old_files(self):
+        jid = self.job()
+        Ka = self.K(jid, "web-old-1")
+        for key in (Ka["ckpt"], Ka["rpkg"], Ka["part"](2)):
+            self.b.put_bytes(key, b"x")
+        self.s.store.update(jid, runs=json.dumps([{"run": "web-old-1", "commit": "000000000000", "plan": "web-old-1"}]))
+        self.answers(jid)
+        self.s._guard(jid, self.s._run)
+        env = self.src.rents[0][1]
+        self.assertNotIn("CKPT_GET", env)
+        self.assertEqual(env["PART_GET_1"], "")
+        self.assertFalse(any(self.b.exists(k) for k in (Ka["ckpt"], Ka["rpkg"], Ka["part"](2))))
+
+    def test_a_finished_film_drops_every_attempts_files_a_failed_one_keeps_its_plan(self):
+        jid = self.job()
+        self.answers(jid, video=False, ok=False)
+        def keep(name, env):
+            K = self.K(jid)
+            for key in (K["ckpt"], K["rpkg"], K["part"](2), K["boot"]("x")):
+                self.b.put_bytes(key, b"x")
+            self.b.put_bytes(K["done"], b'{"ok":false,"why":"render"}')
+        self.src.on_rent = keep
+        self.s._guard(jid, self.s._run)
+        K1 = self.K(jid)
+        self.assertEqual(self.s.store.job(jid)["status"], "failed")
+        self.assertTrue(self.b.exists(K1["ckpt"]) and self.b.exists(K1["part"](2)))   # Try again carries on
+        self.assertFalse(self.b.exists(K1["boot"]("x")))                               # the keys are gone
+        self.s.store.update(jid, status="starting", pod_id=None, error=None)
+        time.sleep(1.1)
+        self.answers(jid)
+        self.s._guard(jid, self.s._run)
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+        self.assertFalse(self.b.exists(K1["ckpt"]) or self.b.exists(K1["part"](2)))
+
+    def test_a_deleted_film_takes_its_files_with_it(self):
+        jid = self.job()
+        K = self.K(jid, "web-d-1")
+        self.b.put_bytes(K["rpkg"], b"x")
+        self.b.put_bytes(K["video"], b"v")
+        self.s.store.update(jid, video_key=K["video"], runs=json.dumps([{"run": "web-d-1", "commit": "abc123def456"}]))
+        self.s.forget(jid)
+        self.assertFalse(self.b.exists(K["rpkg"]) or self.b.exists(K["video"]))
+
+    def test_the_sweep_keeps_only_what_a_film_counts_on(self):
+        jid = self.job()
+        self.s.store.update(jid, status="running", pod_id="m1", drawers=json.dumps([
+            {"part": 2, "id": "m2", "state": "running", "started": 0, "hr": 0.2},
+            {"part": 3, "id": "m3", "state": "done", "started": 0, "hr": 0.2}]))
+        for mid, name in (("m1", f"mrtruth-web-{jid}-a1"), ("m2", f"mrtruth-web-{jid}-a1-d2"),
+                          ("m3", f"mrtruth-web-{jid}-a1-d3"), ("m4", f"mrtruth-web-{jid}-a1-d4"),
+                          ("m5", f"mrtruth-web-{jid}-a0"), ("m6", "someone-elses"), ("m7", "mrtruth-web-old-a1")):
+            self.src.made[mid] = name
+        self.s.renting.add(f"mrtruth-web-{jid}-a1-d4")          # being rented right now
+        self.assertEqual(sorted(self.s.sweep()), ["m3", "m5", "m7"])
+        self.s.store.update(jid, status="queued")               # waiting: nothing of it should run
+        self.assertEqual(sorted(self.s.sweep()), ["m1", "m2"])
+
+    def test_end_machines_switches_off_every_machine_named_for_the_film(self):
+        jid = self.job()
+        self.s.store.update(jid, pod_id="m1", drawers=json.dumps([
+            {"part": 2, "id": "m2", "state": "running", "started": 0, "hr": 0.2},
+            {"part": 3, "id": "m3", "state": "done", "started": 0, "hr": 0.2}]))
+        self.src.made.update({"m1": f"mrtruth-web-{jid}-a1", "m9": f"mrtruth-web-{jid}-a0-d3"})
+        self.assertTrue(self.s._end_machines(jid))
+        self.assertEqual(sorted(set(self.src.ended)), ["m1", "m2", "m9"])
+        self.assertEqual([d["state"] for d in json.loads(self.s.store.job(jid)["drawers"])], ["ended", "done"])
 
 
 class Parts(unittest.TestCase):
@@ -350,7 +549,8 @@ class Parts(unittest.TestCase):
 
 
 class Split(unittest.TestCase):
-    """A film on several small machines (2026-10-12): the shares, the price list, the drawing machines, the cost."""
+    """A film on several machines: the shares, the drawing machines (wanted, rented, retried, replaced, watched), the
+    cost, and the planner's own script (run in bash with curl faked)."""
 
     def setUp(self):
         from web.jobs import Studio, LocalBucket
@@ -361,29 +561,179 @@ class Split(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
         self.s = Studio(Store(self.d / "s.sqlite"), self.d)
         self.b = LocalBucket(self.d / "bucket")
+        self.src = FakeSources()
         self.s.bucket = lambda: self.b
+        self.s.sources = lambda: self.src
         self.s.keys = lambda: {"RUNPOD_API_KEY": "k"}
-        self.ended, self.rents, self.pods = [], [], []
-        self.s._terminate = lambda pid: self.ended.append(pid) or True
-        self.s._pod_exists = lambda pid: True
-        self.s._pods = lambda api: self.pods
 
     def film(self, n=3, drawers=None):
         jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=10, seconds=600)
         self.s.store.update(jid, status="running", pod_id="planner", pod_hr=0.13, run="web-r-1",
+                            runs=json.dumps([{"run": "web-r-1", "commit": "c", "plan": "web-r-1"}]),
                             pod_started=time.time(), machines=n, drawers=json.dumps(drawers or []))
         return jid, self.s.keys_of(jid, "T", "web-r-1")
 
-    def fake_rent(self, ok=True):
-        def rent(api, name, env, script=None, stop=lambda: False, **kw):
-            self.rents.append((name, env, script, kw))
-            if not ok:
-                return None, ""
-            return {"id": f"d{len(self.rents)}", "costPerHr": 0.2}, "RTX 3070, community, 16+ CPUs, $0.20/h"
-        self.s._rent = rent
-
     def drawers(self, jid):
         return json.loads(self.s.store.job(jid)["drawers"])
+
+    def running(self, *parts, started=None, **extra):
+        now = time.time() if started is None else started
+        return [dict({"part": k, "id": f"d{k}", "hr": 0.2, "desc": "x", "started": now, "ended": None,
+                      "state": "running", "name": f"n{k}", "log": None}, **extra) for k in parts]
+
+    def test_drawers_are_wanted_at_once_and_rented_when_the_pictures_are_chosen(self):
+        jid, K = self.film(3)
+        self.s._drawers(jid, self.b, K, "10:00:00 PLAN start")
+        self.assertEqual(self.src.rents, [])
+        self.assertEqual([(d["part"], d["state"]) for d in self.drawers(jid)], [(2, "wanted"), (3, "wanted")])
+        self.s._drawers(jid, self.b, K, "10:00:00 PLAN start\n10:20:00 PICTURES done")
+        self.assertEqual([r[0] for r in self.src.rents], [f"mrtruth-web-{jid}-a1-d2", f"mrtruth-web-{jid}-a1-d3"])
+        name, env, script, kw = self.src.rents[0]
+        self.assertEqual((env["PART"], env["NPARTS"], kw["max_hr"], kw["ram"]), ("2", "3", self.J.DRAWER_MAX_HR, 24))
+        self.assertIs(script, self.J.DRAW_SCRIPT)
+        self.assertFalse(any(k.startswith("K_") for k in env))                   # a drawer gets no keys
+        self.assertIn(K["rpkg"], env["PKG_GET"])
+        self.assertEqual([(d["part"], d["state"]) for d in self.drawers(jid)], [(2, "running"), (3, "running")])
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPACKAGE uploaded")      # never rented twice
+        self.assertEqual(len(self.src.rents), 2)
+        self.assertFalse(self.s.renting)                                         # every name given back
+
+    def test_a_resumed_film_takes_the_package_of_the_attempt_that_planned(self):
+        jid, K = self.film(2)
+        self.s.store.update(jid, run="web-r-2", runs=json.dumps([
+            {"run": "web-r-1", "commit": "c", "plan": "web-r-1"}, {"run": "web-r-2", "commit": "c", "plan": "web-r-1"}]))
+        K2 = self.s.keys_of(jid, "T", "web-r-2")
+        self.s._drawers(jid, self.b, K2, "PLAN exit=0 seconds=0 resumed")
+        name, env, script, kw = self.src.rents[0]
+        self.assertEqual(name, f"mrtruth-web-{jid}-a2-d2")
+        self.assertIn(K["rpkg"], env["PKG_GET"])                                 # web-r-1's package
+        self.assertIn(K2["part"](2), env["PART_PUT"])                            # this attempt's share
+
+    def test_none_free_is_tried_again_until_it_is_too_late(self):
+        jid, K = self.film(3)
+        self.src.free = 0
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual(len(self.src.rents), 2)
+        self.assertEqual({d["state"] for d in self.drawers(jid)}, {"wanted"})
+        self.s._drawers(jid, self.b, K, "PICTURES done")                         # not yet time to try again
+        self.assertEqual(len(self.src.rents), 2)
+        self.src.free = 1
+        with mock.patch.object(self.J.time, "time", return_value=time.time() + self.J.RENT_RETRY_S + 1):
+            self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual([d["state"] for d in self.drawers(jid)], ["running", "wanted"])
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=500")
+        self.assertEqual([d["state"] for d in self.drawers(jid)], ["running", "skipped"])
+        self.assertTrue(self.b.exists(K["skip"](3)))                             # the planner draws share 3
+
+    def test_no_drawers_when_planning_failed(self):
+        jid, K = self.film(3)
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPLAN exit=1 seconds=900")
+        self.assertEqual(self.src.rents, [])
+        self.assertEqual({d["state"] for d in self.drawers(jid)}, {"ended"})
+
+    def test_finished_failed_or_taken_over(self):
+        jid, K = self.film(4, self.running(2, 3, 4))
+        self.b.put_bytes(K["part"](2), b"tgz")                                   # share 2 arrived
+        self.b.put_bytes(K["dlog"](3), b"10:30 PART 3 failed (exit 1): renderer failed")
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 4 drawing it here (its machine was late)")
+        ds = self.drawers(jid)
+        got = [(d["part"], d["state"], d.get("why")) for d in ds]
+        self.assertEqual(got[:3], [(2, "done", "done"), (3, "ended", "failed"), (4, "done", "taken over")])
+        self.assertEqual((ds[3]["part"], ds[3]["state"], ds[3]["replaces"]), (3, "wanted", 1))   # a second machine
+        self.assertEqual(sorted(self.src.ended), ["d2", "d3", "d4"])
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 4 drawing it here")
+        self.assertEqual(self.src.rents[-1][0], f"mrtruth-web-{jid}-a1-d3r1")
+        self.assertIn("log_3r1", self.src.rents[-1][1]["LOG_PUT"])               # its own log, not the failed one's
+
+    def test_a_replacement_that_fails_too_leaves_the_share_to_the_planner(self):
+        jid, K = self.film(2, self.running(2, replaces=1, log=None))
+        self.b.put_bytes(K["dlog"](2), b"PART 2 failed (exit 1)")
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual(self.drawers(jid)[0]["state"], "skipped")
+        self.assertEqual(self.b.get_bytes(K["skip"](2)), b"failed")
+
+    def test_never_started_vanished_or_frozen(self):
+        old = time.time() - self.J.START_LIMIT_S - 10
+        ds = (self.running(2, started=old) + self.running(3, seen=True) + self.running(4, seen=True))
+        jid, K = self.film(4, ds)
+        self.b.put_bytes(K["dlog"](3), b"DRAW start")
+        self.b.put_bytes(K["dlog"](4), b"DRAW start")
+        self.src.states["d3"] = "gone"
+        stamps = {K["dlog"](3): time.time(), K["dlog"](4): time.time() - self.J.FROZEN_S - 30}
+        self.s._stat = lambda b, key: stamps.get(key)
+        with mock.patch.object(self.J, "CHECK_EVERY_S", 0):
+            self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0")       # too late to replace
+        got = {d["part"]: (d["state"], d["why"]) for d in self.drawers(jid)}
+        self.assertEqual(got, {2: ("skipped", "never started"), 3: ("skipped", "vanished"), 4: ("skipped", "froze")})
+        self.assertEqual(self.b.get_bytes(K["skip"](2)), b"never started")
+
+    def test_a_storage_hiccup_does_not_end_a_working_drawer(self):
+        old = time.time() - self.J.START_LIMIT_S - 10
+        jid, K = self.film(2, self.running(2, started=old, checked=time.time()))
+        get = self.b.get_bytes
+        self.b.get_bytes = lambda key: (_ for _ in ()).throw(self.J.S3Error("Storage network request failed"))
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual(self.drawers(jid)[0]["state"], "running")
+        self.b.get_bytes = get
+        self.b.put_bytes(K["dlog"](2), b"DRAW start")
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.b.delete(K["dlog"](2))                                      # seen once: never "never started"
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual((self.drawers(jid)[0]["state"], self.src.ended), ("running", []))
+
+    def test_a_drawer_that_would_not_switch_off_is_tried_again(self):
+        jid, K = self.film(2, self.running(2))
+        self.b.put_bytes(K["part"](2), b"tgz")
+        self.src.terminate = lambda mid: self.src.ended.append(mid) and False
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual(self.drawers(jid)[0]["state"], "running")
+        self.src.terminate = lambda mid: self.src.ended.append(mid) or True
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual((self.drawers(jid)[0]["state"], self.src.ended), ("done", ["d2", "d2"]))
+
+    def test_no_package_sent_switches_every_drawer_off(self):
+        jid, K = self.film(3, self.running(2, 3))
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPACKAGE upload failed: every share is drawn here")
+        self.assertEqual(sorted(self.src.ended), ["d2", "d3"])
+
+    def test_a_skip_mark_that_did_not_save_is_written_later(self):
+        jid, K = self.film(2)
+        put = self.b.put_bytes
+        self.b.put_bytes = lambda *a, **k: (_ for _ in ()).throw(self.J.S3Error("Storage PUT HTTP 503"))
+        self.s._drawers(jid, self.b, K, "PART 1 drawn here")
+        self.assertEqual((self.drawers(jid)[0]["mark"], self.b.exists(K["skip"](2))), (False, False))
+        self.b.put_bytes = put
+        self.s._drawers(jid, self.b, K, "PART 1 drawn here")
+        self.assertTrue(self.drawers(jid)[0]["mark"] and self.b.exists(K["skip"](2)))
+
+    def test_a_drawer_made_just_before_a_restart_is_picked_up(self):
+        jid, K = self.film(3)
+        self.src.made["old"] = f"mrtruth-web-{jid}-a1-d2"
+        self.s._drawers(jid, self.b, K, "PICTURES done")
+        self.assertEqual([(d["part"], d["id"]) for d in self.drawers(jid)], [(2, "old"), (3, "m2")])
+        self.assertEqual(len(self.src.rents), 1)
+
+    def test_the_cost_adds_every_machine_and_every_attempt(self):
+        now = time.time()
+        j = {"pod_hr": 0.13, "pod_started": now - 3600, "cost": json.dumps({"pod_earlier": 0.5}), "drawers": json.dumps([
+            {"part": 2, "id": "a", "hr": 0.2, "started": now - 1800, "ended": now - 900},
+            {"part": 3, "id": "b", "hr": 0.4, "started": now - 1800, "ended": None},
+            {"part": 4, "id": None, "hr": 0, "started": now, "ended": None, "state": "wanted"}])}
+        self.assertEqual(self.s._machine_cost(j, now), round(0.5 + 0.13 + 0.05 + 0.2, 2))
+
+    def test_time_left_never_jumps_back_up(self):
+        left = self.s._left
+        self.assertGreaterEqual(left("PLAN start", 0.7, 10), left("PICTURES done", 0, 10))
+        self.assertGreaterEqual(left("PICTURES done", 0, 10), left("PACKAGE uploaded", 0, 10))
+        self.assertEqual(left("PACKAGE uploaded", 0, 10), left("PLAN exit", 0, 10))
+
+    def test_the_planner_saves_its_plan_and_can_carry_on_from_one(self):
+        S = self.J.PLAN_SCRIPT
+        for need in ('if [ -n "${CKPT_GET:-}" ]', '"$CKPT_PUT"', '"$RPKG_GET"', 'PLAN exit=$RC seconds=$((T1-T0)) resumed',
+                     '--exclude="$JD/mrtruth/pictures"', '"$PART_PUT_1"', "PART 1 kept from an earlier attempt",
+                     'PACKAGE uploaded (kept from'):
+            self.assertIn(need, S)
+        self.assertLess(S.index("CHECKPOINT saved"), S.index("RENDER start"))
 
     def test_shares_cover_every_shot_once_and_balance(self):
         import random
@@ -428,275 +778,6 @@ setTimeout(() => { if (bad) { console.error('boom'); process.exit(1); }
         self.assertIn("renderer failed", r.stderr)
         self.assertLess(time.time() - t0, 20)
 
-    def test_the_price_list_is_read_cheapest_first(self):
-        def post(url, params=None, json=None, timeout=0):
-            secure = "secureCloud:true" in json["query"]
-            self.assertIn("minVcpuCount:16", json["query"])
-            self.assertIn("minMemoryInGb:24", json["query"])
-            self.assertEqual(params, {"api_key": "k"})
-            rows = ([{"id": "B", "lowestPrice": {"uninterruptablePrice": 0.25, "stockStatus": "Low"}}] if secure else
-                    [{"id": "A", "lowestPrice": {"uninterruptablePrice": 0.13, "stockStatus": "Low"}},
-                     {"id": "C", "lowestPrice": {"uninterruptablePrice": 0.05, "stockStatus": None}},
-                     {"id": "D", "lowestPrice": None}])
-            return mock.Mock(raise_for_status=lambda: None, json=lambda: {"data": {"gpuTypes": rows}})
-        with mock.patch.object(self.J.requests, "post", post):
-            self.assertEqual(self.s._offers("k", 16, 24), [(0.13, "A", "COMMUNITY"), (0.25, "B", "SECURE")])
-
-    def test_renting_takes_the_cheapest_that_starts_and_keeps_to_the_limit(self):
-        self.s._offers = lambda api, vcpu, ram=32: [(0.13, "NVIDIA A", "COMMUNITY"), (0.5, "NVIDIA B", "SECURE"),
-                                                    (1.5, "NVIDIA C", "COMMUNITY")]
-        tried = []
-        def post(url, json=None, timeout=0, headers=None):
-            tried.append((json["gpuTypeIds"][0], json["minVCPUPerGPU"], json["env"]["VCPU"]))
-            ok = json["gpuTypeIds"][0] == "NVIDIA B"
-            return mock.Mock(ok=ok, json=lambda: {"id": "p1", "costPerHr": 0.5})
-        with mock.patch.object(self.J.requests, "post", post):
-            pod, desc = self.s._rent("k", "n", {}, "script", min_vcpu=16)
-            self.assertEqual(pod["id"], "p1")
-            self.assertEqual(desc, "B, secure, 16+ CPUs, $0.50/h")
-            self.assertEqual(tried, [("NVIDIA A", 16, "16"), ("NVIDIA B", 16, "16")])
-            tried.clear()
-            pod, _ = self.s._rent("k", "n", {}, "script", min_vcpu=32, max_hr=0.4)
-            self.assertIsNone(pod)
-            self.assertEqual(tried, [("NVIDIA A", 32, "32")])                  # never the dearer ones
-            tried.clear()
-            self.assertIsNone(self.s._rent("k", "n", {}, "s", stop=lambda: True)[0])
-            self.assertEqual(tried, [])
-
-    def test_a_machine_dearer_than_listed_is_given_back(self):
-        self.s._offers = lambda api, vcpu, ram=32: [(0.13, "NVIDIA A", "COMMUNITY"), (0.5, "NVIDIA B", "SECURE")]
-        def post(url, json=None, timeout=0, headers=None):
-            a = json["gpuTypeIds"][0] == "NVIDIA A"
-            return mock.Mock(ok=True, json=lambda: {"id": "pa" if a else "pb", "costPerHr": 2.49 if a else 0.5})
-        with mock.patch.object(self.J.requests, "post", post):
-            pod, _ = self.s._rent("k", "n", {}, "s", max_hr=1.0)
-        self.assertEqual((pod["id"], self.ended), ("pb", ["pa"]))
-
-    def test_the_planner_has_a_price_limit_too(self):
-        jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=10, seconds=600)
-        ins = self.s.folder(jid) / "inputs"
-        ins.mkdir(parents=True)
-        (ins / "voice.mp3").write_bytes(b"v")
-        (ins / "script.txt").write_text("s")
-        self.s.store.update(jid, status="starting")
-        self.s.missing_keys = lambda: []
-        self.s.package = lambda b: ("mrtruth/pkg/x.tgz", "abc123def456")
-        self.fake_rent(ok=False)
-        with mock.patch.object(self.J.VS, "env_for", lambda b, run, mf, keys, log=None: {}):
-            self.s._guard(jid, self.s._run)
-        name, env, script, kw = self.rents[0]
-        self.assertEqual((kw["max_hr"], kw["min_vcpu"], kw["fallback"]), (self.J.PLANNER_MAX_HR, 16, True))
-        self.assertIn("no machine free under $1.50/h", self.s.store.job(jid)["error"])
-
-    def test_without_a_price_list_a_drawer_is_not_rented(self):
-        def broken(*a, **k):
-            raise self.J.requests.ConnectionError("down")
-        self.s._offers = broken
-        tried = []
-        def post(url, json=None, timeout=0, headers=None):
-            tried.append(json["gpuTypeIds"][0])
-            return mock.Mock(ok=len(tried) == 2, json=lambda: {"id": "p", "costPerHr": 0.3})
-        with mock.patch.object(self.J.requests, "post", post):
-            self.assertIsNone(self.s._rent("k", "n", {}, "s", max_hr=1.0)[0])
-            self.assertEqual(tried, [])
-            pod, _ = self.s._rent("k", "n", {}, "s", max_hr=1.5, fallback=True)   # the planner: the fixed list
-            self.assertEqual(pod["id"], "p")
-            self.assertEqual(tried, list(self.J.GPUS[:2]))
-
-    def test_drawers_are_rented_when_the_pictures_are_chosen(self):
-        jid, K = self.film(3)
-        self.fake_rent()
-        self.s._drawers(jid, self.b, K, "10:00:00 PLAN start")
-        self.assertEqual(self.rents, [])
-        self.s._drawers(jid, self.b, K, "10:00:00 PLAN start\n10:20:00 PICTURES done")
-        self.assertEqual([r[0] for r in self.rents], [f"mrtruth-web-{jid}-d2", f"mrtruth-web-{jid}-d3"])
-        name, env, script, kw = self.rents[0]
-        self.assertEqual((env["PART"], env["NPARTS"], kw["max_hr"]), ("2", "3", self.J.DRAWER_MAX_HR))
-        self.assertIs(script, self.J.DRAW_SCRIPT)
-        self.assertFalse(any(k.startswith("K_") for k in env))                   # a drawer gets no keys
-        self.assertEqual([(d["part"], d["state"]) for d in self.drawers(jid)], [(2, "running"), (3, "running")])
-        self.s._drawers(jid, self.b, K, "PICTURES done\nPACKAGE uploaded")      # never rented twice
-        self.assertEqual(len(self.rents), 2)
-
-    def test_a_drawer_that_finishes_fails_or_is_taken_over_is_switched_off(self):
-        now = time.time()
-        ds = [{"part": k, "id": f"d{k}", "hr": 0.2, "desc": "x", "started": now, "ended": None, "state": "running"}
-              for k in (2, 3, 4)]
-        jid, K = self.film(4, ds)
-        self.b.put_bytes(K["part"](2), b"tgz")                                   # share 2 arrived
-        self.b.put_bytes(K["dlog"](3), b"10:30 PART 3 failed (exit 1): renderer failed")
-        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 4 drawing it here (its machine was late)")
-        got = {d["part"]: (d["state"], d["why"]) for d in self.drawers(jid)}
-        self.assertEqual(got, {2: ("done", "done"), 3: ("skipped", "failed"), 4: ("done", "taken over")})
-        self.assertEqual(sorted(self.ended), ["d2", "d3", "d4"])
-        self.assertTrue(self.b.exists(K["skip"](3)))                             # the planner draws share 3
-        self.assertFalse(self.b.exists(K["skip"](2)))
-
-    def test_a_drawer_that_never_starts_or_vanishes_gets_a_skip_mark(self):
-        old = time.time() - self.J.START_LIMIT_S - 10
-        ds = [{"part": 2, "id": "d2", "hr": 0.2, "desc": "x", "started": old, "ended": None, "state": "running"},
-              {"part": 3, "id": "d3", "hr": 0.2, "desc": "x", "started": time.time() - 400, "ended": None,
-               "state": "running"}]
-        jid, K = self.film(3, ds)
-        self.b.put_bytes(K["dlog"](3), b"apt ok, waiting for the plan")
-        self.s._pod_exists = lambda pid: pid != "d3"
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        got = {d["part"]: d["why"] for d in self.drawers(jid)}
-        self.assertEqual(got, {2: "never started", 3: "vanished"})
-        self.assertEqual(self.b.get_bytes(K["skip"](2)), b"never started")
-
-    def test_no_machine_free_or_too_late_means_the_planner_draws_it(self):
-        jid, K = self.film(3)
-        self.fake_rent(ok=False)
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertTrue(self.b.exists(K["skip"](2)) and self.b.exists(K["skip"](3)))
-        self.assertEqual({d["state"] for d in self.drawers(jid)}, {"skipped"})
-        jid, K = self.film(3)
-        self.fake_rent()
-        self.rents.clear()
-        self.s._drawers(jid, self.b, K, "PICTURES done\nPACKAGE uploaded\nPART 1 drawn here exit=0 seconds=500")
-        self.assertEqual(self.rents, [])
-        self.assertTrue(self.b.exists(K["skip"](2)) and self.b.exists(K["skip"](3)))
-
-    def test_no_drawers_when_planning_failed(self):
-        jid, K = self.film(3)
-        self.fake_rent()
-        self.s._drawers(jid, self.b, K, "PICTURES done\nPLAN exit=1 seconds=900")
-        self.assertEqual((self.rents, self.drawers(jid)), ([], []))
-
-    def test_a_restart_mid_rent_rents_only_the_missing_shares(self):
-        ds = [{"part": 2, "id": "d2", "hr": 0.2, "desc": "x", "started": time.time(), "ended": None,
-               "state": "running"}]
-        jid, K = self.film(3, ds)
-        self.fake_rent()
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual([r[0] for r in self.rents], [f"mrtruth-web-{jid}-d3"])
-
-    def test_the_cost_adds_every_machine(self):
-        now = time.time()
-        j = {"pod_hr": 0.13, "pod_started": now - 3600, "drawers": json.dumps([
-            {"part": 2, "hr": 0.2, "started": now - 1800, "ended": now - 900},
-            {"part": 3, "hr": 0.4, "started": now - 1800, "ended": None},
-            {"part": 4, "hr": 0, "started": now, "ended": now}])}
-        self.assertEqual(self.s._machine_cost(j, now), round(0.13 + 0.05 + 0.2, 2))
-
-    def test_the_sweep_keeps_only_what_a_running_film_counts_on(self):
-        jid, K = self.film(4, [{"part": 2, "id": "d2", "hr": 0.2, "started": 0, "ended": None, "state": "running"},
-                               {"part": 3, "id": None, "hr": 0, "started": 0, "ended": 0, "state": "skipped"}])
-        base = f"mrtruth-web-{jid}"
-        self.pods = [{"id": "planner", "name": base}, {"id": "d2", "name": base + "-d2"},
-                     {"id": "d4", "name": base + "-d4"},             # share 4: being rented right now
-                     {"id": "ghost", "name": base},                  # a create whose answer was lost
-                     {"id": "ghost2", "name": base + "-d2"}, {"id": "ghost3", "name": base + "-d3"},
-                     {"id": "3", "name": "mrtruth-web-250101-dead00"}, {"id": "4", "name": "mrtruth-web-250101-dead00-d2"},
-                     {"id": "5", "name": "someone-elses-pod"}, {"id": "6", "name": base + "x"}]
-        self.assertEqual(sorted(self.s.sweep()), ["3", "4", "6", "ghost", "ghost2", "ghost3"])
-        jid2, _ = self.film(3)
-        self.s.store.update(jid2, status="starting", pod_id=None)       # its planner is being rented
-        self.pods = [{"id": "new", "name": f"mrtruth-web-{jid2}"}]
-        self.assertEqual(self.s.sweep(), [])
-        self.s.store.update(jid2, status="queued")                      # Try again pressed: an old one is left over
-        self.assertEqual(self.s.sweep(), ["new"])
-
-    def test_end_machines_switches_off_the_planner_and_every_drawer(self):
-        now = time.time()
-        jid, K = self.film(3, [
-            {"part": 2, "id": "d2", "hr": 0.2, "started": now, "ended": None, "state": "running"},
-            {"part": 3, "id": "d3", "hr": 0.2, "started": now, "ended": now, "state": "done"}])
-        self.pods = [{"id": "orphan", "name": f"mrtruth-web-{jid}-d3"}]
-        self.assertTrue(self.s._end_machines(jid))
-        self.assertEqual(self.ended, ["planner", "d2", "orphan"])
-        self.assertEqual([d["state"] for d in self.drawers(jid)], ["ended", "done"])
-
-    def test_a_create_whose_answer_is_lost_is_picked_up_not_rented_twice(self):
-        self.s._offers = lambda api, vcpu, ram=32: [(0.13, "NVIDIA A", "COMMUNITY"), (0.5, "NVIDIA B", "SECURE")]
-        tried = []
-        def post(url, json=None, timeout=0, headers=None):
-            tried.append(json["gpuTypeIds"][0])
-            self.pods = [{"id": "made", "name": json["name"], "costPerHr": 0.13}]
-            raise self.J.requests.ReadTimeout("slow")
-        with mock.patch.object(self.J.requests, "post", post):
-            pod, desc = self.s._rent("k", "mrtruth-web-x", {}, "s")
-        self.assertEqual((pod["id"], tried), ("made", ["NVIDIA A"]))
-        self.assertIn("$0.13/h", desc)
-
-    def test_a_lost_answer_with_no_pod_to_show_stops_the_renting(self):
-        self.s._offers = lambda api, vcpu, ram=32: [(0.13, "NVIDIA A", "COMMUNITY"), (0.5, "NVIDIA B", "SECURE")]
-        tried = []
-        def post(url, json=None, timeout=0, headers=None):
-            tried.append(json["gpuTypeIds"][0])
-            raise (self.J.requests.ConnectTimeout if len(tried) == 1 else self.J.requests.ReadTimeout)("slow")
-        with mock.patch.object(self.J.requests, "post", post):
-            self.assertIsNone(self.s._rent("k", "n", {}, "s")[0])
-        self.assertEqual(tried, ["NVIDIA A", "NVIDIA B"])          # never reached: next; maybe made: stop
-
-    def test_a_skip_mark_that_did_not_save_is_written_later(self):
-        jid, K = self.film(2)
-        self.fake_rent(ok=False)
-        put = self.b.put_bytes
-        self.b.put_bytes = lambda *a, **k: (_ for _ in ()).throw(self.J.S3Error("Storage PUT HTTP 503"))
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual((self.drawers(jid)[0]["mark"], self.b.exists(K["skip"](2))), (False, False))
-        self.b.put_bytes = put
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertTrue(self.drawers(jid)[0]["mark"] and self.b.exists(K["skip"](2)))
-
-    def test_a_restart_after_a_drawer_was_made_picks_it_up(self):
-        jid, K = self.film(3)
-        self.fake_rent()
-        self.pods = [{"id": "made2", "name": f"mrtruth-web-{jid}-d2", "costPerHr": 0.18}]
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual([r[0] for r in self.rents], [f"mrtruth-web-{jid}-d3"])
-        self.assertEqual([(d["part"], d["id"]) for d in self.drawers(jid)], [(2, "made2"), (3, "d1")])
-
-    def test_a_storage_hiccup_does_not_end_a_working_drawer(self):
-        old = time.time() - self.J.START_LIMIT_S - 10
-        jid, K = self.film(3, [{"part": 2, "id": "d2", "hr": 0.2, "desc": "x", "started": old, "ended": None,
-                                "state": "running", "checked": time.time()}])
-        get = self.b.get_bytes
-        self.b.get_bytes = lambda key: (_ for _ in ()).throw(self.J.S3Error("Storage network request failed"))
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual(self.drawers(jid)[0]["state"], "running")
-        self.b.get_bytes = get
-        self.b.put_bytes(K["dlog"](2), b"DRAW start")
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.b.delete(K["dlog"](2))                                      # seen once: never "never started"
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual((self.drawers(jid)[0]["state"], self.ended), ("running", []))
-
-    def test_a_drawer_that_would_not_switch_off_is_tried_again(self):
-        jid, K = self.film(2, [{"part": 2, "id": "d2", "hr": 0.2, "desc": "x", "started": time.time(),
-                                "ended": None, "state": "running"}])
-        self.b.put_bytes(K["part"](2), b"tgz")
-        self.s._terminate = lambda pid: self.ended.append(pid) and False
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual(self.drawers(jid)[0]["state"], "running")
-        self.s._terminate = lambda pid: self.ended.append(pid) or True
-        self.s._drawers(jid, self.b, K, "PICTURES done")
-        self.assertEqual((self.drawers(jid)[0]["state"], self.ended), ("done", ["d2", "d2"]))
-
-    def test_no_package_sent_switches_every_drawer_off(self):
-        now = time.time()
-        jid, K = self.film(3, [{"part": k, "id": f"d{k}", "hr": 0.2, "desc": "x", "started": now, "ended": None,
-                                "state": "running"} for k in (2, 3)])
-        self.s._drawers(jid, self.b, K, "PICTURES done\nPACKAGE upload failed: every share is drawn here")
-        self.assertEqual(sorted(self.ended), ["d2", "d3"])
-
-    def test_a_failed_film_drops_its_parts(self):
-        jid, K = self.film(3)
-        self.b.put_bytes(K["rpkg"], b"pkg")
-        self.b.put_bytes(K["part"](2), b"tgz")
-        def boom(jid):
-            raise RuntimeError("the machine stopped unexpectedly")
-        self.s._guard(jid, boom)
-        self.assertFalse(self.b.exists(K["rpkg"]) or self.b.exists(K["part"](2)))
-        self.assertEqual(self.s.store.job(jid)["status"], "failed")
-
-    def test_time_left_never_jumps_back_up(self):
-        left = self.s._left
-        self.assertGreaterEqual(left("PLAN start", 0.7, 10), left("PICTURES done", 0, 10))
-        self.assertGreaterEqual(left("PICTURES done", 0, 10), left("PACKAGE uploaded", 0, 10))
-        self.assertEqual(left("PACKAGE uploaded", 0, 10), left("PLAN exit", 0, 10))
 
     def test_the_planner_collects_the_shares(self):
         """The planner's wait for the other machines, run in bash with curl and the drawing faked: share 2 arrives,
@@ -773,6 +854,222 @@ date(){{ if [ -f {root}/clock ]; then echo $(( $(cat {root}/clock) + 1000 )); el
         self.assertNotIn("K_", self.J.DRAW_SCRIPT)
         r = subprocess.run(["bash", "-n"], input=self.J.DRAW_SCRIPT, text=True, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class Machines(unittest.TestCase):
+    """web/machines.py against faked RunPod and Vast answers: the offers, the order, the limits, renting, a lost
+    answer, listing, states, switching off, the balances."""
+
+    def setUp(self):
+        import web.machines as M
+        self.M = M
+        self.src = M.Sources({"RUNPOD_API_KEY": "rk", "VAST_API_KEY": "vk"})
+        self.src._bal, self.src._bal_at = {"runpod": {"balance": 50.0, "spend_hr": 0.5},
+                                           "vast": {"balance": 20.0, "spend_hr": None}}, time.time()
+
+    @staticmethod
+    def resp(status=200, body=None, text=""):
+        return mock.Mock(ok=status < 400, status_code=status, text=text or json.dumps(body),
+                         json=(lambda: body) if body is not None else mock.Mock(side_effect=ValueError),
+                         raise_for_status=(lambda: None) if status < 400 else mock.Mock(side_effect=Exception("http")))
+
+    def vast_offer(self, oid, price, cores=24, cpu="AMD Ryzen 9 5900X 12-Core Processor", geo="Texas, US", up=0.0):
+        return {"id": oid, "dph_total": price, "cpu_cores_effective": cores, "cpu_name": cpu, "geolocation": geo,
+                "inet_up_cost": up, "inet_down_cost": 0.0, "is_bid": False}
+
+    def test_runpod_offers_cheapest_first_and_errors_are_failures(self):
+        def post(url, params=None, json=None, timeout=0):
+            self.assertIn("minVcpuCount:16, minMemoryInGb:24", json["query"])
+            secure = "secureCloud:true" in json["query"]
+            rows = ([{"id": "NVIDIA B", "lowestPrice": {"uninterruptablePrice": 0.25, "stockStatus": "Low"}}] if secure else
+                    [{"id": "NVIDIA A", "lowestPrice": {"uninterruptablePrice": 0.13, "stockStatus": "Low"}},
+                     {"id": "NVIDIA C", "lowestPrice": {"uninterruptablePrice": 0.05, "stockStatus": "None"}},
+                     {"id": "NVIDIA D", "lowestPrice": None}])
+            return self.resp(body={"data": {"gpuTypes": rows}})
+        with mock.patch.object(self.M.requests, "post", post):
+            got = self.src.runpod_offers(16, 24)
+        self.assertEqual([(o["gpu"], o["cloud"], o["price"]) for o in got],
+                         [("NVIDIA A", "COMMUNITY", 0.13), ("NVIDIA B", "SECURE", 0.25)])
+        with mock.patch.object(self.M.requests, "post", lambda *a, **k: self.resp(body={"errors": [{"message": "x"}]})):
+            self.assertRaises(ValueError, self.src.runpod_offers, 16, 24)
+
+    def test_vast_offers_keep_good_hosts_and_count_their_traffic(self):
+        offers = [self.vast_offer(1, 0.12), self.vast_offer(2, 0.10, cpu="Xeon E5-2697A v4"),
+                  self.vast_offer(3, 0.11, geo="Beijing, CN"), self.vast_offer(4, 0.13, up=0.02),
+                  self.vast_offer(5, 0.09, up=0.2), dict(self.vast_offer(6, 0.08), is_bid=True)]
+        seen = {}
+        def post(url, json=None, headers=None, timeout=0):
+            seen.update(json)
+            return self.resp(body={"offers": offers})
+        with mock.patch.object(self.M.requests, "post", post):
+            got = self.src.vast_offers(16, 32)
+        self.assertEqual([(o["offer"], o["price"]) for o in got], [(1, 0.12), (4, 0.15)])
+        self.assertEqual(got[0]["desc"], "24-core AMD Ryzen 9 5900X, Vast US")
+        self.assertEqual((seen["cpu_cores_effective"], seen["cpu_ram"], seen["type"]), ({"gte": 16}, {"gte": 32000}, "ondemand"))
+        self.assertTrue(seen["verified"]["eq"] and seen["reliability"]["gte"] >= 0.97)
+
+    def test_offers_merge_the_sources_and_the_backup_comes_after_an_equal(self):
+        self.src.runpod_offers = lambda v, r: [{"src": "runpod", "price": 0.13, "desc": "rp"},
+                                               {"src": "runpod", "price": 0.48, "desc": "rp48"},
+                                               {"src": "runpod", "price": 1.2, "desc": "dear"}]
+        self.src.vast_offers = lambda v, r: [{"src": "vast", "price": 0.12, "desc": "va"}]
+        self.src.backup_offers = lambda v, r: [{"src": "runpod-cpu", "price": 0.48, "desc": "bk", "backup": True}]
+        got, problems = self.src.offers(16, 32, max_hr=1.0)
+        self.assertEqual([o["desc"] for o in got], ["va", "rp", "rp48", "bk"])
+        self.assertEqual(problems, [])
+        self.src.vast_offers = mock.Mock(side_effect=self.M.requests.ConnectionError("down"))
+        got, problems = self.src.offers(16, 32, max_hr=1.0, backup=False)
+        self.assertEqual([o["desc"] for o in got], ["rp", "rp48"])
+        self.assertEqual(problems, ["Vast offers: ConnectionError"])
+
+    def test_without_runpods_price_list_only_the_planner_tries_the_fixed_list(self):
+        self.src.runpod_offers = mock.Mock(side_effect=ValueError("down"))
+        self.src.vast_offers = lambda v, r: []
+        self.src.backup_offers = lambda v, r: []
+        self.assertEqual(self.src.offers(16, 32, max_hr=1.0)[0], [])
+        got, _ = self.src.offers(16, 32, max_hr=1.5, fallback=True)
+        self.assertEqual([o["gpu"] for o in got[:2]], list(self.M.GPUS[:2]))
+        self.assertTrue(all(o["price"] is None for o in got))
+
+    def test_a_source_short_of_money_is_left_out(self):
+        self.src._bal["vast"] = {"balance": 1.0, "spend_hr": None}
+        self.src.runpod_offers = lambda v, r: [{"src": "runpod", "price": 0.2, "desc": "rp"}]
+        self.src.vast_offers = mock.Mock(return_value=[{"src": "vast", "price": 0.1, "desc": "va"}])
+        self.src.backup_offers = lambda v, r: []
+        got, problems = self.src.offers(16, 32)
+        self.assertEqual([o["desc"] for o in got], ["rp"])
+        self.assertEqual(problems, ["Vast balance too low"])
+        self.src.vast_offers.assert_not_called()
+        self.src._bal["runpod"] = {"balance": 4.0, "spend_hr": 3.0}                # 4 < 2 h of 3/h
+        self.assertFalse(self.src.usable()["runpod"])
+
+    def test_rent_takes_the_cheapest_that_starts_and_keeps_to_the_limit(self):
+        self.src.offers = lambda *a, **k: ([{"src": "vast", "price": 0.12, "offer": 7, "vcpu": 24, "desc": "va"},
+                                            {"src": "runpod", "price": 0.13, "gpu": "NVIDIA A", "cloud": "COMMUNITY",
+                                             "vcpu": 16, "desc": "rp"},
+                                            {"src": "runpod-cpu", "price": 0.48, "flavor": "cpu3c", "vcpu": 16,
+                                             "desc": "bk", "backup": True}], [])
+        calls = []
+        def put(url, json=None, headers=None, timeout=0):
+            calls.append(("vast", url, json))
+            return self.resp(400, {"success": False, "msg": "no longer available"})
+        def post(url, json=None, timeout=0, headers=None):
+            calls.append(("runpod", url, json))
+            return self.resp(body={"id": "p9", "costPerHr": 0.13})
+        boots = {}
+        with mock.patch.object(self.M.requests, "put", put), mock.patch.object(self.M.requests, "post", post):
+            m, tried = self.src.rent("film-a1", {"A": "1"}, "SCRIPT", min_vcpu=16, ram=32, max_hr=1.5,
+                                     boot=lambda n, t: boots.setdefault(n, t) and "https://r2/boot")
+        self.assertEqual(m["id"], "p9")
+        self.assertIn("no longer available", tried[0])
+        vast_body = calls[0][2]
+        self.assertEqual((vast_body["label"], vast_body["runtype"], vast_body["image"]), ("film-a1", "args", "node:22-bookworm"))
+        self.assertIn("'https://r2/boot'", vast_body["args"][2])
+        self.assertIn("export A=1\nexport VCPU=24\n", boots["film-a1"])
+        self.assertTrue(boots["film-a1"].endswith("SCRIPT"))
+        rp = calls[1][2]
+        self.assertEqual((rp["gpuTypeIds"], rp["cloudType"], rp["minVCPUPerGPU"], rp["minRAMPerGPU"]),
+                         (["NVIDIA A"], "COMMUNITY", 16, 32))
+        self.assertEqual(rp["env"], {"A": "1", "VCPU": "16"})                      # no internal settings leak
+        self.assertEqual(rp["dockerStartCmd"], ["SCRIPT"])
+
+    def test_the_backup_is_a_processor_only_machine(self):
+        self.src.offers = lambda *a, **k: ([{"src": "runpod-cpu", "price": 0.48, "flavor": "cpu3c", "vcpu": 16,
+                                             "desc": "16-core processor-only (cpu3c), RunPod secure", "backup": True}], [])
+        sent = {}
+        def post(url, json=None, timeout=0, headers=None):
+            sent.update(json)
+            return self.resp(body={"id": "c1", "costPerHr": 0.48})
+        with mock.patch.object(self.M.requests, "post", post):
+            m, _ = self.src.rent("n", {}, "S", max_hr=1.0)
+        self.assertEqual((sent["computeType"], sent["cpuFlavorIds"], sent["vcpuCount"], sent["cloudType"]),
+                         ("CPU", ["cpu3c"], 16, "SECURE"))
+        self.assertNotIn("gpuTypeIds", sent)
+        self.assertEqual(m["desc"], "16-core processor-only (cpu3c), RunPod secure, 16+ CPUs, $0.48/h")
+
+    def test_a_machine_dearer_than_listed_is_given_back(self):
+        self.src.offers = lambda *a, **k: ([{"src": "runpod", "price": 0.13, "gpu": "NVIDIA A", "cloud": "COMMUNITY",
+                                             "vcpu": 16, "desc": "a"},
+                                            {"src": "runpod", "price": 0.5, "gpu": "NVIDIA B", "cloud": "SECURE",
+                                             "vcpu": 16, "desc": "b"}], [])
+        self.src.terminate = mock.Mock(return_value=True)
+        def post(url, json=None, timeout=0, headers=None):
+            a = json["gpuTypeIds"] == ["NVIDIA A"]
+            return self.resp(body={"id": "pa" if a else "pb", "costPerHr": 2.49 if a else 0.5})
+        with mock.patch.object(self.M.requests, "post", post):
+            m, _ = self.src.rent("n", {}, "S", max_hr=1.0)
+        self.assertEqual(m["id"], "pb")
+        self.src.terminate.assert_called_once_with("pa")
+
+    def test_a_lost_answer_is_looked_up_by_name_and_stops_the_renting(self):
+        offers = [{"src": "runpod", "price": 0.13, "gpu": "NVIDIA A", "cloud": "COMMUNITY", "vcpu": 16, "desc": "a"},
+                  {"src": "runpod", "price": 0.2, "gpu": "NVIDIA B", "cloud": "COMMUNITY", "vcpu": 16, "desc": "b"}]
+        self.src.offers = lambda *a, **k: (offers, [])
+        tried = []
+        def post(url, json=None, timeout=0, headers=None):
+            tried.append(json["gpuTypeIds"][0])
+            raise self.M.requests.ReadTimeout("slow")
+        self.src.list = lambda: [{"id": "made", "name": "n", "hr": 0.13}]
+        with mock.patch.object(self.M.requests, "post", post):
+            m, _ = self.src.rent("n", {}, "S")
+        self.assertEqual((m["id"], tried), ("made", ["NVIDIA A"]))
+        self.src.list = lambda: []
+        tried.clear()
+        with mock.patch.object(self.M.requests, "post", post):
+            m, _ = self.src.rent("n", {}, "S")
+        self.assertEqual((m, tried), (None, ["NVIDIA A"]))                           # maybe made: no second try
+        def connect(url, json=None, timeout=0, headers=None):
+            tried.append(json["gpuTypeIds"][0])
+            raise self.M.requests.ConnectTimeout("never reached")
+        tried.clear()
+        with mock.patch.object(self.M.requests, "post", connect):
+            self.src.rent("n", {}, "S")
+        self.assertEqual(tried, ["NVIDIA A", "NVIDIA B"])                            # never reached: next one
+
+    def test_stop_while_renting_rents_nothing(self):
+        self.src.offers = lambda *a, **k: ([{"src": "runpod", "price": 0.1, "gpu": "G", "cloud": "C", "vcpu": 16,
+                                             "desc": "a"}], [])
+        with mock.patch.object(self.M.requests, "post", mock.Mock()) as post:
+            self.assertIsNone(self.src.rent("n", {}, "S", stop=lambda: True)[0])
+        post.assert_not_called()
+
+    def test_list_reads_both_accounts_with_vasts_pages(self):
+        pages = [{"instances": [{"id": 1, "label": "a", "actual_status": "running", "dph_total": 0.1}], "next_token": "t"},
+                 {"instances": [{"id": 2, "label": "b", "actual_status": "exited", "dph_total": 0.2}], "next_token": None}]
+        def get(url, params=None, headers=None, timeout=0):
+            if "runpod" in url:
+                return self.resp(body=[{"id": "p1", "name": "rp", "costPerHr": 0.13, "desiredStatus": "RUNNING"}])
+            return self.resp(body=pages.pop(0))
+        with mock.patch.object(self.M.requests, "get", get):
+            got = self.src.list()
+        self.assertEqual([(m["id"], m["name"], m["state"]) for m in got],
+                         [("p1", "rp", "running"), ("vast:1", "a", "running"), ("vast:2", "b", "exited")])
+
+    def test_states_and_switching_off(self):
+        answers = {"https://console.vast.ai/api/v0/instances/5/": self.resp(body={"instances": {"actual_status": "exited"}}),
+                   "https://console.vast.ai/api/v0/instances/6/": self.resp(404, {"error": "not_found"}),
+                   "https://rest.runpod.io/v1/pods/p1": self.resp(body={"desiredStatus": "RUNNING"}),
+                   "https://rest.runpod.io/v1/pods/p2": self.resp(503, {})}
+        with mock.patch.object(self.M.requests, "get", lambda url, **k: answers[url]):
+            self.assertEqual([self.src.state(m) for m in ("vast:5", "vast:6", "p1", "p2", "")],
+                             ["stopped", "gone", "running", "unknown", "gone"])
+        with mock.patch.object(self.M.requests, "delete", lambda url, **k: self.resp(404, {})) as d:
+            self.assertTrue(self.src.terminate("vast:6"))
+
+    def test_balances_are_read_once_a_minute(self):
+        src = self.M.Sources({"RUNPOD_API_KEY": "rk", "VAST_API_KEY": "vk"})
+        calls = []
+        def post(url, params=None, json=None, timeout=0):
+            calls.append("rp")
+            return self.resp(body={"data": {"myself": {"clientBalance": 12.5, "currentSpendPerHr": 0.4}}})
+        def get(url, headers=None, timeout=0):
+            calls.append("vast")
+            return self.resp(body={"credit": 18.2})
+        with mock.patch.object(self.M.requests, "post", post), mock.patch.object(self.M.requests, "get", get):
+            self.assertEqual(src.balances(), {"runpod": {"balance": 12.5, "spend_hr": 0.4},
+                                              "vast": {"balance": 18.2, "spend_hr": None}})
+            src.balances()
+        self.assertEqual(calls, ["rp", "vast"])
 
 
 if __name__ == "__main__":

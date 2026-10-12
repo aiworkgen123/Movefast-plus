@@ -384,7 +384,8 @@ async function refresh(){
     if (l.textContent === t) return;
     const atEnd = l.scrollHeight - l.scrollTop - l.clientHeight < 30 || l.textContent === 'Loading…';
     l.textContent = t; if (atEnd) l.scrollTop = l.scrollHeight; });
-  $('#busy').textContent = d.busy ? `${d.busy} in progress · up to ${d.max_parallel} at once` : '';
+  const money = (d.money || []).map(m => `<span style="color:var(--${m.low ? 'bad' : 'muted'})" title="${m.low ? 'Low: top up soon - at $0 every machine is switched off and films in progress are lost' : 'balance'}">${esc(m.name)} $${m.balance.toFixed(2)}${m.low ? ' - top up' : ''}</span>`);
+  $('#busy').innerHTML = [d.busy ? `${d.busy} in progress · up to ${d.max_parallel} at once` : ''].concat(money).filter(Boolean).join(' · ');
   timer = setTimeout(refresh, d.busy ? 5000 : 30000);
 }
 $('#list').onclick = async e => {

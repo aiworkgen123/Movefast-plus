@@ -121,13 +121,21 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
 ## How films are made
 
 - On the website (`web/README.md`): sign in, drop the voiceover, the script and optional music, then press Create.
-- Each film rents a few small RunPod machines (owner 2026-10-12, after the first film rented a $2.49/h machine): one
+- Each film rents a few small machines (owner 2026-10-12, after the first film rented a $2.49/h machine): one
   planner (at least 16 processor cores) plans the film, draws its share of the shots and finishes it; the others (2 by
-  default, "Machines per film" in Settings) only draw their share. Every machine is the cheapest one RunPod has free at
-  that moment, read from its live price list. A drawing machine dearer than $1.00/h is not rented, and its share is
-  drawn by the planner instead; the planner is never dearer than $1.50/h (when none is free under that, the film
-  stops and says so, and Try again rents later). Every machine is switched off when its part is done. Several films
-  can run at once.
+  default, "Machines per film" in Settings) only draw their share.
+- **Where machines come from** (owner 2026-10-12): RunPod's cheap machines and Vast.ai's cheap machines are looked at
+  together, and the cheapest good one free at that moment is rented. RunPod's processor-only machines ($0.48/h for 16
+  cores, plenty in stock) are the backup, used only when nothing cheaper is free. Vast hosts must be in the US, Canada
+  or Europe, at least 97% reliable, with fast internet and a recent processor. A drawing machine is never above
+  $1.00/h, the planner never above $1.50/h. A source whose balance is too low is not used, and the page shows both
+  balances.
+- **Reliability** (owner 2026-10-12): a film that finds no machine waits and tries again every 2 minutes for up to an
+  hour, instead of failing. A drawing machine that cannot be found yet is looked for again while it can still help;
+  otherwise the planner draws that share. A planning machine that dies, freezes (no sign of life for 12 minutes) or
+  never starts is replaced automatically, up to twice, and the new one carries on from the saved plan: nothing is
+  planned or paid for again. A frozen or failed drawing machine gets one replacement. Every machine is switched off
+  when its part is done. Several films can run at once.
 - An NVIDIA GPU does not speed this tool up; the drawing is processor-bound.
 - Keys live only in the website's Settings (`keys.env` on the server) and as private settings on the machine while it
   runs. **Never in git.**
