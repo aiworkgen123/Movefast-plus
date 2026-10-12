@@ -37,6 +37,8 @@ VAST_MIN_NET_MBPS = 200
 VAST_MAX_GB_COST = 0.05                        # $ per GB of traffic some hosts charge on top
 VAST_OLD_CPU = re.compile(r"E5-|E7-|E3-|\bX5\d{3}|\bL5\d{3}|\bE5\d{3}|Silver 41|Bronze|Opteron|Phenom|FX-", re.I)
 VAST_DISK_GB = 40
+VAST_BAD_HOST_S = 6 * 3600                     # a Vast computer whose machine would not start is passed over this long
+BAD_HOSTS = {}                                 # Vast machine_id -> when one of ours failed to start there
 MIN_BALANCE = 3.0                              # a source with less than this (or 2 h of its spending) is not used
 
 
@@ -141,7 +143,8 @@ class Sources:
             cost = float(o.get("inet_up_cost") or 0) + float(o.get("inet_down_cost") or 0)
             if (country not in VAST_COUNTRIES or VAST_OLD_CPU.search(str(o.get("cpu_name") or ""))
                     or float(o.get("inet_up_cost") or 0) > VAST_MAX_GB_COST
-                    or float(o.get("inet_down_cost") or 0) > VAST_MAX_GB_COST or o.get("is_bid")):
+                    or float(o.get("inet_down_cost") or 0) > VAST_MAX_GB_COST or o.get("is_bid")
+                    or time.time() - BAD_HOSTS.get(o.get("machine_id"), 0) < VAST_BAD_HOST_S):
                 continue
             cores = int(float(o.get("cpu_cores_effective") or 0))
             # the hourly price with our disk (charged by the GB a month; the search counts it when told the size),
@@ -322,6 +325,12 @@ class Sources:
                 if not inst:
                     return "gone"
                 s = str(inst.get("actual_status") or "").lower()
+                if "stopped" in (str(inst.get("cur_state") or "").lower(), str(inst.get("intended_status") or "").lower()):
+                    # we never stop a machine (only delete it): the host gave up on it, e.g. "failed to start
+                    # containers" on a broken computer, seen 2026-10-12 - that computer is passed over for a while
+                    if s != "running" and inst.get("machine_id"):
+                        BAD_HOSTS[inst["machine_id"]] = time.time()
+                    return "stopped"
                 return ("running" if s == "running" else "starting" if s in ("", "loading", "created", "scheduling")
                         else "stopped")
             r = requests.get(f"{REST}/pods/{mid}", timeout=30, headers=self._rp_headers())

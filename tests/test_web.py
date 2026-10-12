@@ -1112,6 +1112,22 @@ class Machines(unittest.TestCase):
         with mock.patch.object(self.M.requests, "delete", lambda url, **k: self.resp(404, {})) as d:
             self.assertTrue(self.src.terminate("vast:6"))
 
+    def test_a_vast_machine_that_could_not_start_is_dead_and_its_computer_passed_over(self):
+        self.addCleanup(self.M.BAD_HOSTS.clear)
+        broken = {"actual_status": "created", "cur_state": "stopped", "intended_status": "stopped", "machine_id": 90944,
+                  "status_msg": "Error response from daemon: failed to create task for container ... failed to start"}
+        starting = {"actual_status": None, "cur_state": "running", "intended_status": "running", "machine_id": 7}
+        answers = {"https://console.vast.ai/api/v0/instances/8/": self.resp(body={"instances": broken}),
+                   "https://console.vast.ai/api/v0/instances/9/": self.resp(body={"instances": starting})}
+        with mock.patch.object(self.M.requests, "get", lambda url, **k: answers[url]):
+            self.assertEqual([self.src.state("vast:8"), self.src.state("vast:9")], ["stopped", "starting"])
+        self.assertEqual(list(self.M.BAD_HOSTS), [90944])
+        offers = [dict(self.vast_offer(1, 0.10), machine_id=90944), dict(self.vast_offer(2, 0.12), machine_id=5)]
+        with mock.patch.object(self.M.requests, "post", lambda *a, **k: self.resp(body={"offers": offers})):
+            self.assertEqual([o["offer"] for o in self.src.vast_offers(16, 32)], [2])
+            self.M.BAD_HOSTS[90944] -= self.M.VAST_BAD_HOST_S                 # hours later it is tried again
+            self.assertEqual([o["offer"] for o in self.src.vast_offers(16, 32)], [1, 2])
+
     def test_balances_are_read_once_a_minute(self):
         src = self.M.Sources({"RUNPOD_API_KEY": "rk", "VAST_API_KEY": "vk"})
         calls = []
