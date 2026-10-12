@@ -9318,14 +9318,14 @@ def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
     return out
 
 
-# the owner's background music (website, 2026-10-12: "drop voiceover + script and a background music"): MRTRUTH_MUSIC
-# names his file; it is laid under the whole film at MRTRUTH_MUSIC_DB loudness units under the narration (measured on
-# both, EBU R128; -18 unless set: a bed you hear but never over the words), looped when shorter than the film, faded in
-# MUSIC_FADE_IN_S and out over the last MUSIC_FADE_OUT_S, and ducked a further few dB while he speaks (a sidechain on
-# the voice), so it rises a little in the pauses. Peaks of voice + sounds + music go through the same MIX_CEILING
-# limiter; the mix is FLAC so the final mux's AAC is the film's only encode.
-MUSIC_DB_DEFAULT, MUSIC_FADE_IN_S, MUSIC_FADE_OUT_S = -18.0, 2.0, 5.0
-MUSIC_DUCK = "sidechaincompress=threshold=0.05:ratio=2:attack=40:release=700:makeup=1"
+# the owner's background music (website; owner 2026-10-12: "it should remain as it is uploaded, it's going to be playing
+# same time as narration ... 100 volume is default, allow to drag it lower"): MRTRUTH_MUSIC names his file. It plays
+# from the film's first moment exactly as uploaded - no fades, no ducking, no levelling, no looping - at
+# MRTRUTH_MUSIC_VOLUME percent of its own volume (100 unless set; 0 = no music), under the narration and its sounds.
+# A file longer than the film stops where the film ends; a shorter one simply ends. Only the MIX_CEILING peak limiter
+# every film's sound already has touches the sum, so voice + music never clip. FLAC, so the final mux's AAC is the
+# film's only encode.
+MUSIC_VOLUME_DEFAULT = 100.0
 
 
 def _music_file():
@@ -9334,23 +9334,12 @@ def _music_file():
     return Path(p) if p and Path(p).is_file() and Path(p).stat().st_size > 0 else None
 
 
-def _music_db() -> float:
+def _music_volume() -> float:
+    """MRTRUTH_MUSIC_VOLUME as a percent of the file's own volume, 0-100 (100 when unset or not a number)."""
     try:
-        return max(-40.0, min(-6.0, float(os.environ.get("MRTRUTH_MUSIC_DB") or MUSIC_DB_DEFAULT)))
+        return max(0.0, min(100.0, float(os.environ.get("MRTRUTH_MUSIC_VOLUME") or MUSIC_VOLUME_DEFAULT)))
     except ValueError:
-        return MUSIC_DB_DEFAULT
-
-
-def _loudness(path: Path, seconds: float = 0) -> float:
-    """Integrated loudness (LUFS) of a file, or of its first `seconds` - None when it cannot be read or is silent."""
-    args = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path)] + (["-t", f"{seconds:.1f}"] if seconds else [])
-    try:
-        got = subprocess.run(args + ["-af", "ebur128=framelog=quiet", "-f", "null", "-"], capture_output=True,
-                             text=True, timeout=900).stderr
-    except (OSError, subprocess.SubprocessError):
-        return None
-    m = re.findall(r"I:\s+(-?[\d.]+) LUFS", got)
-    return float(m[-1]) if m and float(m[-1]) > -70 else None
+        return MUSIC_VOLUME_DEFAULT
 
 
 def _seconds_of(path: Path) -> float:
@@ -9362,30 +9351,27 @@ def _seconds_of(path: Path) -> float:
 
 
 def _music_under(engine, job: Path, audio: Path) -> Path:
-    """The film's sound (`audio`: the voice, with its sounds when it has them) with the owner's music under it
-    (MRTRUTH_MUSIC); `audio` unchanged when there is no music or it cannot be read."""
-    music = _music_file()
-    if not music:
+    """The film's sound (`audio`: the voice, with its sounds when it has them) with the owner's music under it as
+    uploaded (MRTRUTH_MUSIC, at MRTRUTH_MUSIC_VOLUME percent); `audio` unchanged when there is none, the volume is 0,
+    or a file cannot be read."""
+    music, vol = _music_file(), _music_volume()
+    if not music or vol <= 0:
         return audio
-    film = _seconds_of(audio)
-    voice, bed = _loudness(audio), _loudness(music, 600)
-    if not film or voice is None or bed is None:
-        engine.log(f"  music: WARNING - {music.name} or the narration could not be measured; the film has no music")
+    film, song = _seconds_of(audio), _seconds_of(music)
+    if not film or not song:
+        engine.log(f"  music: WARNING - {music.name} or the narration could not be read; the film has no music")
         return audio
-    gain = voice + _music_db() - bed
     out = job / "voice_music.flac"
-    fo = max(0.0, film - MUSIC_FADE_OUT_S)
-    fc = (f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[v][key];"
-          f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=duration={film:.3f},volume={gain:.2f}dB,"
-          f"afade=t=in:d={MUSIC_FADE_IN_S},afade=t=out:st={fo:.3f}:d={MUSIC_FADE_OUT_S}[m0];"
-          f"[m0][key]{MUSIC_DUCK}[m];"
+    fc = (f"[0:a]aresample=48000,aformat=channel_layouts=stereo[v];"
+          f"[1:a]aresample=48000,aformat=channel_layouts=stereo,volume={vol / 100:.4f}[m];"
           f"[v][m]amix=inputs=2:normalize=0:duration=first,"
           f"alimiter=limit={MIX_CEILING}:attack=1:release=50:level=0:latency=1[a]")
-    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(audio), "-stream_loop", "-1", "-i", str(music),
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(audio), "-i", str(music),
                     "-filter_complex", fc, "-map", "[a]", "-c:a", "flac", str(out)], check=True)
-    engine.log(f"  music: {music.name} under the narration at {_music_db():+.0f} LU (narration {voice:.1f} LUFS, "
-               f"music {bed:.1f} LUFS, gain {gain:+.1f} dB), looped to {film:.0f}s, faded in {MUSIC_FADE_IN_S:.0f}s "
-               f"and out {MUSIC_FADE_OUT_S:.0f}s, ducked under the voice")
+    fit = (f"stops at the film's end ({song:.0f}s of music, {film:.0f}s of film)" if song > film + 0.5 else
+           f"ends {film - song:.0f}s before the film ({song:.0f}s of music)" if song < film - 0.5 else
+           "as long as the film")
+    engine.log(f"  music: {music.name} as uploaded at {vol:.0f}% under the narration, {fit}")
     return out
 
 

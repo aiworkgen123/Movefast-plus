@@ -46,7 +46,7 @@ class Web(unittest.TestCase):
         return c
 
     def new(self, c, **over):
-        data = {"title": "The Passage", "run_on": "fake", "music_level": "quiet",
+        data = {"title": "The Passage", "run_on": "fake", "music_volume": "60",
                 "voice": (io.BytesIO(self.voice), "narration.mp3"),
                 "script": (io.BytesIO(("word " * 300).encode()), "script.txt"),
                 "music": (io.BytesIO(self.music), "song.mp3")}
@@ -87,8 +87,8 @@ class Web(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.json)
         jid = r.json["id"]
         j = self.A.store.job(jid)
-        self.assertEqual((j["status"], j["user"], j["minutes"], j["music_db"], j["music_name"]),
-                         ("queued", "maria", 1, -22.0, "song.mp3"))
+        self.assertEqual((j["status"], j["user"], j["minutes"], j["music_vol"], j["music_name"]),
+                         ("queued", "maria", 1, 60, "song.mp3"))
         ins = self.A.studio.inputs(jid)
         self.assertEqual(sorted(ins), ["music", "script", "voice"])
         self.A.studio.tick()                                          # the queue starts it
@@ -106,6 +106,29 @@ class Web(unittest.TestCase):
         self.assertEqual(d.status_code, 200)
         self.assertFalse(any(x["id"] == jid for x in c.get("/api/jobs").json["jobs"]))
 
+    def test_music_volume_defaults_to_100_and_is_kept_in_range(self):
+        c = self.client("maria")
+        for sent, kept in ((None, 100), ("100", 100), ("0", 0), ("35", 35), ("250", 100), ("-5", 0)):
+            r = self.new(c, music_volume=sent)
+            self.assertEqual(r.status_code, 200, r.json)
+            self.assertEqual(self.A.store.job(r.json["id"])["music_vol"], kept, sent)
+            c.post(f"/api/jobs/{r.json['id']}/cancel", json={})
+        self.assertIn("0 to 100", self.new(c, music_volume="loud").json["error"])
+
+    def test_an_older_database_gets_the_new_column(self):
+        import sqlite3
+        from web.store import Store
+        p = Path(tempfile.mkdtemp()) / "old.sqlite"
+        db = sqlite3.connect(p)
+        db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, status TEXT, music_db REAL, deleted INTEGER DEFAULT 0, "
+                   "created REAL)")
+        db.execute("INSERT INTO jobs VALUES('a','old film','done',-18,0,1)")
+        db.commit()
+        db.close()
+        s = Store(p)
+        self.assertIn("music_vol", s.job("a"))
+        self.assertEqual(s.job("a")["title"], "old film")
+
     def test_upload_checks(self):
         c = self.client("maria")
         self.assertIn("title", self.new(c, title="  ").json["error"])
@@ -117,7 +140,7 @@ class Web(unittest.TestCase):
         r = self.new(c, script=None, script_text="pasted words " * 20, music=None)   # pasted script, no music
         self.assertEqual(r.status_code, 200, r.json)
         j = self.A.store.job(r.json["id"])
-        self.assertIsNone(j["music_db"])
+        self.assertIsNone(j["music_vol"])
         self.assertNotIn("music", self.A.studio.inputs(j["id"]))
         c.post(f"/api/jobs/{j['id']}/cancel", json={})
         self.assertEqual(self.A.store.job(j["id"])["status"], "cancelled")
@@ -195,7 +218,7 @@ class Parts(unittest.TestCase):
 
     def test_pod_script_carries_the_music_and_the_inputs(self):
         from web import jobs as J
-        for need in ('"$VOICE_URL"', '"$SCRIPT_URL"', 'MRTRUTH_MUSIC=', 'MRTRUTH_MUSIC_DB=', '"$VID_PUT"',
+        for need in ('"$VOICE_URL"', '"$SCRIPT_URL"', 'MRTRUTH_MUSIC=', 'MRTRUTH_MUSIC_VOLUME="${MUSIC_VOL:-100}"', '"$VID_PUT"',
                      'run_test.py "$JS" "$JV" "$JT" "$JM" --export', "--segments /root/segments.tgz", "seed_verdicts"):
             self.assertIn(need, J.POD_SCRIPT)
         r = subprocess.run(["bash", "-n"], input=J.POD_SCRIPT, text=True, capture_output=True)

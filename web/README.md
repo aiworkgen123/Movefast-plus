@@ -32,6 +32,8 @@ the machine carries on and the film appears when it is done.
 
 ## Later
 
+* Background music plays exactly as uploaded (no fades, no ducking, no looping) at the volume chosen on the slider
+  (100% unless lowered); a longer file stops where the film ends.
 * **Settings → Update the tool** fetches the newest version; films being made carry on.
 * A forgotten password: in the server console, `cd /opt/mrtruth/code && sudo -u mrtruth MRTRUTH_WEB_DATA=/var/lib/mrtruth /opt/mrtruth/venv/bin/python -m web.manage password NAME`
 * Your own web address: point it at the server's IP address (an A record), then run the installer again and type it.

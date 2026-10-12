@@ -52,7 +52,6 @@ GPUS = ("NVIDIA L40", "NVIDIA A40", "NVIDIA RTX PRO 6000 Blackwell Server Editio
         "NVIDIA L40S", "NVIDIA RTX PRO 4500 Blackwell", "NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 3090",
         "NVIDIA RTX A6000", "NVIDIA RTX A5000", "NVIDIA RTX A4500", "NVIDIA GeForce RTX 4080 SUPER")
 REST = "https://rest.runpod.io/v1"
-MUSIC_LEVELS = {"quiet": -22.0, "normal": -18.0, "louder": -14.0}
 # where a film can be made (the website's "Run on" list); a place that is not ready is shown but cannot be picked
 RUN_ON = [
     {"id": "runpod", "label": "RunPod (cloud machine)", "ready": True,
@@ -324,8 +323,9 @@ class Studio:
                "VOICE_URL": b.presign(K["base"] + "inputs/" + names["voice"], ttl), "VOICE_NAME": names["voice"],
                "SCRIPT_URL": b.presign(K["base"] + "inputs/" + names["script"], ttl)}
         if "music" in ins:
+            vol = j.get("music_vol")
             env.update(MUSIC_URL=b.presign(K["base"] + "inputs/" + names["music"], ttl), MUSIC_NAME=names["music"],
-                       MUSIC_DB=str(j["music_db"] if j["music_db"] is not None else -18))
+                       MUSIC_VOL=str(int(round(vol if vol is not None else 100))))
         for k in POD_KEYS:
             env["K_" + k] = keys.get(k, "")
         self.store.update(jid, stage="Loading the saved picture checks", progress=3)
@@ -646,8 +646,8 @@ curl -sf -m 600 "$VOICE_URL" -o "testin/job/$VOICE_NAME" && curl -sf -m 120 "$SC
 JS=testin/job/script.txt; JV="testin/job/$VOICE_NAME"
 if [ -n "${MUSIC_URL:-}" ]; then
   curl -sf -m 600 "$MUSIC_URL" -o "testin/job/$MUSIC_NAME" || fail "your music did not download"
-  export MRTRUTH_MUSIC="/root/mf/testin/job/$MUSIC_NAME" MRTRUTH_MUSIC_DB="${MUSIC_DB:--18}"
-  say "music: $MUSIC_NAME at $MRTRUTH_MUSIC_DB LU under the narration"
+  export MRTRUTH_MUSIC="/root/mf/testin/job/$MUSIC_NAME" MRTRUTH_MUSIC_VOLUME="${MUSIC_VOL:-100}"
+  say "music: $MUSIC_NAME as uploaded, at $MRTRUTH_MUSIC_VOLUME% volume"
 fi
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt -c testin/constraints.txt >>/root/log.txt 2>&1 || .venv/bin/pip install -q -r requirements.txt "av==15.1.0" >>/root/log.txt 2>&1

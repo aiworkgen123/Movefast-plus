@@ -134,7 +134,7 @@ def whoami():
     u = me()
     if not u:
         return jsonify(user=None)
-    return jsonify(user={"name": u["name"], "role": u["role"]}, run_on=_run_on(), music_levels=list(J.MUSIC_LEVELS),
+    return jsonify(user={"name": u["name"], "role": u["role"]}, run_on=_run_on(),
                    missing_keys=studio.missing_keys() if u["role"] == "owner" else [],
                    setup_needed=bool(studio.missing_keys()), fake=FAKE)
 
@@ -165,7 +165,7 @@ def own_password():
 
 def _view(j: dict) -> dict:
     out = {k: j.get(k) for k in ("id", "user", "title", "status", "stage", "progress", "run_on", "created",
-                                 "started", "finished", "seconds", "minutes", "voice_name", "music_name", "music_db",
+                                 "started", "finished", "seconds", "minutes", "voice_name", "music_name", "music_vol",
                                  "pod_desc", "video_mb", "error", "commit_id")}
     out["cost"] = json.loads(j.get("cost") or "{}")
     if j.get("status") == "done":
@@ -222,7 +222,10 @@ def create_job():
     music = request.files.get("music")
     if music and music.filename and Path(music.filename).suffix.lower() not in AUDIO:
         return jsonify(error="The music must be an audio file."), 400
-    level = f.get("music_level") or "normal"
+    try:                                              # percent of the file's own volume (owner: 100 by default)
+        vol = max(0, min(100, int(float(f.get("music_volume") or 100))))
+    except ValueError:
+        return jsonify(error="The music volume is a number from 0 to 100."), 400
     tmp = DATA / "jobs" / ("upload-" + secrets.token_hex(6))
     ins = tmp / "inputs"
     ins.mkdir(parents=True)
@@ -246,7 +249,7 @@ def create_job():
         return jsonify(error=str(e)), 400
     jid = store.new_job(user=u["name"], title=title, run_on=run_on, seconds=round(secs, 1),
                         minutes=max(1, int(-(-secs // 60))), voice_name=voice.filename[:120], music_name=mname,
-                        music_db=J.MUSIC_LEVELS.get(level, -18.0) if mname else None,
+                        music_vol=vol if mname else None,
                         script_words=len(script.split()))
     tmp.rename(studio.folder(jid))
     return jsonify(id=jid)

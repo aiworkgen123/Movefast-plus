@@ -58,6 +58,8 @@ input:focus,select:focus,textarea:focus{outline:2px solid var(--bar);outline-off
 .drop input[type=file]{display:none}
 .drop .opt{font-size:12px;color:var(--muted);font-weight:400}
 .drop .x{position:absolute;top:8px;right:8px}
+.vol{margin-top:auto;display:grid;gap:4px;font-size:13px;color:var(--muted);cursor:default}
+.vol input{width:100%;accent-color:var(--bar);cursor:pointer}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .places{display:grid;gap:8px;margin:8px 0 16px}
 .place{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px}
@@ -146,14 +148,13 @@ td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
             </div>
             <div class="drop" data-for="music">
               <span class="t">Background music <span class="opt">(optional)</span></span>
-              <span class="hint">Looped to the film's length, faded in and out, kept under the voice.</span>
+              <span class="hint">Plays as you upload it, under the narration.</span>
               <span class="file"></span>
               <input type="file" name="music" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus">
-              <select name="music_level" id="mlevel" title="Music level" onclick="event.stopPropagation()" style="margin-top:auto">
-                <option value="quiet">Music: quiet</option>
-                <option value="normal" selected>Music: normal</option>
-                <option value="louder">Music: louder</option>
-              </select>
+              <label class="vol" onclick="event.stopPropagation()">
+                <span>Volume <b id="mvolText">100%</b></span>
+                <input type="range" name="music_volume" id="mvol" min="0" max="100" step="1" value="100">
+              </label>
             </div>
           </div>
           <div id="pasteBox" class="hide" style="margin:-4px 0 16px">
@@ -292,12 +293,13 @@ $$('.drop').forEach(z => {
       z.append(x);
     }
   };
-  z.onclick = e => { if (e.target.tagName!=='A' && e.target.tagName!=='SELECT' && !e.target.classList.contains('x')) inp.click(); };
+  z.onclick = e => { if (e.target.tagName!=='A' && !e.target.closest('.vol') && !e.target.classList.contains('x')) inp.click(); };
   inp.onchange = () => set(inp.files[0]);
   z.ondragover = e => { e.preventDefault(); z.classList.add('over'); };
   z.ondragleave = () => z.classList.remove('over');
   z.ondrop = e => { e.preventDefault(); z.classList.remove('over'); set(e.dataTransfer.files[0]); };
 });
+$('#mvol').oninput = () => $('#mvolText').textContent = $('#mvol').value + '%';
 $('#pasteLink').onclick = e => { e.preventDefault(); e.stopPropagation(); $('#pasteBox').classList.toggle('hide'); $('#stext').focus(); };
 
 $('#newForm').onsubmit = e => {
@@ -316,7 +318,7 @@ $('#newForm').onsubmit = e => {
     let d = {}; try { d = JSON.parse(x.responseText); } catch(_){ d = {error:'Upload failed ('+x.status+').'}; }
     if (x.status===401) return show('login');
     if (d.error) { $('#newErr').textContent = d.error; return; }
-    f.reset(); $$('.drop').forEach(z => { z.classList.remove('has'); z.querySelector('.file').textContent=''; z.querySelector('.x')?.remove(); });
+    f.reset(); $('#mvolText').textContent = '100%'; $$('.drop').forEach(z => { z.classList.remove('has'); z.querySelector('.file').textContent=''; z.querySelector('.x')?.remove(); });
     $('#pasteBox').classList.add('hide'); boot(); toast('Film added. It starts in a few seconds.');
   };
   x.onerror = () => { $('#create').disabled=false; $('#upWrap').classList.add('hide'); $('#newErr').textContent='The upload did not go through. Check your connection and try again.'; };
@@ -350,7 +352,7 @@ function film(j){
   if (['failed','cancelled'].includes(j.status)) acts.push(`<button class="btn small" data-act="retry" data-id="${j.id}">Try again</button>`);
   if (!active) acts.push(`<button class="btn small danger" data-act="delete" data-id="${j.id}">Delete</button>`);
   if (j.status!=='queued') acts.push(`<button class="btn small" data-act="log" data-id="${j.id}">${openLogs.has(j.id)?'Hide':'Show'} details</button>`);
-  const info = [j.user, when(j.created), dur(j.seconds) ? 'voice '+dur(j.seconds) : '', j.music_name ? 'music: '+j.music_name : 'no music', j.pod_desc||''].filter(Boolean).join(' · ');
+  const info = [j.user, when(j.created), dur(j.seconds) ? 'voice '+dur(j.seconds) : '', j.music_name ? 'music: '+j.music_name+(j.music_vol!=null && j.music_vol<100 ? ' ('+Math.round(j.music_vol)+'%)' : '') : 'no music', j.pod_desc||''].filter(Boolean).join(' · ');
   return `<div class="film" id="f-${j.id}"><div class="top"><span class="name">${esc(j.title)}</span>
     <span class="badge ${j.status}">${LABEL[j.status]||j.status}</span></div>
     <div class="meta">${esc(info)}</div>${body}<div class="acts">${acts.join('')}</div>
