@@ -598,6 +598,15 @@ class Split(unittest.TestCase):
         self.assertEqual(len(self.src.rents), 2)
         self.assertFalse(self.s.renting)                                         # every name given back
 
+    def test_drawers_are_rented_while_the_pictures_are_chosen_to_be_ready_in_time(self):
+        jid, K = self.film(3)                                            # a 10-minute film: lead 600 - 240 = 360 s
+        started = time.strftime("%H:%M:%S", time.gmtime(time.time() - 100))
+        self.s._drawers(jid, self.b, K, f"{started} PICTURES start")
+        self.assertEqual(self.src.rents, [])                             # too early: they would only wait
+        started = time.strftime("%H:%M:%S", time.gmtime(time.time() - 400))
+        self.s._drawers(jid, self.b, K, f"{started} PICTURES start")
+        self.assertEqual(len(self.src.rents), 2)
+
     def test_a_resumed_film_takes_the_package_of_the_attempt_that_planned(self):
         jid, K = self.film(2)
         self.s.store.update(jid, run="web-r-2", runs=json.dumps([

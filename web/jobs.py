@@ -75,6 +75,9 @@ RENT_WAIT_S, RENT_RETRY_S = 60 * 60, 120       # how long a film waits for a pla
 FROZEN_S = 12 * 60                             # no sign of life (the log is sent every 30-45 s) for this long: frozen
 AUTO_RETRIES = 2                               # replacements for a planning machine before the film stops
 BEAT_EVERY_S, CHECK_EVERY_S = 120, 300         # how often the log's age and a machine's state are looked at
+# the drawing machines are rented while the planner is still choosing pictures (the longest part of planning: about 66-72 s
+# a minute of film on the 11- and 16-minute films), timed to be set up (2-4 min) just as the plan is ready
+PICTURES_S_MIN, DRAWER_LEAD_S = 60, 240
 STAGES = [                                     # the pod's own log lines, latest first: stage, progress from, to
     ("video uploaded", "Saving the video", 98, 99),
     ("FINISH exit", "Saving the video", 96, 98),
@@ -697,6 +700,9 @@ class Studio:
         failed_plan = "PLAN exit=" in log and "PLAN exit=0 " not in log
         late = any(m in log for m in ("PART 1 drawn", "PART 1 kept", "RENDER exit", "PACKAGE upload failed"))
         ready = any(m in log for m in ("PICTURES done", "PLAN exit", "PACKAGE uploaded"))
+        at = self._log_time(log, "PICTURES start")
+        if at and now >= at + max(0, PICTURES_S_MIN * int(j["minutes"] or 10) - DRAWER_LEAD_S):
+            ready = True
         for k in range(2, n + 1):
             if not any(d["part"] == k for d in ds):
                 ds.append({"part": k, "id": None, "hr": 0, "desc": "waiting for the plan", "started": now,
@@ -794,6 +800,17 @@ class Studio:
             return True
         except S3Error:
             return False
+
+    @staticmethod
+    def _log_time(log: str, marker: str):
+        """When the machine wrote "HH:MM:SS <marker>" (its clock is UTC), as seconds since 1970; None if not there."""
+        m = re.search(r"^(\d\d):(\d\d):(\d\d) " + re.escape(marker), log, re.M)
+        if not m:
+            return None
+        now = time.time()
+        day = now - now % 86400
+        at = day + int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+        return at - 86400 if at > now + 3600 else at                     # written just before midnight
 
     def _machine_cost(self, j: dict, now: float) -> float:
         """Every machine of the film so far: earlier attempts, the planner from its start, each drawer from its start
@@ -1061,7 +1078,10 @@ if [ -n "${CKPT_GET:-}" ]; then
   [ "$RC" -ne 0 ] && say "planning error: the saved plan could not be loaded"
 else
   say "PLAN start"; T0=$(date +%s)
-  ( while [ ! -f /root/plan.over ]; do sleep 10; if grep -qE '^ *pictures in [0-9]+s \(search rounds' plan.log 2>/dev/null; then say "PICTURES done"; break; fi; done ) &
+  ( S=""; while [ ! -f /root/plan.over ]; do sleep 10
+      if [ -z "$S" ] && grep -qE 'archive names for the picture search|Bing \(free web pictures\)' plan.log 2>/dev/null; then say "PICTURES start"; S=1; fi
+      if grep -qE '^ *pictures in [0-9]+s \(search rounds' plan.log 2>/dev/null; then say "PICTURES done"; break; fi
+    done ) &
   MRTRUTH_SHOT_WORKERS=30 PYTHONUNBUFFERED=1 .venv/bin/python run_test.py "$JS" "$JV" "$JT" "$JM" --export > plan.log 2>&1; RC=$?; touch /root/plan.over
   T1=$(date +%s); say "PLAN exit=$RC seconds=$((T1-T0)) $(grep -o 'pictures in .*' plan.log | tail -1 | cut -c1-200)"
   [ "$RC" -ne 0 ] && say "planning error: $(grep -E 'Error|stopped|STOP' plan.log | tail -1 | cut -c1-300)"
