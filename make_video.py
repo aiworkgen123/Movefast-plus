@@ -1107,12 +1107,13 @@ def _mix_audio(job: Path, mp3: Path, click_times=None) -> Path:
 # so "what did this video cost?" had no answer except an org-wide daily total
 # from an Admin key most people do not have. Counted here instead, per job.
 #
-# Dollars per million tokens (input, output), September 2026. A model that is
+# Dollars per million tokens (input, output), October 2026. A model that is
 # not listed is counted in tokens and left out of the money.
 CLAUDE_PRICES = {
     "claude-opus-5": (5.0, 25.0),
     "claude-sonnet-5": (2.0, 10.0),
-    "claude-sonnet-5-5": (3.0, 15.0),     # the CLI's own cost figure is used when it reports one
+    "claude-sonnet-5-5": (2.0, 10.0),     # the CLI's own cost figure is used when it reports one
+    "claude-haiku-5-5": (0.10, 0.50),     # prompts up to 100K tokens (every call here); $0.50 / $2.50 beyond
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-opus-4-8": (5.0, 25.0),

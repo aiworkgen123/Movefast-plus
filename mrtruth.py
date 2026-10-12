@@ -372,6 +372,31 @@ def _load(path: Path, default=None):
         return default
 
 
+def _strings(x, order=()) -> list:
+    """A list of strings from what a model wrote for one: a list as it is, a labelled object by its values (`order`
+    first), one string as one item. Claude Haiku writes {"literal": ..., "conceptual": ..., "mood": ...} where Sonnet
+    writes a list, and a list read as an object kept only the labels: every search of a test film was "literal"
+    (2026-10-12)."""
+    if isinstance(x, dict):
+        keys = [k for k in order if k in x] + [k for k in x if k not in order]
+        return [str(x[k]) for k in keys if x[k] not in (None, "")]
+    if isinstance(x, (list, tuple)):
+        return [str(v) for v in x if v not in (None, "")]
+    return [str(x)] if x not in (None, "") else []
+
+
+QUERY_ORDER = ("literal", "conceptual", "mood")
+DOSSIER_LISTS = ("visualStyle", "preferredVisualCategories", "avoidVisualCategories")
+
+
+def _dossier(got) -> dict:
+    """The research dossier with its lists as lists (a model may write one as a sentence, which was then joined
+    letter by letter into the brief)."""
+    if not isinstance(got, dict):
+        return {}
+    return dict(got, **{k: _strings(got[k]) for k in DOSSIER_LISTS if k in got})
+
+
 def _dump(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
@@ -427,7 +452,7 @@ def research(engine, script: str, job: Path, force: bool = False) -> dict:
     out = job / "mrtruth" / "research.json"
     got = None if force else _load(out)
     if got:
-        return got
+        return _dossier(got)
     engine.log("Mr Truth: research dossier (Claude)...")
     title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
     prompt = (_prompts()["research"] + f"\n\nTITLE: {title}\n\n<script>\n{script}\n</script>")
@@ -436,6 +461,7 @@ def research(engine, script: str, job: Path, force: bool = False) -> dict:
     except RuntimeError as e:
         engine.log(f"  {e} — planning without a dossier")
         got = {}
+    got = _dossier(got)
     _dump(out, got)
     return got
 
@@ -699,7 +725,7 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     rows[0]["startMs"] = 0
     for i, r in enumerate(rows):
         r["endMs"] = rows[i + 1]["startMs"] if i + 1 < len(rows) else end_ms
-        q = [str(x) for x in (r.get("queries") or [])][:3]
+        q = _strings(r.get("queries"), QUERY_ORDER)[:3]
         r["queries"] = q + [""] * (3 - len(q))
         r["text"] = " ".join(txt for a, b, txt in cues if r["startMs"] <= a < r["endMs"]) or str(r.get("text") or "")
     rows = [r for r in rows if r["endMs"] - r["startMs"] >= 400] or rows
@@ -11349,7 +11375,7 @@ def check(job: Path) -> list:
         sys.path.insert(0, str(HERE))
     import make_video as engine                              # its subtitle parser only
     cues = _cues(engine, job / "subs.srt") if (job / "subs.srt").exists() else []
-    dossier = dict(_load(work / "research.json") or {}, visualBrief=(_load(work / "visual_brief.json") or {}).get("brief") or {})
+    dossier = dict(_dossier(_load(work / "research.json")), visualBrief=(_load(work / "visual_brief.json") or {}).get("brief") or {})
     title = ((job / "title.txt").read_text(encoding="utf-8").splitlines() or [""])[0] if (job / "title.txt").exists() else ""
     script = (job / "script.txt").read_text(encoding="utf-8") if (job / "script.txt").exists() else ""
     ctx = _gate_ctx(job, rows, dossier, cues, title, script, mode="report")
