@@ -11,6 +11,13 @@ one is to make it obvious.
 
 ---
 
+## Mr Truth: read this first
+
+When the work is about the **Mr Truth** channel, read `MR_TRUTH_RULES.md` before changing anything: it lists every
+ruling the owner has made (searches, picture checks, pacing, highlighted pages, maps, dates, music, costs) and they are
+binding. Mr Truth films are made through the website in `web/` (see `web/README.md`), one rented RunPod machine per
+film. When the owner changes a ruling, update `MR_TRUTH_RULES.md` in the same commit as the code. Never commit keys.
+
 ## On the very first message — explain it, then set it up
 
 If `.env` does not exist, or `.venv` / `war_chess_renderer/node_modules` are missing, the user has not
