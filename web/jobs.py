@@ -62,6 +62,7 @@ RUN_ON = [
 # how long each part takes (the 11-minute render full-05f3c0: set-up 230 s, planning 1086 s, drawing 921 s), per
 # minute of film - only for the progress bar and "about N min left"
 SETUP_S, PLAN_S_MIN, DRAW_S_MIN, FINISH_S = 240, 100, 85, 150
+START_LIMIT_S = 20 * 60                       # a pod that has written no log line by then never started: switched off
 STAGES = [                                     # the pod's own log lines, latest first: stage, progress from, to
     ("video uploaded", "Saving the video", 98, 99),
     ("FINISH exit", "Saving the video", 96, 98),
@@ -147,6 +148,7 @@ class Studio:
         self.store, self.data, self.fake = store, Path(data), fake
         self.threads, self.lock, self.pkg_lock = {}, threading.Lock(), threading.Lock()
         self.last_sweep, self.stop = 0.0, threading.Event()
+        self.paused = False                          # the Update button holds the queue while it restarts the site
         (self.data / "jobs").mkdir(parents=True, exist_ok=True)
 
     # ── keys and storage ──────────────────────────────────────────────────
@@ -234,7 +236,7 @@ class Studio:
                 if j["status"] in ("starting", "running", "cancelling") and not self._alive(j["id"]):
                     self._spawn(j["id"], self._reattach)
             busy = sum(1 for j in active if self._alive(j["id"]))
-            for j in (j for j in active if j["status"] == "queued"):
+            for j in (j for j in active if j["status"] == "queued" and not self.paused):
                 if busy >= self.max_parallel():
                     break
                 if self._alive(j["id"]):
@@ -275,9 +277,12 @@ class Studio:
         return self.data / "jobs" / jid
 
     @staticmethod
-    def keys_of(jid: str, title: str = "") -> dict:
+    def keys_of(jid: str, title: str = "", run: str = "") -> dict:
+        """The film's R2 keys. Its uploaded files are shared by every attempt; what a pod reports (log, done, result)
+        lives under the attempt's own run name, so a Try again never reads an earlier attempt's answer."""
         base = f"mrtruth/jobs/{jid}/"
-        return {"base": base, "log": base + "log.txt", "done": base + "done.json", "result": base + "result.tgz",
+        out = base + (f"{run}/" if run else "")
+        return {"base": base, "log": out + "log.txt", "done": out + "done.json", "result": out + "result.tgz",
                 "video": f"mrtruth/videos/{jid}/{slug(title)}.mp4"}
 
     def inputs(self, jid) -> dict:
@@ -300,8 +305,10 @@ class Studio:
         if missing:
             raise RuntimeError("missing keys in Settings: " + ", ".join(missing))
         keys, b = self.keys(), self.bucket()
-        K = self.keys_of(jid, j["title"])
-        run = "web-" + jid
+        run = f"web-{jid}-{int(time.time())}"                  # this attempt (a Try again is a new one)
+        K = self.keys_of(jid, j["title"], run)
+        for name in ("result.tgz", "pod_log.txt"):              # an earlier attempt's read-back
+            (self.folder(jid) / name).unlink(missing_ok=True)
         self.store.update(jid, stage="Uploading the code package", progress=1, run=run)
         pkg_key, commit = self.package(b)
         self.store.update(jid, stage="Uploading your files", progress=2, commit_id=commit[:12])
@@ -338,20 +345,29 @@ class Studio:
         if self.store.job(jid)["status"] == "cancelling":
             return self._cancelled(jid)
         self.store.update(jid, stage="Renting a machine", progress=4)
-        pod, desc = self._rent(keys["RUNPOD_API_KEY"], POD_PREFIX + jid, env)
+        pod, desc = self._rent(keys["RUNPOD_API_KEY"], POD_PREFIX + jid, env,
+                               stop=lambda: self.store.job(jid)["status"] == "cancelling")
         if not pod:
+            if self.store.job(jid)["status"] == "cancelling":
+                return self._cancelled(jid)
             raise RuntimeError("RunPod has no machine free right now - press Try again in a few minutes")
-        self.store.update(jid, status="running", pod_id=pod["id"], pod_hr=float(pod.get("costPerHr") or 0),
-                          pod_desc=desc, pod_started=time.time(), stage="Machine starting", progress=5)
+        # the pod is saved first (so a cancel or a crash from here on switches it off), then the film becomes
+        # "running" only if nobody pressed Stop while it was being rented
+        self.store.update(jid, pod_id=pod["id"], pod_hr=float(pod.get("costPerHr") or 0), pod_desc=desc,
+                          pod_started=time.time())
+        if not self.store.update_if(jid, ("starting",), status="running", stage="Machine starting", progress=5):
+            return self._cancelled(jid)
         self._watch(jid)
 
-    def _rent(self, api_key, name, env):
+    def _rent(self, api_key, name, env, stop=lambda: False):
         body = {"name": name, "imageName": "node:22-bookworm", "gpuCount": 1, "minRAMPerGPU": 32,
                 "containerDiskInGb": 60, "volumeInGb": 0, "dockerEntrypoint": ["bash", "-c"],
                 "dockerStartCmd": [POD_SCRIPT], "ports": []}
         for vcpu in (64, 48, 32, 24):
             for cloud in ("COMMUNITY", "SECURE"):
                 for gpu in GPUS:
+                    if stop():                               # Stop pressed while renting: rent nothing
+                        return None, ""
                     body.update(gpuTypeIds=[gpu], cloudType=cloud, minVCPUPerGPU=vcpu, env=dict(env, VCPU=str(vcpu)))
                     r = requests.post(f"{REST}/pods", json=body, timeout=60,
                                       headers={"Authorization": "Bearer " + api_key})
@@ -377,30 +393,38 @@ class Studio:
 
     def _watch(self, jid) -> None:
         j = self.store.job(jid)
-        b, K = self.bucket(), self.keys_of(jid, j["title"])
+        b, K = self.bucket(), self.keys_of(jid, j["title"], j.get("run") or "")
         rp = RunPod(self.keys().get("RUNPOD_API_KEY", ""))
         max_min = max(150, 60 + 6 * int(j["minutes"] or 10))
-        deadline = (j["pod_started"] or time.time()) + (max_min + 15) * 60
-        seen, last_pod_check = {}, time.time()
-        while time.time() < deadline:
-            j = self.store.job(jid)
+        started = j["pod_started"] or time.time()
+        deadline = started + (max_min + 15) * 60
+        seen, last_pod_check, got_log = {}, time.time(), False
+        while True:                                  # done.json first: a film that finished while the website was
+            j = self.store.job(jid)                  # down past its time limit is still read back
             if j["status"] == "cancelling":
                 return self._cancelled(jid)
             if b.exists(K["done"]):
                 break
+            if time.time() >= deadline:
+                if b.exists(K["video"]):             # the video arrived; done.json did not
+                    break
+                raise RuntimeError("the film took longer than its time limit; the machine was switched off")
             try:
                 log = b.get_bytes(K["log"]).decode("utf-8", "replace").splitlines()
             except S3Error:
                 log = []
             if log:
+                got_log = True
                 self._progress(jid, j, log, seen)
+            elif not got_log and time.time() - started > START_LIMIT_S:
+                raise RuntimeError("the machine never started working - press Try again")
             if time.time() - last_pod_check > 300:     # a pod RunPod took back never writes done.json
                 last_pod_check = time.time()
                 if not self._pod_exists(j["pod_id"]):
+                    if b.exists(K["done"]) or b.exists(K["video"]):
+                        break
                     raise RuntimeError("the machine stopped unexpectedly (RunPod took it back) - press Try again")
             self.stop.wait(20)
-        else:
-            raise RuntimeError("the film took longer than its time limit; the machine was switched off")
         self._finish(jid, b, K, rp)
 
     def _progress(self, jid, j, log, seen) -> None:
@@ -468,10 +492,20 @@ class Studio:
         fields = dict(finished=now, cost=json.dumps(cost), log_tail="\n".join(tail) or j["log_tail"])
         if not ok:
             fields["error"] = "the machine did not confirm it was switched off - check runpod.io"
-        if done.get("ok") and b.exists(K["video"]):
+        has_video = False
+        for _ in range(3):                           # the video object decides (the pod PUTs it whole or not at all)
+            try:
+                has_video = b.exists(K["video"])
+            except S3Error:
+                has_video = False
+            if has_video:
+                break
+            self.stop.wait(5)
+        if has_video and (done.get("ok") or not done):
             size = next((o["size"] for o in b.list(K["video"]) if o["key"] == K["video"]), 0)
             self.store.update(jid, status="done", stage="Finished", progress=100, video_key=K["video"],
                               video_mb=round(size / 1e6, 1), **fields)
+            shutil.rmtree(d / "inputs", ignore_errors=True)   # the server's disk is small; R2 keeps a copy
         else:
             why = done.get("why") or self._why(tail)
             self.store.update(jid, status="failed", stage="Stopped", error=f"the film did not finish: {why}"[:400],
@@ -497,7 +531,7 @@ class Studio:
             return out
         c = re.findall(r"Claude this run: Claude: .*?= \$([\d.]+)", text)
         g = re.findall(r"Gemini photo picks: .*?= \$([\d.]+)\)", text)
-        a = re.findall(r"from (\d+) drawings", text)
+        a = re.findall(r"AI on screen \d+ of \d+ from (\d+) drawings", text)
         if c:
             out["claude"] = round(float(c[-1]), 2)
         if g:
@@ -576,6 +610,8 @@ class Studio:
                     subprocess.run(["tar", "czf", str(tgz), "-C", str(d), "."], check=True)
                     shutil.move(str(tgz), out)
             b.put_file(key, out)
+            for p in (self.data / "pkg").glob("*.tgz"):      # R2 keeps it; the server's disk is small
+                p.unlink(missing_ok=True)
         return key, commit
 
     def sweep(self) -> list:
@@ -587,10 +623,13 @@ class Studio:
         if not r.ok:
             return []
         pods = r.json() if isinstance(r.json(), list) else r.json().get("pods", [])
-        owned = {j["pod_id"] for j in self.store.active() if j.get("pod_id")}
+        act = self.store.active()
+        owned = {j["pod_id"] for j in act if j.get("pod_id")}
+        renting = {POD_PREFIX + j["id"] for j in act if j["status"] in ("starting", "cancelling") and not j.get("pod_id")}
         gone = []
         for p in pods:
-            if str(p.get("name", "")).startswith(POD_PREFIX) and p.get("id") not in owned:
+            if str(p.get("name", "")).startswith(POD_PREFIX) and p.get("id") not in owned \
+                    and p.get("name") not in renting:
                 if self._terminate(p["id"]):
                     gone.append(p["id"])
                     self._note("sweep", f"switched off {p['id']} ({p.get('name')}): no film owns it")
@@ -601,7 +640,7 @@ class Studio:
     def _fake_run(self, jid) -> None:
         """Walks through the real stages in about a minute and makes a short test video from the voiceover."""
         j = self.store.job(jid)
-        b, K = self.bucket(), self.keys_of(jid, j["title"])
+        b, K = self.bucket(), self.keys_of(jid, j["title"], j.get("run") or "")
         speed = float(os.environ.get("MRTRUTH_WEB_FAKE_STEP", "2"))
         self.store.update(jid, status="running", pod_id="fake", pod_hr=0.89, pod_desc="test run, no machine",
                           pod_started=time.time())

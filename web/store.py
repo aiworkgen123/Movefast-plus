@@ -2,6 +2,7 @@
 
 A film's row is the whole truth about it - its status, where it is running (the pod), its progress, its cost and where
 its video is - so the website can be restarted at any moment and pick every running film up again (jobs.reattach)."""
+import hashlib
 import secrets
 import sqlite3
 import threading
@@ -22,6 +23,7 @@ CREATE TABLE IF NOT EXISTS jobs(
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
 """
 ACTIVE = ("queued", "starting", "running", "cancelling")
+_DUMMY = generate_password_hash(secrets.token_hex(16))   # an unknown name costs the same one check as a known one
 ROLES = ("owner", "member")
 
 
@@ -75,10 +77,15 @@ class Store:
 
     def check(self, name: str, password: str):
         got = self._run("SELECT * FROM users WHERE name=?", ((name or "").strip().lower(),))
-        if got and check_password_hash(got[0]["pw"], password or ""):
-            return {"name": got[0]["name"], "role": got[0]["role"]}
-        check_password_hash(generate_password_hash("x"), "y")     # the same time for an unknown name
-        return None
+        row = got[0] if got else None
+        ok = check_password_hash(row["pw"] if row else _DUMMY, password or "")
+        return {"name": row["name"], "role": row["role"]} if row and ok else None
+
+    def stamp(self, name: str) -> str:
+        """A short fingerprint of someone's current password: a sign-in carries it, so a new password (or a removed
+        and re-added name) ends every earlier sign-in."""
+        got = self._run("SELECT pw, created FROM users WHERE name=?", ((name or "").strip().lower(),))
+        return hashlib.sha256(f"{got[0]['pw']}|{got[0]['created']}".encode()).hexdigest()[:16] if got else ""
 
     def users(self) -> list:
         return self._run("SELECT name, role, created FROM users ORDER BY created")
@@ -117,6 +124,12 @@ class Store:
     def active(self) -> list:
         return self._run(f"SELECT * FROM jobs WHERE status IN ({','.join('?' * len(ACTIVE))}) ORDER BY created",
                          ACTIVE)
+
+    def update_if(self, jid: str, statuses, **fields) -> bool:
+        """update(), only while the film's status is one of `statuses`; True when it was."""
+        q = ",".join("?" * len(statuses))
+        return bool(self._run(f"UPDATE jobs SET {','.join(k + '=?' for k in fields)} WHERE id=? AND status IN ({q}) "
+                              "RETURNING id", (*fields.values(), jid, *statuses)))
 
     def update(self, jid: str, **fields) -> None:
         if fields:

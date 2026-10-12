@@ -15,11 +15,13 @@ import gzip
 import os
 import sys
 import tempfile
+import threading
 import time
 import zlib
 from pathlib import Path
 
 PREFIX = "mrtruth/verdicts/"
+_LOCK = threading.Lock()          # two films starting at once: one reads and compacts the chunks, then the other
 SETTLE_H = 4.0
 COMPACT_OVER = 12
 
@@ -43,6 +45,11 @@ def _age_h(modified: str, now: float) -> float:
 
 
 def prepare(b, run: str, mf: str, log=print, now: float = None) -> dict:
+    with _LOCK:
+        return _prepare(b, run, mf, log, now)
+
+
+def _prepare(b, run: str, mf: str, log=print, now: float = None) -> dict:
     """Before a pod starts: every chunk read and checked, the settled ones compacted when there are more than
     COMPACT_OVER, one seed (the good chunks joined: concatenated gzip members) and the key this run writes to."""
     sys.path.insert(0, str(mf))
@@ -51,7 +58,10 @@ def prepare(b, run: str, mf: str, log=print, now: float = None) -> dict:
     objs = sorted((o for o in b.list(PREFIX) if o["key"].endswith(".jsonl.gz")), key=lambda o: o["key"])
     good, bad, data, rows = [], [], {}, 0
     for o in objs:
-        raw = b.get_bytes(o["key"])
+        try:
+            raw = b.get_bytes(o["key"])
+        except Exception:                            # gone since the list (another website's compaction): skipped
+            continue
         n = _rows_ok(raw, verdicts._row)
         if n < 0:
             bad.append(o["key"])

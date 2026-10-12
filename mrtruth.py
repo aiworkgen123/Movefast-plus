@@ -9362,9 +9362,14 @@ def _music_under(engine, job: Path, audio: Path) -> Path:
         engine.log(f"  music: WARNING - {music.name} or the narration could not be read; the film has no music")
         return audio
     out = job / "voice_music.flac"
-    fc = (f"[0:a]aresample=48000,aformat=channel_layouts=stereo[v];"
-          f"[1:a]aresample=48000,aformat=channel_layouts=stereo,volume={vol / 100:.4f}[m];"
-          f"[v][m]amix=inputs=2:normalize=0:duration=first,"
+    # a mono file goes to both sides at its own level (aformat's upmix would take 3 dB off each side), and the music is
+    # cut at the voice's last sample, so the film keeps every sample of the narration (amix's duration=first ended the
+    # mix early on a FLAC voice by the limiter's look-ahead)
+    up = lambda p: ",pan=stereo|c0=c0|c1=c0" if _channels(p) == 1 else ",aformat=channel_layouts=stereo"
+    end = round(film * 48000)
+    fc = (f"[0:a]aresample=48000{up(audio)}[v];"
+          f"[1:a]aresample=48000{up(music)},volume={vol / 100:.4f},atrim=end_sample={end}[m];"
+          f"[v][m]amix=inputs=2:normalize=0:duration=longest,"
           f"alimiter=limit={MIX_CEILING}:attack=1:release=50:level=0:latency=1[a]")
     subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(audio), "-i", str(music),
                     "-filter_complex", fc, "-map", "[a]", "-c:a", "flac", str(out)], check=True)

@@ -61,6 +61,8 @@ def _started():
 def me():
     name = session.get("user")
     u = store.user(name) if name else None
+    if u and session.get("pv") != store.stamp(name):     # password changed or person removed since this sign-in
+        return None
     return u
 
 
@@ -81,6 +83,8 @@ def need(role="member"):
 @app.before_request
 def guard():
     _started()
+    if request.path != "/api/jobs":                     # only the film upload may be big
+        request.max_content_length = 1024 * 1024
     if request.method in ("POST", "PUT", "DELETE"):       # a form on another site cannot act as you
         origin = request.headers.get("Origin")
         if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
@@ -120,6 +124,7 @@ def login():
     session.clear()
     session.permanent = True
     session["user"] = u["name"]
+    session["pv"] = store.stamp(u["name"])
     return jsonify(user=u)
 
 
@@ -189,9 +194,23 @@ def job_log(jid):
     return jsonify(log=j.get("log_tail") or "")
 
 
+UPLOADS = {"n": 0}
+UPLOADS_LOCK = threading.Lock()
+
+
 @app.post("/api/jobs")
 @need()
 def create_job():
+    with UPLOADS_LOCK:                                  # the Update button waits for uploads in progress
+        UPLOADS["n"] += 1
+    try:
+        return _create_job()
+    finally:
+        with UPLOADS_LOCK:
+            UPLOADS["n"] -= 1
+
+
+def _create_job():
     u = me()
     f = request.form
     title = re.sub(r"\s+", " ", (f.get("title") or "")).strip()[:150]
@@ -211,6 +230,8 @@ def create_job():
         return jsonify(error=f"The voiceover must be audio ({', '.join(sorted(AUDIO))})."), 400
     script = (f.get("script_text") or "").strip()
     sfile = request.files.get("script")
+    if sfile and sfile.filename and script:
+        return jsonify(error="Choose either the script file or the pasted text, not both."), 400
     if sfile and sfile.filename:
         if Path(sfile.filename).suffix.lower() not in (".txt", ".md"):
             return jsonify(error="The script must be a .txt file (or paste it into the box)."), 400
@@ -277,6 +298,8 @@ def cancel_job(jid):
 @need()
 def retry_job(jid):
     j = store.job(jid) or abort(404)
+    if not _own(j):
+        return jsonify(error="Only the person who made it, or an owner, can try it again."), 403
     if j["status"] not in ("failed", "cancelled"):
         return jsonify(error="Only a stopped film can be tried again."), 400
     if not studio.inputs(jid).get("voice"):
@@ -428,15 +451,26 @@ def _version() -> dict:
 @need("owner")
 def update_tool():
     """Fetch the newest version of the tool (git pull) and restart the website; running films carry on."""
-    starting = [j for j in store.active() if j["status"] == "starting"]
-    if starting:
-        return jsonify(error="A film is starting right now; try again in a minute."), 400
-    p = subprocess.run(["git", "-C", str(J.CODE), "pull", "--ff-only"], capture_output=True, text=True, timeout=300)
+    with studio.lock:                                   # no film may start while the site restarts
+        studio.paused = True
+        busy = [j for j in store.active() if j["status"] == "starting"]
+    if busy or UPLOADS["n"]:
+        studio.paused = False
+        return jsonify(error="A film is starting or being uploaded right now; try again in a minute."), 400
+    try:
+        p = subprocess.run(["git", "-C", str(J.CODE), "pull", "--ff-only"], capture_output=True, text=True,
+                           timeout=300)
+    except (OSError, subprocess.SubprocessError) as e:
+        studio.paused = False
+        return jsonify(error=f"Update failed: {e}"), 500
     if p.returncode != 0:
+        studio.paused = False
         return jsonify(error="Update failed: " + (p.stderr or p.stdout)[-300:]), 500
     changed = "Already up to date" not in p.stdout
-    if changed:                                     # systemd starts the website again (Restart=always)
+    if changed:                                     # gunicorn starts a fresh worker with the new code; films carry on
         threading.Timer(1.5, lambda: os._exit(0)).start()
+    else:
+        studio.paused = False
     return jsonify(ok=True, changed=changed, version=_version())
 
 

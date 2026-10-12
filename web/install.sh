@@ -68,12 +68,7 @@ DOMAIN=${DOMAIN:-${OLD:-$FREE}}
 cat > /etc/caddy/Caddyfile <<CADDY
 $DOMAIN {
 	encode gzip
-	reverse_proxy 127.0.0.1:8080 {
-		transport http {
-			read_timeout 30m
-			write_timeout 30m
-		}
-	}
+	reverse_proxy 127.0.0.1:8080
 }
 CADDY
 cat > /etc/systemd/system/$SVC-web.service <<UNIT

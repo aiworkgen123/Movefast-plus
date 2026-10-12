@@ -5,6 +5,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -36,6 +37,10 @@ class Web(unittest.TestCase):
         cls.A.store.add_user("maria", "another password", "member")
         cls.voice = tone(cls.d / "v.mp3", 15)
         cls.music = tone(cls.d / "m.mp3", 5)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.d, ignore_errors=True)
 
     def client(self, who=None):
         c = self.A.app.test_client()
@@ -119,6 +124,7 @@ class Web(unittest.TestCase):
         import sqlite3
         from web.store import Store
         p = Path(tempfile.mkdtemp()) / "old.sqlite"
+        self.addCleanup(shutil.rmtree, p.parent, ignore_errors=True)
         db = sqlite3.connect(p)
         db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, status TEXT, music_db REAL, deleted INTEGER DEFAULT 0, "
                    "created REAL)")
@@ -171,6 +177,27 @@ class Web(unittest.TestCase):
         c.post("/api/settings", json={"clear": ["GEMINI_API_KEY"]})
         self.assertNotIn("GEMINI_API_KEY", keys_file.read_text())
 
+    def test_a_new_password_ends_earlier_sign_ins(self):
+        self.A.store.add_user("temp1", "first password", "member")
+        c = self.A.app.test_client()
+        c.post("/api/login", json={"name": "temp1", "password": "first password"})
+        self.assertEqual(c.get("/api/jobs").status_code, 200)
+        self.A.store.set_password("temp1", "second password")
+        self.assertEqual(c.get("/api/jobs").status_code, 401)
+
+    def test_only_the_upload_may_be_big(self):
+        r = self.client().post("/api/login", data=b"x" * (2 * 1024 * 1024), content_type="application/json")
+        self.assertEqual(r.status_code, 413)
+
+    def test_a_member_cannot_retry_someone_elses_film(self):
+        jid = self.new(self.client("owner1")).json["id"]
+        self.client("owner1").post(f"/api/jobs/{jid}/cancel", json={})
+        self.assertEqual(self.client("maria").post(f"/api/jobs/{jid}/retry", json={}).status_code, 403)
+
+    def test_file_and_pasted_script_together_is_refused(self):
+        r = self.new(self.client("maria"), script_text="pasted words " * 20)
+        self.assertIn("not both", r.json["error"])
+
     def test_people(self):
         c = self.client("owner1")
         self.assertEqual(c.post("/api/users", json={"name": "Juan", "password": "short"}).status_code, 400)
@@ -183,10 +210,102 @@ class Web(unittest.TestCase):
         self.assertIsNone(self.A.store.user("juan"))
 
 
+class Fixes(unittest.TestCase):
+    """The review of 2026-10-12: Try again, Stop while renting, a late read-back, sign-ins ending with a new password."""
+
+    def setUp(self):
+        from web.jobs import Studio, LocalBucket
+        from web.store import Store
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.s = Studio(Store(self.d / "s.sqlite"), self.d)
+        self.b = LocalBucket(self.d / "bucket")
+        self.s.bucket = lambda: self.b
+        self.s.missing_keys = lambda: []
+        self.s.keys = lambda: {"RUNPOD_API_KEY": "k"}
+        self.s.package = lambda b: ("mrtruth/pkg/x.tgz", "abc123def456")
+        self.rented, self.ended = [], []
+        self.s._terminate = lambda pid: self.ended.append(pid) or True
+        self.s._pod_exists = lambda pid: True
+        self.s.stop.wait = lambda t=None: None
+        import web.jobs as J
+        self.J = J
+        self.vs = mock.patch.object(J.VS, "env_for", lambda b, run, mf, keys, log=None: {"RUN_ID": run, "_mine": "m"})
+        self.vs.start()
+        self.addCleanup(self.vs.stop)
+
+    def job(self):
+        jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=1, seconds=60)
+        ins = self.s.folder(jid) / "inputs"
+        ins.mkdir(parents=True)
+        (ins / "voice.mp3").write_bytes(b"v")
+        (ins / "script.txt").write_text("s")
+        self.s.store.update(jid, status="starting")
+        return jid
+
+    def rent(self, pod_writes=None):
+        def fake(api, name, env, stop=lambda: False):
+            if stop():
+                return None, ""
+            pid = f"pod{len(self.rented) + 1}"
+            self.rented.append(pid)
+            if pod_writes:
+                pod_writes(self.s.store.job(name[len(self.J.POD_PREFIX):]))
+            return {"id": pid, "costPerHr": 0.89}, "test"
+        self.s._rent = fake
+
+    def test_try_again_never_reads_the_earlier_attempts_answer(self):
+        jid = self.job()
+        def failed_pod(j):
+            K = self.s.keys_of(jid, "T", j["run"])
+            self.b.put_bytes(K["done"], b'{"ok":false,"why":"planning error: credit"}')
+        self.rent(failed_pod)
+        self.s._guard(jid, self.s._run)
+        self.assertIn("credit", self.s.store.job(jid)["error"])
+        self.s.store.update(jid, status="starting", pod_id=None, error=None)
+        time.sleep(1.1)                                      # a new attempt name (seconds)
+        def good_pod(j):
+            K = self.s.keys_of(jid, "T", j["run"])
+            self.b.put_bytes(K["video"], b"video")
+            self.b.put_bytes(K["done"], b'{"ok":true}')
+        self.rent(good_pod)
+        self.s._guard(jid, self.s._run)
+        j = self.s.store.job(jid)
+        self.assertEqual((j["status"], j["error"]), ("done", None))
+
+    def test_stop_while_renting_switches_the_new_pod_off(self):
+        jid = self.job()
+        self.rent(lambda j: self.s.store.update(jid, status="cancelling"))   # Stop pressed during the rent
+        self.s._guard(jid, self.s._run)
+        self.assertEqual(self.s.store.job(jid)["status"], "cancelled")
+        self.assertEqual(self.ended, ["pod1"])
+
+    def test_a_film_done_while_the_site_was_down_past_its_limit_is_read_back(self):
+        jid = self.job()
+        run = "web-x-1"
+        K = self.s.keys_of(jid, "T", run)
+        self.b.put_bytes(K["video"], b"video")
+        self.b.put_bytes(K["done"], b'{"ok":true}')
+        self.s.store.update(jid, status="running", pod_id="p", run=run, pod_started=time.time() - 10 * 3600)
+        self.s._guard(jid, self.s._reattach)
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+
+    def test_a_pod_that_never_logs_is_switched_off(self):
+        jid = self.job()
+        self.s.store.update(jid, status="running", pod_id="p", run="web-y-1",
+                            pod_started=time.time() - self.J.START_LIMIT_S - 60)
+        self.s._guard(jid, self.s._reattach)
+        j = self.s.store.job(jid)
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("never started", j["error"])
+        self.assertEqual(self.ended, ["p"])
+
+
 class Parts(unittest.TestCase):
     def test_costs_read_from_the_film_log(self):
         from web.jobs import Studio
         d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         log = ("  Claude this run: Claude: 17 calls, 170k in / 56k out = $0.8942 — claude-sonnet-5\n"
                "  Gemini photo picks: 438 (1698k in, 83k out, 0k thinking = $1.59), 0 handed to Claude\n"
                "  reuse on the final cut: ... AI on screen 39 of 44 from 52 drawings (52 of the 88 budget)\n").encode()
@@ -206,6 +325,7 @@ class Parts(unittest.TestCase):
         from web.jobs import Studio, LocalBucket
         from web.store import Store
         d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         s = Studio(Store(d / "s.sqlite"), d)
         key, commit = s.package(LocalBucket(d / "bucket"))
         with tarfile.open(d / "bucket" / key) as t:

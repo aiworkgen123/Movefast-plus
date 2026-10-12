@@ -2,6 +2,7 @@
 ducked, at MRTRUTH_MUSIC_DB under the voice; nothing changes without it.
     python -m unittest tests/test_mrtruth_music.py"""
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,7 @@ class Music(unittest.TestCase):
 
     def setUp(self):
         self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
         # a "voice": a 300 Hz tone spoken in 2 s phrases with 0.6 s pauses (30 s); "songs" of 12 s and 45 s
         self.voice = _gen(self.d / "voice.wav", "0.25*sin(2*PI*300*t)*lt(mod(t,2.6),2)", 30)
         self.short = _gen(self.d / "short.wav", "0.3*sin(2*PI*440*t)|0.3*sin(2*PI*660*t)", 12, "stereo")
@@ -54,7 +56,7 @@ class Music(unittest.TestCase):
         bed = self.d / f"bed_{song.stem}_{volume}.wav"            # the music alone: the mix less the voice
         if out != self.voice:
             subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(out), "-i", str(self.voice), "-filter_complex",
-                            "[1:a]aresample=48000,aformat=channel_layouts=stereo,volume=-1[v];[0:a][v]amix=inputs=2:"
+                            "[1:a]aresample=48000,pan=stereo|c0=c0|c1=c0,volume=-1[v];[0:a][v]amix=inputs=2:"
                             "normalize=0[d]", "-map", "[d]", str(bed)], check=True)
         return out, bed, e
 
@@ -90,6 +92,30 @@ class Music(unittest.TestCase):
         self.assertGreater(_mean_db(bed, 11, 0.5), -20)            # still playing
         self.assertLess(_mean_db(bed, 14, 2), -80)                 # then silence: not looped
         self.assertIn("ends 18s before the film", e.lines[-1])
+
+    def test_every_sample_of_a_flac_voice_is_kept(self):
+        """The review's case: a film with his template sounds hands over a stereo 48 kHz FLAC; the film keeps its length."""
+        flac = self.d / "voice_sfx.flac"
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(self.voice), "-ar", "48000", "-ac", "2",
+                        str(flac)], check=True)
+        with mock.patch.dict(os.environ, {"MRTRUTH_MUSIC": str(self.long), "MRTRUTH_MUSIC_VOLUME": ""}):
+            out = M._music_under(E(), self.d, flac)
+        n = lambda p: int(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-count_packets",
+                                          "-show_entries", "stream=duration_ts", "-of", "csv=p=0", str(p)],
+                                         capture_output=True, text=True).stdout.strip().split(",")[0] or 0)
+        self.assertAlmostEqual(M._seconds_of(out), M._seconds_of(flac), delta=0.005)
+        self.assertEqual(n(out), n(flac))
+
+    def test_a_mono_voice_and_mono_music_keep_their_level(self):
+        mono = _gen(self.d / "mono_song.wav", "0.3*sin(2*PI*440*t)", 40)
+        hush = _gen(self.d / "hush.wav", "0.0001*sin(2*PI*300*t)", 30)
+        with mock.patch.dict(os.environ, {"MRTRUTH_MUSIC": str(mono), "MRTRUTH_MUSIC_VOLUME": ""}):
+            out = M._music_under(E(), self.d, hush)
+        self.assertAlmostEqual(_mean_db(out, 10, 1), _mean_db(mono, 10, 1), delta=0.3)      # no -3 dB per side
+        quiet = _gen(self.d / "quiet_song.wav", "0.00001*sin(2*PI*440*t)", 40)
+        with mock.patch.dict(os.environ, {"MRTRUTH_MUSIC": str(quiet), "MRTRUTH_MUSIC_VOLUME": ""}):
+            out = M._music_under(E(), self.d, self.voice)
+        self.assertAlmostEqual(_mean_db(out, 10, 1), _mean_db(self.voice, 10, 1), delta=0.3)   # the voice too
 
     def test_volume_setting(self):
         for v, want in (("", 100.0), ("100", 100.0), ("35", 35.0), ("250", 100.0), ("-3", 0.0), ("loud", 100.0)):

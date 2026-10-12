@@ -95,6 +95,8 @@ td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
   .drops{grid-template-columns:1fr}
   .key{grid-template-columns:1fr}
   header .who{display:none}
+  header .wrap{height:auto;min-height:58px;flex-wrap:wrap;padding-top:8px;padding-bottom:8px}
+  header nav{margin-left:0;flex-wrap:wrap}
 }
 </style>
 </head>
@@ -300,7 +302,10 @@ $$('.drop').forEach(z => {
   z.ondrop = e => { e.preventDefault(); z.classList.remove('over'); set(e.dataTransfer.files[0]); };
 });
 $('#mvol').oninput = () => $('#mvolText').textContent = $('#mvol').value + '%';
-$('#pasteLink').onclick = e => { e.preventDefault(); e.stopPropagation(); $('#pasteBox').classList.toggle('hide'); $('#stext').focus(); };
+$('#pasteLink').onclick = e => { e.preventDefault(); e.stopPropagation();
+  const z = $('.drop[data-for=script]');                // pasted text replaces an attached file
+  z.querySelector('input[type=file]').value=''; z.classList.remove('has'); z.querySelector('.file').textContent=''; z.querySelector('.x')?.remove();
+  $('#pasteBox').classList.toggle('hide'); $('#stext').focus(); };
 
 $('#newForm').onsubmit = e => {
   e.preventDefault(); $('#newErr').textContent='';
@@ -361,14 +366,21 @@ function film(j){
 async function refresh(){
   clearTimeout(timer);
   if (!ME) return;
+  if (document.fullscreenElement || document.webkitFullscreenElement){ timer = setTimeout(refresh, 5000); return; }   // a film being watched full screen
   const d = await api('/api/jobs');
   if (d.error){ timer = setTimeout(refresh, 15000); return; }
   const list = $('#list');
   // a video being watched is not redrawn (it would restart)
   const keep = {}; playing.forEach(id => { const v = $('#f-'+id+' video'); if (v) keep[id] = v; });
+  const keepLog = {}; openLogs.forEach(id => { const l = $('#log-'+id); if (l) keepLog[id] = l; });
   list.innerHTML = d.jobs.length ? d.jobs.map(film).join('') : '<div class="empty">No films yet. Add one above.</div>';
   Object.entries(keep).forEach(([id,v]) => { const n = $('#f-'+id+' video'); if (n) n.replaceWith(v); });
-  openLogs.forEach(async id => { const l = $('#log-'+id); if (l){ const r = await api('/api/jobs/'+id+'/log'); l.textContent = r.log || '(nothing yet)'; l.scrollTop = l.scrollHeight; } });
+  Object.entries(keepLog).forEach(([id,l]) => { const n = $('#log-'+id); if (n) n.replaceWith(l); });
+  openLogs.forEach(async id => { const l = $('#log-'+id); if (!l) return;
+    const r = await api('/api/jobs/'+id+'/log'), t = r.log || '(nothing yet)';
+    if (l.textContent === t) return;
+    const atEnd = l.scrollHeight - l.scrollTop - l.clientHeight < 30 || l.textContent === 'Loading…';
+    l.textContent = t; if (atEnd) l.scrollTop = l.scrollHeight; });
   $('#busy').textContent = d.busy ? `${d.busy} in progress · up to ${d.max_parallel} at once` : '';
   timer = setTimeout(refresh, d.busy ? 5000 : 30000);
 }
