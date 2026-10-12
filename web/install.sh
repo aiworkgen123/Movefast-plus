@@ -19,7 +19,12 @@ fi
 echo "== 1/6 system packages (a few minutes the first time)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3-venv python3-pip git ffmpeg caddy ufw curl ca-certificates >/dev/null
+apt-get install -y -qq python3-venv python3-pip git ffmpeg ufw curl ca-certificates gnupg >/dev/null
+if ! apt-get install -y -qq caddy >/dev/null 2>&1; then          # not in this image's lists: Caddy's own repository
+  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -qq && apt-get install -y -qq caddy >/dev/null
+fi
 if [ "$(free -m | awk '/Mem/{print $2}')" -lt 1900 ] && ! swapon --show | grep -q .; then
   fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
   grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
