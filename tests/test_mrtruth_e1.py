@@ -126,10 +126,22 @@ class Recheck(Tmp):
     def test_a_crop_still_framed_is_refused_and_remembered(self):
         src = textured(self.d / "pics" / "w2.jpg", 13, size=(2400, 1350))
         gem = Gem(lambda cap, p: {"frame": True})                         # a mount wider than the crop
-        v = M._crop_recheck(Engine(gem), self.row, {"photo": str(src), "title": "framed", "bad": ["frame"]}, {})
+        with mock.patch.object(M, "JUDGE_MEDIA", "MEDIUM"):
+            v = M._crop_recheck(Engine(gem), self.row, {"photo": str(src), "title": "framed", "bad": ["frame"]}, {})
         self.assertEqual(v["bad"], ["frame"])
         self.assertFalse(M._usable(self.row, v))
         self.assertEqual(M.VERDICTS["store"].dirty(v["pid"], M._QSET, 2), "frame")   # no other line sends it again
+
+    def test_a_low_look_is_refused_but_not_remembered_as_framed(self):
+        """Option A's LOW pictures: the crop is refused on its line, but a LOW look never marks it framed for the others
+        (verdicts.DIRTY_MIN: a LOW look misses small marks and finds ones that are not there)."""
+        src = textured(self.d / "pics" / "w3.jpg", 14, size=(2400, 1350))
+        gem = Gem(lambda cap, p: {"frame": True})
+        with mock.patch.object(M, "JUDGE_MEDIA", "LOW"):
+            v = M._crop_recheck(Engine(gem), self.row, {"photo": str(src), "title": "framed", "bad": ["frame"]}, {})
+        self.assertEqual(v["bad"], ["frame"])
+        self.assertFalse(M._usable(self.row, v))
+        self.assertEqual(M.VERDICTS["store"].dirty(v["pid"], M._QSET, "LOW"), "")
 
 
 class InPictures(Tmp):

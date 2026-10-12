@@ -1,9 +1,9 @@
-"""Mr Truth: round 2 of the Flash-Lite fixes (2026-10-11) - the century decided in code (the "made" answer read as
-years, compared with the line's own time on a specific line only, never against the very place the shot names), the
-yes/no "same" on a specific line, the AI-picture checks on their own model (MRTRUTH_AI_CHECK_MODEL) and a defect
-answered in words, three more free frame tests (a thin border, a narrow gap, a transparency checkerboard), ticket and
-tour sellers and facsimile shops refused, CHECK_V 3. Synthetic data, plus the retest's real pictures when they are on
-this machine. No network, no paid call.
+"""Mr Truth: the parts of round 2 of the Flash-Lite fixes (2026-10-11) kept when the checks went back to 6f07aab's
+questions on 3.8 (impl-q): the AI-picture checks on their own model (MRTRUTH_AI_CHECK_MODEL, 3.8 by default - the
+key of 6f07aab's AI checks), a defect answered in words, three more free frame tests (a thin border, a narrow gap, a
+transparency checkerboard), ticket and tour sellers and facsimile shops refused. The century decided in code ("made",
+_date_off) and the yes/no "same" are gone with the questions that asked them. Synthetic data, plus the retest's real
+pictures when they are on this machine. No network, no paid call.
 
     .venv/bin/python -m unittest tests.test_mrtruth_lite2 -v
 """
@@ -21,247 +21,9 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mrtruth as M  # noqa: E402
-from test_mrtruth_a2 import Tmp, answer  # noqa: E402
+from test_mrtruth_a2 import Tmp  # noqa: E402
 
 PICS2 = Path("/tmp/claude-0/-home-user/d74c83cb-cfd3-57f8-84b9-8fa3957981a4/scratchpad/verify/flcmp2/pics")
-NOW = M.YEAR_NOW
-
-# the retest film's dossier, cut down: a catch-all period, the manuscript's date in its note, a stand-in
-DOSSIER = {
-    "topic": "a priest's memorised passage", "setting": "the Vatican Apostolic Library; Egypt",
-    "period": "Late antique manuscript origins (4th-5th century) investigated through late 20th century and present day",
-    "keyEntities": [
-        {"name": "Father Emilio Restivo", "kind": "person", "note": "Sicilian priest and Latinist"},
-        {"name": "Vatican Apostolic Library", "kind": "organisation", "note": "Institution that restricted the text"},
-        {"name": "the manuscript", "kind": "artifact", "note": "Uncatalogued fourth or fifth century Latin text",
-         "canonicalSearchName": "Late antique Latin manuscript"},
-        {"name": "the Apostolic Tradition", "kind": "work", "note": "Third century document mentioning prayers"},
-        {"name": "early Church fathers", "kind": "idea", "note": "Patristic writers on the soul"},
-    ],
-    "visualBrief": {"tone": "hushed", "people": [
-        {"name": "Father Emilio Restivo", "surname": "Restivo", "likenessKnown": False, "role": "priest",
-         "commons": "Catholic priest portrait", "web": "priest reading manuscript"}]},
-}
-CATCH_ALL = DOSSIER["period"]
-
-
-def row(text, **kw):
-    return dict({"text": text, "entities": [], "era": ""}, **kw)
-
-
-def ans(**kw):
-    return M._answer(answer(1, **kw), era=True, same="same" in kw)
-
-
-# ── the date parser ────────────────────────────────────────────────────────────────────────────────────────────────
-class Dates(unittest.TestCase):
-    def test_many_formats(self):
-        cases = {
-            "4th-5th century": [(300, 499)], "late 12th-century": [(1160, 1199)], "14th-c. charter": [(1300, 1399)],
-            "16th c. hall": [(1500, 1599)], "fourth or fifth century": [(300, 499)],
-            "8th-7th century BCE terracotta": [(-800, -601)], "6th century BC plaque": [(-600, -501)],
-            "7th-century BCE relief": [(-700, -601)], "mid-20th century photo": [(1930, 1969)],
-            "early 16th century tile": [(1500, 1539)], "late 19th-early 20th c. ledger": [(1860, 1939)],
-            "c. 520-510 BC plaque": [(-545, -485)], "c.1320 Gothic charter": [(1295, 1345), (1150, 1500)],
-            "1540-50 relief": [(1540, 1550)], "c.1540-50 relief": [(1530, 1560)], "1881-1913 ledger": [(1881, 1913)],
-            "1308 parchment": [(1308, 1308)], "late 1980s": [(1985, 1989)], "the 1890s": [(1890, 1899)],
-            "1980s-1990s": [(1980, 1989), (1990, 1999)], "before 911 fragment": [(711, 911)],
-            "pre-911 folio": [(711, 911)], "c. 100 CE papyrus": [(75, 125)], "c. 512 codex": [(487, 537)],
-            "c. 2500 BC pyramids": [(-2525, -2475)], "twenty-first century": [(2000, 2099)],
-            "late antique Mediterranean": [(250, 700)], "9th-century Carolingian codex": [(800, 899), (750, 900)],
-        }
-        for text, want in cases.items():
-            self.assertEqual(M._dates(text), want, text)
-
-    def test_not_years(self):
-        for text in ("Papyrus 121 on a board", "P46, a papyrus", "512 pages", "seven manuscripts", "room 12",
-                     "the year 2999", "a 3-4 page letter", ""):
-            self.assertEqual(M._dates(text, words=False), [], text)
-
-    def test_era_words(self):
-        self.assertEqual(M._dates("medieval Byzantine mosaic"), [(600, 1500), (330, 1453)])
-        self.assertEqual(M._dates("early medieval binding"), [(500, 1000)])         # not "medieval" again
-        self.assertEqual(M._dates("the early Church fathers"), [(100, 450)])
-        self.assertEqual(M._dates("Ancient Egyptian papyrus"), [(-3100, 395)])
-        # a narration line's loose words are not dates: the Roman Curia, a byzantine rule, a renaissance of interest
-        self.assertEqual(M._line_dates("the Roman Curia's byzantine rules saw a renaissance of interest"), [])
-        self.assertEqual(M._line_dates("late antique and early Christian writing"), [(250, 700), (30, 600)])
-        self.assertEqual(M._line_dates("The Apostolic Tradition, a third century document"), [(200, 299)])
-
-    def test_made_is_the_thing_not_the_photo(self):
-        mw = M._made_when
-        self.assertEqual(mw("modern photo of 16th-c. Vatican Library hall"), ((1500, 1599), False))
-        self.assertEqual(mw("2021 photo of Vatican Library"), (None, False))     # the thing has no date
-        self.assertEqual(mw("photo of 3rd-c. Roman catacomb"), ((200, 299), False))
-        self.assertEqual(mw("modern facsimile of c.400 Latin manuscript"), ((375, 425), False))
-        self.assertEqual(mw("19th-century reproduction of a medieval manuscript"), ((600, 1500), False))
-        self.assertEqual(mw("1893 painting by Edvard Munch"), ((1893, 1893), True))
-        self.assertEqual(mw("19th-century book illustration of medieval manuscript"), ((1800, 1899), True))
-        self.assertEqual(mw("16th-century frescoed Vatican Library hall, modern photo"), ((1500, 1599), False))
-        self.assertEqual(mw("medieval Byzantine mosaic"), ((600, 1453), False))  # adjacent words narrow each other
-        self.assertEqual(mw("ancient/early medieval bookbinding"), ((-3000, 500), False))   # "/": the first
-        self.assertEqual(mw("late antique papyri and a 19th-c. painting"), ((250, 700), False))   # the first thing
-        self.assertEqual(mw("modern digital graphic"), ((1950, NOW), False))
-        self.assertEqual(mw("contemporary press photograph"), ((1950, NOW), True))
-        self.assertEqual(mw("Islamic manuscript binding"), (None, False))
-        self.assertEqual(mw(""), (None, False))
-
-    def test_a_beats_period(self):
-        po = M._period_of
-        self.assertEqual(po("4th-5th century, origin"), [(300, 499)])
-        self.assertEqual(po("late 1980s-1990s, Italy"), [(1985, 1999)])
-        self.assertEqual(po("ancient Egypt"), [(-3100, 395)])
-        self.assertEqual(po(CATCH_ALL), [])                                        # two times far apart: a catch-all
-        self.assertEqual(po("17th century to the present day"), [])              # a past time and today
-        self.assertEqual(po("Vatican Apostolic Library, undated"), [])
-        self.assertEqual(po("the Vatican Library"), [])
-        self.assertEqual(po("today"), [])
-
-
-class DateOff(unittest.TestCase):
-    late_antique, eighties = [(300, 499)], [(1985, 1989)]
-    film = M._merge_years(M._dates(CATCH_ALL))
-
-    def test_made_later(self):
-        off = M._date_off
-        self.assertEqual(off("9th-century Carolingian manuscript", self.late_antique), "made later")
-        self.assertEqual(off("c.1320 charter", [(30, 600)]), "made later")
-        self.assertEqual(off("medieval document with seal", self.late_antique), "made later")   # 600 > 499 + 100
-        self.assertEqual(off("6th-century Ravenna mosaic", [(200, 299)]), "made later")
-        self.assertEqual(off("6th-century Latin manuscript", self.late_antique), "")    # within the 100-year margin
-        self.assertEqual(off("medieval Byzantine folio", [(250, 700)]), "")             # touching: not clearly apart
-        self.assertEqual(off("1930 painting", [(1800, 1849)]), "made later")             # 50 years after 1500
-        self.assertEqual(off("1893 painting", [(1800, 1849)]), "")
-        self.assertEqual(off("2010s photo of a 1980s office", self.eighties), "")       # the era question's
-
-    def test_older(self):
-        off = M._date_off
-        self.assertEqual(off("19th-century book illustration of medieval manuscript", [(1985, 1999)]), "an older picture")
-        self.assertEqual(off("mid-20th-century black-and-white photograph", self.eighties), "")   # within 50 years
-        self.assertEqual(off("15th-century book of hours", self.eighties, self.film), "an older thing")
-        self.assertEqual(off("5th-century leather-bound codex", self.eighties, self.film), "")    # the film's own time
-        self.assertEqual(off("16th-century Sistine Hall", self.eighties, self.film), "")          # a hall stays
-        self.assertEqual(off("modern photo of ancient catacomb", self.eighties, self.film), "")   # a place stays
-        self.assertEqual(off("c. 1st-2nd century Greek papyrus", self.late_antique), "")        # older, older line
-        self.assertEqual(off("c. 520-510 BC Greek plaque", self.late_antique), "")
-
-    def test_unknown_is_never_refused(self):
-        self.assertEqual(M._date_off("AI render", self.late_antique), "")
-        self.assertEqual(M._date_off("9th-century codex", []), "")
-        self.assertEqual(M._date_off("", self.late_antique), "")
-
-    def test_fits_any_of_the_lines_times(self):
-        both = [(250, 700), (1985, 1989)]
-        self.assertEqual(M._date_off("c. 512 Byzantine codex", both, self.film), "")
-        self.assertEqual(M._date_off("1851 book engraving", both, self.film), "made later")
-
-
-# ── the line: specific or abstract, its own time, the places it names ─────────────────────────────────────────────
-class Line(unittest.TestCase):
-    def test_catch_all_and_undated_lines_have_no_period(self):
-        w = M._line_when(row("Consciousness persisted."), DOSSIER)
-        self.assertEqual((w["specific"], w["periods"]), (False, []))
-        w = M._line_when(row("Until that moment, the dead remained witnesses.", era=CATCH_ALL), DOSSIER)
-        self.assertEqual((w["specific"], w["periods"]), (False, []))
-        w = M._line_when(row("That phrase did not indicate heresy."), DOSSIER, names=["Vatican archive ledger"])
-        self.assertEqual((w["specific"], w["periods"]), (True, []))            # specific, but undated: no date check
-        w = M._line_when(row("A file was closed.", era="Vatican Apostolic Library, undated"), DOSSIER,
-                         names=["access record"])
-        self.assertEqual(w["periods"], [])
-
-    def test_the_lines_own_time(self):
-        w = M._line_when(row("Not symbolically.", era="4th-5th century, origin"), DOSSIER, names=["Latin manuscript folio"])
-        self.assertEqual((w["specific"], w["periods"]), (True, [(300, 499)]))
-        # mid-sentence: the line before gives the date (and names the Apostolic Tradition)
-        w = M._line_when(row("prayers said over the body, implying some continued connection."), DOSSIER,
-                         before="The Apostolic Tradition, a third century document, mentioned")
-        self.assertEqual((w["specific"], w["periods"]), (True, [(200, 299)]))
-        # no date of its own: the dossier's note on what it names ("the manuscript": fourth or fifth century)
-        w = M._line_when(row("The Latin was deliberate."), DOSSIER, names=["Latin manuscript script"])
-        self.assertEqual(w["periods"], [(300, 499)])
-        # its own era and its sentence's dates together
-        w = M._line_when(row("priest and Latinist brought in by the Library in the late 1980s to", era="late 1980s"),
-                         DOSSIER, after="assist with a condition assessment of several late antique codices.")
-        self.assertEqual(w["periods"], [(250, 700), (1985, 1989)])
-        # a line that stops mid-sentence takes the next one; the next line's own full stop ends it
-        self.assertEqual(M._line_sentence(row("He read it."), "before", "after"), "He read it.")
-        w = M._line_when(row("The dominant position in the writings of the early Church fathers held"), DOSSIER,
-                         after="that the soul departed immediately.")
-        self.assertEqual(w["periods"], [(100, 450)])
-        self.assertEqual(w["film"], [(250, 700), (1960, 1999)])
-
-    def test_specific(self):
-        self.assertTrue(M._line_when(row("He waited.", about="Father Emilio Restivo"), DOSSIER)["specific"])
-        self.assertTrue(M._line_when(row("Restivo read on."), DOSSIER)["specific"])          # a key person, by surname
-        self.assertTrue(M._line_when(row("He read.", entities=["Codex Vaticanus"]), DOSSIER,
-                                     names=["Codex Vaticanus"])["specific"])
-        self.assertTrue(M._line_when(row("The text was older than the 9th century."), DOSSIER)["specific"])  # a date
-        self.assertFalse(M._line_when(row("It describes awareness.", about="no one in particular"), DOSSIER)["specific"])
-
-    def test_places_name_which_one_never_a_person(self):
-        w = M._line_when(row("He worked there.", entities=["Vatican Apostolic Library", "Restivo"]), DOSSIER,
-                         names=["Vatican Apostolic Library", "Restivo"], stand=DOSSIER["visualBrief"]["people"][0])
-        self.assertEqual(w["places"], ["vatican"])
-        a = {"shows": "kind", "made": "1794 print after Giuseppe Vasi", "subject": "vatican library long gallery"}
-        self.assertTrue(M._same_place(a, w))
-        self.assertFalse(M._same_place(dict(a, subject="a long gallery"), w))
-        self.assertTrue(M._same_place({"shows": "exact"}, {}))                    # the very thing it names
-        self.assertFalse(M._same_place({"shows": "exact", "person": True}, {}))   # a later picture of a person is not
-
-
-# ── the decision ───────────────────────────────────────────────────────────────────────────────────────────────────
-class Decide(unittest.TestCase):
-    late = M._line_when(row("Not symbolically.", era="4th-5th century, origin"), DOSSIER, names=["Latin manuscript folio"])
-    abstract = M._line_when(row("The grief spoken.", era="4th-5th century, Mediterranean"), DOSSIER)
-    library = M._line_when(row("Several texts in the Library's holdings date to this period.",
-                               era="4th-5th century texts, Vatican archive", entities=["Vatican Apostolic Library"]),
-                           DOSSIER, names=["Vatican Apostolic Library"])
-
-    def test_another_century_is_no_on_a_specific_line_only(self):
-        a = ans(shows="kind", made="9th-century Carolingian manuscript", modern="")
-        v = M._verdict({"title": "t"}, a, line=self.late)
-        self.assertEqual((v["shows"], v["tier"], v["clean"], v["date_off"]), ("no", M.NO, True, "made later"))
-        self.assertFalse(M._usable({"text": "x"}, v))
-        v = M._verdict({"title": "t"}, ans(shows="kind", made="1893 painting by Edvard Munch", modern=""),
-                       line=self.abstract)
-        self.assertEqual((v["shows"], v.get("date_off")), ("kind", None))      # an abstract line: the model's own call
-        v = M._verdict({"title": "t"}, a)                                       # no line given: as answered
-        self.assertEqual(v["shows"], "kind")
-        v = M._verdict({"title": "t"}, ans(shows="kind", made="5th-century folio", modern=""), line=self.late)
-        self.assertEqual(v["shows"], "kind")
-
-    def test_the_same_named_place_at_another_time_is_that_place(self):
-        for made, subject in (("16th-century Vatican Library interior", "reading room"),
-                              ("1794 print", "vatican library gallery")):
-            v = M._verdict({}, ans(shows="kind", made=made, subject=subject, modern=""), line=self.library)
-            self.assertEqual((v["shows"], v.get("date_off")), ("kind", None), made)
-        v = M._verdict({}, ans(shows="kind", made="16th-century Renaissance hall", subject="a hall", modern=""),
-                       line=self.library)
-        self.assertEqual((v["shows"], v["date_off"]), ("no", "made later"))    # not shown to be that very one
-
-    def test_same_false_is_no_on_a_specific_line(self):
-        v = M._verdict({}, ans(shows="kind", made="5th-century stone lintel", same=False, modern=""), line=self.late)
-        self.assertEqual((v["shows"], v["not_same"]), ("no", True))
-        self.assertIn("not the line's kind of thing", v["reason"])
-        v = M._verdict({}, ans(shows="exact", made="5th-century codex", same=False, modern=""), line=self.late)
-        self.assertEqual(v["shows"], "exact")                                  # the very thing named: kept
-        v = M._verdict({}, ans(shows="kind", made="16th-c. hall", subject="vatican reading room", same=False,
-                               modern=""), line=self.library)
-        self.assertEqual(v["shows"], "kind")                                   # the named place: kept
-        v = M._verdict({}, ans(shows="kind", made="5th-century stone lintel", same=False, modern=""),
-                       line=self.abstract)
-        self.assertEqual(v["shows"], "kind")                                   # never on an abstract line
-        v = M._verdict({}, ans(shows="kind", made="5th-century codex", same=True, modern=""), line=self.late)
-        self.assertEqual((v["shows"], v.get("not_same")), ("kind", None))
-
-    def test_same_answer_parsing(self):
-        self.assertIs(M._answer(answer(1, same="false"), era=False, same=True)["same"], False)
-        self.assertIs(M._answer(answer(1, same="no, a library hall"), era=False, same=True)["same"], False)
-        self.assertIs(M._answer(answer(1), era=False, same=True)["same"], True)     # not said: not refused
-        self.assertIs(M._answer(answer(1, same="a codex page"), era=False, same=True)["same"], True)
-        self.assertNotIn("same", M._answer(answer(1, same=False), era=False))        # not asked: not read
-        a = M._answer({"real": True, "text": False, "frame": False, "banned": False, "same": False}, era=False, same=True)
-        self.assertEqual((a["shows"], a["same"]), ("", False))                     # no shows: refused for not same
 
 
 class SentenceAnswers(unittest.TestCase):
@@ -340,6 +102,7 @@ print(json.dumps({"calls": [[c[k] for k in ("purpose", "model", "thinking", "med
         self.assertEqual(got["calls"][1][1:3], ["gemini-3.5-flash-lite", "minimal"])
         default = self.run_with()
         self.assertEqual([c[1] for c in default["calls"]], ["gemini-3.8-flash"] * 2)   # as before: 3.8 for both
+        self.assertEqual(default["qsets"], ["09ba59cf9af8", "6e48a6a6e3c7"])          # 6f07aab's keys: answers reused
         self.assertNotEqual(default["qsets"][1], got["qsets"][1])                       # filed by model
 
 

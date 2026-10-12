@@ -304,8 +304,12 @@ class WebPhotos(Base):
         self.seed, self.lock = 0, threading.Lock()
         self.env = mock.patch.dict(os.environ, {"BRAVE_SEARCH_API_KEY": "k", "MRTRUTH_ALLOW_DEGRADED": "0"})
         self.env.start()
+        # the thin-Bing backup as designed (T4); option A's default 0 asks Brave only when Bing fails (test_b0 below)
+        self.brave_max = mock.patch.object(M, "BRAVE_LAST_MAX", 30)
+        self.brave_max.start()
 
     def tearDown(self):
+        self.brave_max.stop()
         self.env.stop()
         super().tearDown()
 
@@ -346,6 +350,15 @@ class WebPhotos(Base):
         self.assertEqual(self.brave_calls, ["codex leaf"])
         self.assertEqual(M.SEARCH.get("brave_thin"), 1)
         self.assertTrue(any(c["provider"] == "brave" for c, _ in out))
+
+    def test_b0_option_a_thin_bing_asks_no_brave(self):
+        """MRTRUTH_BRAVE_LAST_MAX 0 (option A, owner 2026-10-12): a thin Bing answer is used as it is."""
+        self.bing["codex leaf"] = lambda q: Resp(200, page(rows_for(q, n=1) + rows_for(q + "x", n=10, w=500, h=900)))
+        self.bing["vatican library"] = lambda q: Resp(200, page(rows_for(q, n=10, w=600, h=400)))
+        with mock.patch.object(M, "BRAVE_LAST_MAX", 0):
+            out = self.run_web(["codex leaf", "vatican library"])
+        self.assertEqual(self.brave_calls, [])
+        self.assertTrue(out and all(c["provider"] == "bing" for c, _ in out))
 
     def test_c_a_failed_search_gets_its_own_brave(self):
         self.bing["vatican library"] = lambda q: Resp(200, page(rows_for("zzz", title="Roblox fishing")))

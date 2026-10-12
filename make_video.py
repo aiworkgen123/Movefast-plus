@@ -1672,31 +1672,165 @@ PICK_MODEL = os.environ.get("GEMINI_PICK_MODEL", "gemini-3.5-flash-lite")
 # every Gemini look this run: answers, tokens in / out / thinking (billed as output), and per purpose and model
 # (owner 2026-10-10: 548 calls and 4.3M tokens a film, unpriced, thinking never counted)
 GEMINI_PICKS = {"calls": 0, "in": 0, "out": 0, "think": 0, "fallback": 0, "by": {}}
-GEMINI_PRICES = {"gemini-3.8-flash": (0.75, 3.75), "gemini-3.5-flash-lite": (0.30, 2.50)}   # $ per million in, out
+# $ per million tokens in, out (thinking is billed as output) on the standard tier - ai.google.dev/gemini-api/docs/pricing,
+# read 2026-10-11. gemini-3.8-flash: these prices hold "through December 31, 2026"; from January 1, 2027 every 3.8 price
+# doubles ($1.50 / $7.50, cached $0.15, storage $1.00)
+GEMINI_PRICES = {"gemini-3.8-flash": (0.75, 3.75), "gemini-3.5-flash-lite": (0.30, 2.50),
+                 "gemini-3-flash-preview": (0.50, 3.00)}
+# a cached input token (usageMetadata.cachedContentTokenCount, part of the prompt's count): $ per million on the
+# standard tier and on Flex - a tenth of the input price, except where the page lists its own (Flash-Lite on Flex 0.02;
+# 3 Flash Preview keeps 0.05 on Flex); unlisted: GEMINI_CACHED_SHARE of the input price on the call's tier
+GEMINI_CACHED_PRICES = {"gemini-3.8-flash": (0.075, 0.0375), "gemini-3.5-flash-lite": (0.03, 0.02),
+                        "gemini-3-flash-preview": (0.05, 0.05)}
+# the Flex tier (serviceTier "flex", docs/flex-inference): half the input and output price
+GEMINI_CACHED_SHARE, GEMINI_FLEX_SHARE = 0.10, 0.50
+GEMINI_CACHE_STORAGE = {"gemini-3.8-flash": 0.50}            # $ per million cached tokens an hour (1.00 if not listed)
+# Flex (Preview, best effort, "Minutes (1-15 min target)"; 503 at capacity, 429 on limits; no server-side fallback to
+# the standard tier - the client retries with backoff and falls back itself): one Flex request may wait up to
+# GEMINI_FLEX_TIMEOUT (the docs ask for 10 minutes or more); a call spends at most GEMINI_FLEX_WAIT seconds on Flex,
+# retries included (a caller may pass its own: Mr Truth's MRTRUTH_JUDGE_FLEX_WAIT), then asks the standard tier.
+# After GEMINI_FLEX_BREAK fallbacks in a row Flex rests GEMINI_FLEX_REST seconds (calls go straight to the standard
+# tier, counted), so a Flex at capacity costs a film minutes, not hours
+GEMINI_FLEX_TIMEOUT = 900
+try:
+    GEMINI_FLEX_WAIT = float(os.environ.get("GEMINI_FLEX_WAIT") or 300)
+except ValueError:
+    GEMINI_FLEX_WAIT = 300.0
+GEMINI_FLEX_BREAK, GEMINI_FLEX_REST = 5, 600.0
+GEMINI_FLEX_BACKOFF = (5, 10, 20, 40, 80, 160)
+_FLEX_STATE = {"run": 0, "rest_until": 0.0}
+
+
+def gemini_cost(model: str, tin: int, tout: int, think: int = 0, cached: int = 0, flex: bool = False):
+    """What one Gemini call (or a sum of them) costs in dollars, or None when the model has no known price: input
+    (its cached part at GEMINI_CACHED_PRICES), output and thinking - on the Flex tier at its own prices (half, and the
+    cached price the page lists for Flex)."""
+    price = GEMINI_PRICES.get(model)
+    if not price:
+        return None
+    share = GEMINI_FLEX_SHARE if flex else 1.0
+    cached = min(max(0, int(cached or 0)), int(tin or 0))
+    cp = GEMINI_CACHED_PRICES.get(model)
+    cprice = (cp[1] if flex else cp[0]) if cp else price[0] * share * GEMINI_CACHED_SHARE
+    return ((int(tin or 0) - cached) * price[0] * share + cached * cprice
+            + (int(tout or 0) + int(think or 0)) * price[1] * share) / 1e6
+
+
+def _flex_note(fell: str = "", ok: bool = False, waited: float = 0.0) -> None:
+    """The run's Flex record: a call answered on Flex (ok) ends a run of fallbacks; a fallback (`fell`: why) counts,
+    and the GEMINI_FLEX_BREAK-th in a row rests Flex for GEMINI_FLEX_REST seconds."""
+    with _SPEND_LOCK:
+        GEMINI_PICKS["flex_wait_s"] = GEMINI_PICKS.get("flex_wait_s", 0.0) + waited
+        if ok:
+            _FLEX_STATE["run"] = 0
+        if fell:
+            GEMINI_PICKS["flex_fallback"] = GEMINI_PICKS.get("flex_fallback", 0) + 1
+            w = GEMINI_PICKS.setdefault("flex_why", {})
+            w[fell] = w.get(fell, 0) + 1
+            _FLEX_STATE["run"] += 1
+            if _FLEX_STATE["run"] >= GEMINI_FLEX_BREAK:
+                _FLEX_STATE["run"], _FLEX_STATE["rest_until"] = 0, time.time() + GEMINI_FLEX_REST
+                GEMINI_PICKS["flex_rests"] = GEMINI_PICKS.get("flex_rests", 0) + 1
+
+
+def _flex_open() -> bool:
+    """Whether Flex may be asked now (not resting after a run of fallbacks); a call it is not asked for is counted."""
+    with _SPEND_LOCK:
+        if time.time() >= _FLEX_STATE["rest_until"]:
+            return True
+        GEMINI_PICKS["flex_rested"] = GEMINI_PICKS.get("flex_rested", 0) + 1
+        return False
+
+
+def gemini_cache(model: str, text: str, ttl_s: int = 3600) -> str:
+    """A Gemini cache (cachedContents) holding `text` as the start of a request - a user turn - for `ttl_s` seconds:
+    its name, or "" when Gemini will not keep it (the caller then sends the text itself). Counted in the run's spend
+    as "check cache": its tokens once at the input price and their storage for the whole ttl (2026-10-11: the checks'
+    1,425-token head on 3.8 Flash, about $0.0011 + $0.0014 for two hours)."""
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key or not text:
+        return ""
+    try:
+        r = requests.post("https://generativelanguage.googleapis.com/v1beta/cachedContents",
+                          headers={"x-goog-api-key": key}, timeout=60,
+                          json={"model": f"models/{model}", "contents": [{"role": "user", "parts": [{"text": text}]}],
+                                "ttl": f"{int(ttl_s)}s"})
+        if not r.ok:
+            return ""
+        d = r.json()
+    except (requests.RequestException, ValueError):
+        return ""
+    n = int((d.get("usageMetadata") or {}).get("totalTokenCount") or 0)
+    price = GEMINI_PRICES.get(model)
+    usd = (n * price[0] + n * ttl_s / 3600 * GEMINI_CACHE_STORAGE.get(model, 1.0)) / 1e6 if price else 0.0
+    with _SPEND_LOCK:
+        b = GEMINI_PICKS["by"].setdefault(f"check cache | {model}", {"what": "check cache", "model": model, "calls": 0,
+                                                                     "in": 0, "out": 0, "think": 0})
+        b["calls"] += 1
+        b["in"] += n
+        b["usd"] = b.get("usd", 0.0) + usd
+    return str(d.get("name") or "")
+
+
+def gemini_cache_drop(name: str) -> None:
+    """Delete a cache made by gemini_cache (its storage is billed by the hour); a failure is left to its ttl."""
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if key and name:
+        try:
+            requests.delete(f"https://generativelanguage.googleapis.com/v1beta/{name}", headers={"x-goog-api-key": key},
+                            timeout=30)
+        except requests.RequestException:
+            pass
+
+
+def gemini_bucket_usd(v: dict):
+    """A spend bucket's dollars: what its calls were billed (pick_vision adds each call's own price - its cached
+    tokens and tier), else priced from its token sums as before; None when the model has no known price."""
+    if "usd" in v:
+        return float(v["usd"]) if GEMINI_PRICES.get(v.get("model")) else None
+    return gemini_cost(v.get("model"), v.get("in", 0), v.get("out", 0), v.get("think", 0))
 
 
 def gemini_spend_line() -> str:
-    """One line for the log: the Gemini looks of this run, what they came to, and what they were for."""
+    """One line for the log: the Gemini looks of this run, what they came to, and what they were for (with the
+    tokens Gemini served from its cache, and the calls on the Flex tier, when there were any)."""
     g = GEMINI_PICKS
     if not (g["calls"] or g["fallback"]):
         return ""
     k = lambda v: f"{v / 1000:.0f}k"
     usd, unpriced, parts = 0.0, set(), []
     for v in sorted(g["by"].values(), key=lambda v: -v["in"]):
-        price = GEMINI_PRICES.get(v["model"])
-        cost = (v["in"] * price[0] + (v["out"] + v["think"]) * price[1]) / 1e6 if price else 0.0
-        usd += cost
-        if not price:
+        cost = gemini_bucket_usd(v)
+        usd += cost or 0.0
+        if cost is None:
             unpriced.add(v["model"])
-        parts.append(f"{v['what']} ({v['model']}) {v['calls']} calls, {k(v['in'])} in / {k(v['out'])} out / "
-                     f"{k(v['think'])} thinking" + (f" = ${cost:.2f}" if price else ""))
+        extra = (f", {k(v['cached'])} of it cached" if v.get("cached") else "") + (
+            f", {v['flex']} on Flex" if v.get("flex") else "")
+        parts.append(f"{v['what']} ({v['model']}) {v['calls']} calls, {k(v['in'])} in{extra} / {k(v['out'])} out / "
+                     f"{k(v['think'])} thinking" + (f" = ${cost:.2f}" if cost is not None else ""))
     return (f"Gemini photo picks: {g['calls']} ({k(g['in'])} in, {k(g['out'])} out, {k(g['think'])} thinking"
             f" = ${usd:.2f}), {g['fallback']} handed to Claude — " + "; ".join(parts)
-            + (f" (no price known for {', '.join(sorted(unpriced))})" if unpriced else ""))
+            + (f" (no price known for {', '.join(sorted(unpriced))})" if unpriced else "") + flex_line())
+
+
+def flex_line() -> str:
+    """The run's Flex record for the log ("" when Flex was never asked): calls Flex answered, the ones that fell back to
+    the standard tier (and why), retries on Flex, calls sent straight to the standard tier while Flex rested, and the
+    time spent waiting on Flex - every fallback is billed at the standard price."""
+    g = GEMINI_PICKS
+    on = sum(int(v.get("flex") or 0) for v in g["by"].values())
+    fell, rested = int(g.get("flex_fallback") or 0), int(g.get("flex_rested") or 0)
+    if not (on or fell or rested):
+        return ""
+    why = ", ".join(f"{n}x {w}" for w, n in sorted((g.get("flex_why") or {}).items(), key=lambda kv: -kv[1])[:4])
+    return (f"; Flex: {on} answered there, {fell} fell back to the standard tier" + (f" ({why})" if why else "")
+            + f", {int(g.get('flex_retries') or 0)} retries, {rested} sent to the standard tier while Flex rested "
+            f"({int(g.get('flex_rests') or 0)} rests), {float(g.get('flex_wait_s') or 0) / 60:.1f} min waited on Flex")
 
 
 def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: str = "", thinking: str = "",
-                purpose: str = "", media: str = "", lead: str = "", labels: list = None, info: dict = None) -> str:
+                purpose: str = "", media: str = "", lead: str = "", labels: list = None, info: dict = None,
+                tier: str = "", cache: tuple = None, tier_wait: float = None) -> str:
     """Look at photos and pick (which candidate shows the subject, which cutout is clean, which still shows a person
     or vehicle) — through Gemini Flash-Lite. Tested on the same 8 candidates: Gemini chose the same two photos
     as Claude with the same crops, in 2 s against 9 s, for about $0.001, sparing ~10k Claude tokens a pick
@@ -1706,10 +1840,20 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
       media   "LOW" | "MEDIUM" | "HIGH": what each picture costs in tokens (generationConfig.mediaResolution)
       lead, labels   the request in reading order: `lead` first, then each picture after its own label (its caption),
               then `prompt` - every picture is sent (the plain layout keeps its first 16)
-      info    filled with who answered: via "gemini" | "claude", the model and the tokens (in, out, thinking) - a
-              Claude answer is used for the run, never kept as Gemini's."""
+      info    filled with who answered: via "gemini" | "claude", the model and the tokens (in, out, thinking), the
+              tokens Gemini served from its cache (cached) and the tier that answered (tier) - a Claude answer is used
+              for the run, never kept as Gemini's.
+      tier    "flex": the Flex tier (2026-10-11: half price, the same model, an answer in minutes, best effort): a
+              request Flex sheds (429, 5xx, a time-out) is asked again on Flex after a backoff (GEMINI_FLEX_BACKOFF)
+              while the call has spent less than `tier_wait` seconds there (GEMINI_FLEX_WAIT unless given), then on
+              the standard tier, which waits as usual; a 400 (the model or request refuses the tier) goes to the
+              standard tier at once. Every fallback is counted (GEMINI_PICKS flex_fallback, flex_why), and a run of
+              GEMINI_FLEX_BREAK fallbacks rests Flex for GEMINI_FLEX_REST seconds (flex_rested: calls not tried there).
+      cache   (name, head): the request starts with `head`, held in the Gemini cache `name` (gemini_cache) - it is
+              named, not sent, and `lead` is what follows it; a cache Gemini no longer has (HTTP 400/403/404) is
+              dropped and the head sent in front of the lead, as one text."""
     info = info if info is not None else {}
-    info.update(via="", model="", tokens=(0, 0, 0))
+    info.update(via="", model="", tokens=(0, 0, 0), cached=0, tier="")
     key = os.environ.get("GEMINI_API_KEY", "")
     if key:
         try:
@@ -1718,7 +1862,7 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                                             else "image/png", "data": base64.b64encode(Path(p).read_bytes()).decode()}}
             parts = []
             if labels is not None:              # text first, each picture after its own label, the question last
-                parts += [{"text": lead}] if lead else []
+                parts += [{"text": lead}] if lead or cache else []
                 for i, p in enumerate(image_paths):
                     parts += [{"text": str(labels[i]) if i < len(labels) else f"Picture {i + 1}:"}, img(p)]
             else:
@@ -1731,32 +1875,65 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                     "generationConfig": {"temperature": 0.2, "maxOutputTokens": max(256, max_tokens), "thinkingConfig": think}}
             if media:
                 body["generationConfig"]["mediaResolution"] = f"MEDIA_RESOLUTION_{media.upper()}"
+            flex_wait = GEMINI_FLEX_WAIT if tier_wait is None else float(tier_wait)
+            if tier == "flex" and _flex_open():           # any other tier: the standard one (the field left out)
+                body["serviceTier"] = "flex"
+            if cache and labels is not None:
+                body["cachedContent"] = cache[0]
             # busy (429/5xx) or no connection: wait and ask again before Claude looks instead. Mr Truth's checks
             # (labels) wait longer: on 2026-10-11 a short Gemini spell sent 10 checks to Claude in a minute and the
             # guard stopped the film 9 minutes in, though Gemini answered again right after
-            ladder = (2, 5, 10, 20, 40, 60, 0) if labels is not None else (2, 5, 10, 20, 0)
-            r, why = None, ""
-            for wait in ladder:
+            ladder = list((2, 5, 10, 20, 40, 60, 0) if labels is not None else (2, 5, 10, 20, 0))
+            flex_backoff = list(GEMINI_FLEX_BACKOFF)
+            r, why, t_flex = None, "", time.time()
+            while True:
+                flex = body.get("serviceTier") == "flex"
+                left = t_flex + flex_wait - time.time()
                 try:
                     r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{use}:generateContent",
-                                      headers={"x-goog-api-key": key}, json=body, timeout=180)
+                                      headers={"x-goog-api-key": key}, json=body,
+                                      timeout=max(30.0, min(GEMINI_FLEX_TIMEOUT, left)) if flex else 180)
                     why = f"HTTP {r.status_code}"
-                    if r.status_code not in (429, 500, 502, 503, 504) or not wait:
-                        break
+                    if body.get("cachedContent") and r.status_code in (400, 403, 404):
+                        body.pop("cachedContent")        # the cache is gone: the head goes back in front of the lead
+                        body["contents"][0]["parts"][0]["text"] = cache[1] + lead
+                        with _SPEND_LOCK:
+                            GEMINI_PICKS["cache_lost"] = GEMINI_PICKS.get("cache_lost", 0) + 1
+                        continue
+                    busy = r.status_code in (429, 500, 502, 503, 504)
                 except requests.RequestException as e:            # timeout, reset: busy too
-                    r, why = None, type(e).__name__
-                    if not wait:
+                    r, why, busy = None, type(e).__name__, True
+                if flex:
+                    if r is not None and r.ok:
+                        _flex_note(ok=True, waited=time.time() - t_flex)
                         break
+                    if busy and flex_backoff and time.time() + flex_backoff[0] < t_flex + flex_wait:
+                        with _SPEND_LOCK:                # Flex at capacity: again on Flex after a backoff
+                            GEMINI_PICKS["flex_retries"] = GEMINI_PICKS.get("flex_retries", 0) + 1
+                        time.sleep(flex_backoff.pop(0))
+                        continue
+                    if busy or (r is not None and r.status_code == 400):
+                        body.pop("serviceTier", None)    # no server-side fallback: the standard tier, at once
+                        _flex_note(fell=f"{why} after {time.time() - t_flex:.0f}s" if busy else why,
+                                   waited=time.time() - t_flex)
+                        continue
+                    _flex_note(waited=time.time() - t_flex)
+                    break                                # 401/402/403/404: the standard tier would say the same
+                if not busy or not ladder or not ladder[0]:
+                    break
                 with _SPEND_LOCK:
                     GEMINI_PICKS["busy"] = GEMINI_PICKS.get("busy", 0) + 1
-                time.sleep(wait)
+                time.sleep(ladder.pop(0))
             if r is not None and r.ok:
                 d = r.json()
                 text = "".join(x.get("text", "") for x in ((d.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
                                if not x.get("thought")).strip()
                 u = d.get("usageMetadata") or {}
-                tin, tout, tthink = (int(u.get(f) or 0) for f in ("promptTokenCount", "candidatesTokenCount",
-                                                                   "thoughtsTokenCount"))
+                tin, tout, tthink, tcache = (int(u.get(f) or 0) for f in ("promptTokenCount", "candidatesTokenCount",
+                                                                           "thoughtsTokenCount", "cachedContentTokenCount"))
+                served = str(u.get("serviceTier") or "").lower()
+                on_flex = "flex" in served or (bool(body.get("serviceTier")) and not served)
+                cost = gemini_cost(use, tin, tout, tthink, tcache, on_flex) or 0.0
                 with _SPEND_LOCK:                # an empty answer is billed too: counted with the rest
                     for b in (GEMINI_PICKS, GEMINI_PICKS["by"].setdefault(f"{purpose or 'photo pick'} | {use}", {
                             "what": purpose or "photo pick", "model": use, "calls": 0, "in": 0, "out": 0, "think": 0})):
@@ -1764,8 +1941,12 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
                         b["in"] += tin
                         b["out"] += tout
                         b["think"] += tthink
+                        b["cached"] = b.get("cached", 0) + tcache
+                        b["flex"] = b.get("flex", 0) + on_flex
+                        b["usd"] = b.get("usd", 0.0) + cost
                 if text:
-                    info.update(via="gemini", model=use, tokens=(tin, tout, tthink),
+                    info.update(via="gemini", model=use, tokens=(tin, tout, tthink), cached=tcache,
+                                tier="flex" if on_flex else "standard",
                                 finish=str(((d.get("candidates") or [{}])[0]).get("finishReason") or ""))
                     return text
                 why = "empty answer (" + str(((d.get("candidates") or [{}])[0]).get("finishReason")
@@ -1780,6 +1961,7 @@ def pick_vision(prompt: str, image_paths: list, max_tokens: int = 800, model: st
             w[why or "?"] = w.get(why or "?", 0) + 1
     if labels is not None:                       # Claude sees the pictures in order, their labels in the text
         image_paths = list(image_paths)[:10]     # claude_vision's own cap: no label for a picture it does not send
+        lead = (cache[1] + lead) if cache else lead          # the cached head is Gemini's alone: Claude reads it all
         prompt = "\n".join([lead] + [f"Image {i + 1}: {str(labels[i]) if i < len(labels) else ''}"
                                       for i in range(len(image_paths))] + [prompt])
     info.update(via="claude", model="claude")

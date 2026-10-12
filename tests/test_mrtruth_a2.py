@@ -371,7 +371,8 @@ class Check(Tmp):
         return [({"title": f"{prefix} {k}", "provider": "bing", "url": f"https://x/{prefix}{k}"},
                  textured(self.d / "src" / f"{prefix}{k}.jpg", seed + k)) for k in range(n)]
 
-    def test_request_and_store(self):
+    @mock.patch.object(M, "JUDGE_MEDIA", "MEDIUM")    # a MEDIUM look marks a text picture for the other lines (at
+    def test_request_and_store(self):                 # option A's LOW it is not: test_mrtruth_e1's LOW test)
         gem = FakeGemini(lambda cap: {"shows": "exact"} if cap.endswith("0") else {"text": True} if cap.endswith("1") else {})
         e = Engine(gem)
         row = {"text": "The library opened its doors.", "entities": ["Royal Library"], "era": "1980s, Rome"}
@@ -489,7 +490,7 @@ class Check(Tmp):
         self.assertIn("refused their settings", str(x.exception))
         gc = sent[0]["generationConfig"]
         self.assertEqual(gc["thinkingConfig"], {"thinkingLevel": "low"})
-        self.assertEqual(gc["mediaResolution"], "MEDIA_RESOLUTION_MEDIUM")
+        self.assertEqual(gc["mediaResolution"], "MEDIA_RESOLUTION_LOW")             # option A: pictures at LOW
 
 
 class AICheck(Tmp):
