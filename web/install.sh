@@ -1,6 +1,8 @@
 #!/bin/bash
 # Mr Truth Studio - installs the website on a fresh Ubuntu 24.04 server (DigitalOcean, Hetzner, Vultr...).
-# Paste this in the server's console (as root); it asks for the GitHub token without showing it:
+# Paste this in the server's console (as root):
+#   curl -fsSL https://raw.githubusercontent.com/aiworkgen123/Movefast-plus/mrtruth-web/web/install.sh -o install.sh && bash install.sh
+# If the repository is made private, a read-only GitHub token is needed (it asks; the key is not shown as you type):
 #   read -s -p "GitHub token: " T; echo; curl -fsSL -H "Authorization: token $T" https://raw.githubusercontent.com/aiworkgen123/Movefast-plus/mrtruth-web/web/install.sh -o install.sh && GH_TOKEN=$T bash install.sh
 # Running it again later is safe: it updates the code and keeps your films, people and keys.
 set -euo pipefail
@@ -10,7 +12,9 @@ APP=/opt/mrtruth
 DATA=/var/lib/mrtruth
 SVC=mrtruth
 [ "$(id -u)" = 0 ] || { echo "Run this as root (the server console logs you in as root)."; exit 1; }
-if [ -z "${GH_TOKEN:-}" ]; then read -r -s -p "GitHub token (read-only): " GH_TOKEN; echo; fi
+if [ -z "${GH_TOKEN:-}" ] && ! curl -sf -m 20 -o /dev/null "https://api.github.com/repos/$REPO"; then
+  read -r -s -p "GitHub token (read-only; the repository is private): " GH_TOKEN; echo
+fi
 
 echo "== 1/6 system packages (a few minutes the first time)"
 export DEBIAN_FRONTEND=noninteractive
@@ -27,13 +31,15 @@ mkdir -p $APP $DATA && chown $SVC:$SVC $APP $DATA && chmod 700 $DATA
 
 echo "== 3/6 the code"
 CRED=$APP/.git-credentials
-printf 'https://x-access-token:%s@github.com\n' "$GH_TOKEN" > $CRED && chmod 600 $CRED && chown $SVC:$SVC $CRED
+if [ -n "${GH_TOKEN:-}" ]; then
+  printf 'https://x-access-token:%s@github.com\n' "$GH_TOKEN" > $CRED && chmod 600 $CRED && chown $SVC:$SVC $CRED
+fi
 if [ -d $APP/code/.git ]; then
   sudo -u $SVC git -C $APP/code pull -q --ff-only
 else
   sudo -u $SVC git -c credential.helper="store --file=$CRED" clone -q --depth 30 -b "$BRANCH" "https://github.com/$REPO.git" $APP/code
 fi
-sudo -u $SVC git -C $APP/code config credential.helper "store --file=$CRED"
+[ -f $CRED ] && sudo -u $SVC git -C $APP/code config credential.helper "store --file=$CRED"
 echo "   $(sudo -u $SVC git -C $APP/code log -1 --format='%h %cs %s')"
 
 echo "== 4/6 Python"

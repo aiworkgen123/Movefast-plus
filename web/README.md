@@ -19,17 +19,16 @@ the machine carries on and the film appears when it is done.
 ## Install (once)
 
 1. Create an Ubuntu 24.04 server (the $6 plan is enough) and open its web console.
-2. Make a GitHub token that can only read this repository: github.com → Settings → Developer settings →
-   Fine-grained tokens → Generate new token → Repository access: only `Movefast-plus` → Permissions:
-   Contents: Read-only.
-3. Paste this into the server console and answer its three questions (token, your sign-in name and password, web
-   address or Enter for a free one):
+2. Paste this into the server console and answer its two questions (your sign-in name and password, then your web
+   address, or Enter for a free one):
 
    ```
-   read -s -p "GitHub token: " T; echo; curl -fsSL -H "Authorization: token $T" https://raw.githubusercontent.com/aiworkgen123/Movefast-plus/mrtruth-web/web/install.sh -o install.sh && GH_TOKEN=$T bash install.sh
+   curl -fsSL https://raw.githubusercontent.com/aiworkgen123/Movefast-plus/mrtruth-web/web/install.sh -o install.sh && bash install.sh
    ```
-4. Open the address it prints, sign in, go to **Settings**, paste your keys, press **Test keys**.
-5. Add your employees under **Settings → People** (members can make films, only owners see Settings).
+   (If the repository is ever made private, the installer also asks for a read-only GitHub token: github.com →
+   Settings → Developer settings → Fine-grained tokens → only `Movefast-plus` → Contents: Read-only.)
+3. Open the address it prints, sign in, go to **Settings**, paste your keys, press **Test keys**.
+4. Add your employees under **Settings → People** (members can make films, only owners see Settings).
 
 ## Later
 
