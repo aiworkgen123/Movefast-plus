@@ -132,6 +132,11 @@ END_VIEW, LABEL_AREA = (-960, 960, -540, 540), (77.5, 620, -80, 60)
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 MATCH_KM = 25.0                            # the planner's point and the geocoder's must agree within this
 MAX_PLACE_KM = 150.0                       # a place whose extent is wider is a region, not a spot for the ring
+# the owner's place rule (2026-10-11): never a US state or a country alone - the geocoder's own kind of the answer; a
+# country or state this small is a city-state (the Vatican, Monaco, San Marino), a specific place
+REGION_KINDS = ("continent", "country", "state", "province", "region", "state_district")
+CITY_STATE_KM = 60.0
+PLATE_SMALL_Q = 80                         # the ready-made plates' JPEG quality (committed: kept small)
 NOMINATIM_GAP_S = 1.0                      # the usage policy: at most one request a second
 _NOM_LOCK = threading.Lock()
 _NOM_LAST = [0.0]
@@ -457,35 +462,57 @@ def _nominatim(query: str, cache: dict, get, sleep, clock) -> list:
             _NOM_LAST[0] = clock()
     found = [{"lat": float(r["lat"]), "lon": float(r["lon"]), "name": r.get("display_name") or r.get("name") or "",
               "bbox": [float(v) for v in (r.get("boundingbox") or [])][:4], "kind": r.get("category") or r.get("class") or "",
-              "type": r.get("type") or ""} for r in json.loads(raw) if isinstance(r, dict) and "lat" in r and "lon" in r]
+              "type": r.get("type") or "", "addresstype": r.get("addresstype") or "",
+              "rank": int(r["place_rank"]) if str(r.get("place_rank") or "").isdigit() else None}
+             for r in json.loads(raw) if isinstance(r, dict) and "lat" in r and "lon" in r]
     cache[key] = {"results": found, "at": int(time.time())}
     return found
 
 
+def _whole_region(r: dict) -> str:
+    """'a state', 'a country' ... when the geocoder's answer is one of those as a whole (the owner, 2026-10-11: never a
+    US state or a country alone; a city-state - the Vatican, Monaco - is a place), else ''. An answer cached before the
+    geocoder's own kind was kept says nothing here; its size still refuses a region (MAX_PLACE_KM)."""
+    at, ty, rank = str(r.get("addresstype") or "").lower(), str(r.get("type") or "").lower(), r.get("rank")
+    kind = next((k for k in REGION_KINDS if at == k or ty == k), "")
+    if not kind and isinstance(rank, int) and rank <= 8 and str(r.get("kind") or "") in ("boundary", "place"):
+        kind = "state" if rank >= 6 else "country"
+    if kind and len(r.get("bbox") or []) == 4:
+        s_, n_, w_, e_ = r["bbox"]
+        if km_between(s_, w_, n_, e_) <= CITY_STATE_KM:
+            return ""
+    return kind
+
+
 def geocode(name: str, lat, lon, cache_path: Path, get=None, sleep=time.sleep, clock=time.monotonic) -> dict:
-    """The planner's place checked against Nominatim. {"ok": True, "lat", "lon", "name", "km", "query"} - the
-    geocoder's point, used for the map - or {"ok": False, "why"}. Every answer is cached by its ask (a failed request
-    is not); the asks are `_queries(name)` in turn until one resolves near the planner's point."""
+    """The planner's place checked against Nominatim. {"ok": True, "lat", "lon", "name", "km", "query", "osm_type"} -
+    the geocoder's point, used for the map - or {"ok": False, "why", "status"}: "unreachable" (the geocoder could not be
+    asked) or "unknown" (it knows no such name) - the place cannot be found, so its map may take a ready-made plate;
+    "far" (it knows the name only far from the planner's point: not sure which place is meant), "region" (a state, a
+    country, a continent, or wider than MAX_PLACE_KM) or "input" (no name or coordinates) - no map. Every answer is
+    cached by its ask (a failed request is not); the asks are `_queries(name)` in turn until one resolves near the
+    planner's point."""
     if not _norm(name):
-        return {"ok": False, "why": "no place name"}
+        return {"ok": False, "why": "no place name", "status": "input"}
     try:
         lat, lon = float(lat), float(lon)
     except (TypeError, ValueError):
-        return {"ok": False, "why": "the planner gave no coordinates to check"}
+        return {"ok": False, "why": "the planner gave no coordinates to check", "status": "input"}
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-        return {"ok": False, "why": "the planner's coordinates are not on Earth"}
+        return {"ok": False, "why": "the planner's coordinates are not on Earth", "status": "input"}
     cache = {}
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
-    before, why = json.dumps(cache, sort_keys=True), ""
+    before, why, status = json.dumps(cache, sort_keys=True), "", "unknown"
     try:
         for query in _queries(name):
             try:
                 found = _nominatim(query, cache, get, sleep, clock)
             except Exception as e:                               # noqa: BLE001 - no answer: the template is not used
                 why = f"the geocoder could not be asked ({type(e).__name__}: {str(e)[:100]})"
+                status = "unreachable"
                 break
             if not found:
                 why = why or f"the geocoder does not know '{name}'"
@@ -493,16 +520,21 @@ def geocode(name: str, lat, lon, cache_path: Path, get=None, sleep=time.sleep, c
             best = min(found, key=lambda r: km_between(lat, lon, r["lat"], r["lon"]))
             km = km_between(lat, lon, best["lat"], best["lon"])
             if km > MATCH_KM:
-                why = f"the geocoder puts '{query}' {km:.0f} km from the planner's point"
+                why, status = f"the geocoder puts '{query}' {km:.0f} km from the planner's point", "far"
                 continue
+            whole = _whole_region(best)
+            if whole:
+                return {"ok": False, "why": f"'{query}' is {('an ' if whole[0] in 'aeiou' else 'a ') + whole} as a whole "
+                                            f"(never a state or a country alone)", "status": "region"}
             if len(best["bbox"]) == 4:
                 s_, n_, w_, e_ = best["bbox"]
                 span = km_between(s_, w_, n_, e_)
                 if span > MAX_PLACE_KM:
-                    return {"ok": False, "why": f"'{query}' is a region {span:.0f} km across, too large for the ring"}
+                    return {"ok": False, "why": f"'{query}' is a region {span:.0f} km across, too large for the ring",
+                            "status": "region"}
             return {"ok": True, "lat": best["lat"], "lon": best["lon"], "name": best["name"], "km": round(km, 2),
-                    "query": query}
-        return {"ok": False, "why": why or f"the geocoder does not know '{name}'"}
+                    "query": query, "osm_type": best.get("type") or "", "osm_kind": best.get("addresstype") or best.get("kind") or ""}
+        return {"ok": False, "why": why or f"the geocoder does not know '{name}'", "status": status}
     finally:
         if json.dumps(cache, sort_keys=True) != before:
             try:
@@ -520,13 +552,13 @@ def _slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s).strip("-")[:40] or "place"
 
 
-def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=print, at=None):
+def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=print, at=None, g=None):
     """The map shot's picture for a place: checked, its plate made (or found made) in `folder`. The pick, shaped like
     every other picture of the film (credits.json reads it), or None - the place could not be checked, or no imagery.
     The plate is centred on the geocoder's point, or on `at` = (lat, lon) when given (the preview: his own ground,
     5.5729 N 10.5853 E, measured off his frames, 0.69 km south of OpenStreetMap's point for Lake Monoun); the place is
-    checked either way."""
-    g = geocode(name, lat, lon, shared / "geocode_nominatim.json", get=get)
+    checked either way (`g`: its geocode() answer when the caller has it already)."""
+    g = g or geocode(name, lat, lon, shared / "geocode_nominatim.json", get=get)
     if not g["ok"]:
         say(f"      map for '{name}' not used: {g['why']}")
         return None
@@ -555,6 +587,53 @@ def build_place(name: str, lat, lon, folder: Path, shared: Path, get=None, say=p
     return {"photo": str(out), "title": f"{ATTRIBUTION}; {PLACE_CREDIT}", "url": SOURCE_URL, "source": "EOX",
             "license": LICENSE, "artist": "EOX IT Services GmbH", "tier": 3, "clean": True, "bad": [],
             "provider": "map", "map": {"lat": g["lat"], "lon": g["lon"], "place": g["name"], "zoom": info.get("zoom")}}
+
+
+def fallback_place(name: str, terrain: str, why: str = ""):
+    """The map shot's picture when the place's own imagery cannot be had (owner 2026-10-11, ruling 3 B): our own
+    ready-made graded plate of its terrain (mrtruth_spots.PLATES, made once by `make_plates` from the same 2016 EOX
+    imagery of a representative place), the ring and the name on its centre. None when the plate file is missing."""
+    import mrtruth_spots as S
+    t = terrain if terrain in S.PLATES else "green"
+    path = S.plate_for(t)
+    if not path.is_file():
+        return None
+    what = S.PLATES[t][1]
+    return {"photo": str(path), "title": f"{ATTRIBUTION}; a ready-made {t} map plate ({what})", "url": SOURCE_URL,
+            "source": "EOX", "license": LICENSE, "artist": "EOX IT Services GmbH", "tier": 3, "clean": True, "bad": [],
+            "provider": "map", "map": {"fallback": t, "place": name, "plate_of": what, "why": why}}
+
+
+def make_plates(cache: Path, say=print, only=None) -> dict:
+    """The ready-made plates, made ONCE (python mrtruth_map.py plates <tile cache>): each terrain's representative
+    place through the very pipeline of a placed map (plate: tiles, soften, haze, his grade, his water, exposure), then
+    kept small (JPEG quality PLATE_SMALL_Q, 4:2:0) in assets/mrtruth_maps/. {terrain: its plate()'s record}."""
+    import mrtruth_spots as S
+    from PIL import Image
+    S.PLATES_DIR.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for t, (f, what, la, lo) in S.PLATES.items():
+        if only and t not in only:
+            continue
+        tmp = S.PLATES_DIR / f"_{f}"
+        info = plate(la, lo, tmp, cache, say=say)
+        if info is None:
+            say(f"  {t}: no plate ({what})")
+            continue
+        with Image.open(tmp) as im:
+            im.convert("RGB").save(S.PLATES_DIR / f, "JPEG", quality=PLATE_SMALL_Q, optimize=True, progressive=True)
+        tmp.unlink()
+        out[t] = dict(info, place=what, lat=la, lon=lo, file=f, bytes=(S.PLATES_DIR / f).stat().st_size)
+        say(f"  {t}: {what} -> {f} ({out[t]['bytes'] // 1024} KB, zoom {info['zoom']}, exposure {info['exposure']})")
+    meta = S.PLATES_DIR / "plates.json"
+    old = {}
+    try:
+        old = json.loads(meta.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    meta.write_text(json.dumps(dict(old, **out, licence=f"{ATTRIBUTION} ({LICENSE}, {LICENSE_URL})"), indent=1,
+                               ensure_ascii=False), encoding="utf-8")
+    return out
 
 
 # ── the label (mirror of locationMapClock.ts: LOCATION_MAP.label and locationMapLabelLayout) ─────────────────────────
@@ -647,7 +726,9 @@ def label_fits(label: str) -> bool:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 6 and sys.argv[1] == "plate":
+    if len(sys.argv) >= 3 and sys.argv[1] == "plates":
+        make_plates(Path(sys.argv[2]), only=set(sys.argv[3].split(",")) if len(sys.argv) > 3 else None)
+    elif len(sys.argv) == 6 and sys.argv[1] == "plate":
         nm, la, lo, dest = sys.argv[2], sys.argv[3], sys.argv[4], Path(sys.argv[5])
         out_root = Path(os.environ["MOVEFAST_OUTPUT"]).expanduser() if os.environ.get("MOVEFAST_OUTPUT") else HERE / "output"
         p = build_place(nm, la, lo, dest.parent, out_root / "_shared")

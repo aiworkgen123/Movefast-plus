@@ -882,7 +882,20 @@ export const SceneDeviceSchema = z.discriminatedUnion('id', [
    * scene's own picture: the place's satellite plate, made at planning time
    * (`mrtruth_map.py`) centred on the place, never fetched at render time.
    */
-  z.object({ id: z.literal('location-map'), label: deviceText(LOCATION_MAP_LABEL_MAX_CHARS) }),
+  z.object({
+    id: z.literal('location-map'),
+    label: deviceText(LOCATION_MAP_LABEL_MAX_CHARS),
+    /*
+     * A date said while the map is on screen (the owner's ruling of 2026-10-11:
+     * a date may share the map's shot - the name in the map, the date in the
+     * corner). His date overlay's two lines, drawn from `dateFrom` (the shot's
+     * frame its word is heard on), only once the planner has found the map's
+     * name clear of the corner. '' draws no date.
+     */
+    date: z.union([z.literal(''), deviceText(DATE_STAMP_DATE_MAX_CHARS)]).default(''),
+    year: z.union([z.literal(''), deviceText(DATE_STAMP_YEAR_MAX_CHARS)]).default(''),
+    dateFrom: z.number().int().min(0).default(0),
+  }),
 
   /* ---- registered but never chosen; see `enabled` in the registry ---- */
   z.object({ id: z.literal('pointer-label'), label: deviceText(32) }),

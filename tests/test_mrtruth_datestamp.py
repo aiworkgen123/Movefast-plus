@@ -1,6 +1,6 @@
-"""Mr Truth: the owner's date overlay (2026-10-11), `date-stamp` - in the library and the previews, never placed by the
-planner until he rules where it goes, and the renderer's half in step with the planner's. Synthetic data only: no
-network, no paid call, no render.
+"""Mr Truth: the owner's date overlay (2026-10-11), `date-stamp` - in the library and the previews, placed by its own step
+(places_and_dates, his rulings 3, 4 and 8: tests/test_mrtruth_mapdate.py) and by nothing else, drawn clean and bright,
+and the renderer's half in step with the planner's. Synthetic data only: no network, no paid call, no render.
 
     .venv/bin/python -m unittest tests.test_mrtruth_datestamp -v
 """
@@ -26,22 +26,22 @@ read = lambda p: (R / p).read_text(encoding="utf-8")
 class Planner(unittest.TestCase):
     def test_in_the_library_and_the_previews_with_his_words(self):
         on, pics, lo, hi, cap, pos, chain, lim = M.LIBRARY["date-stamp"]
-        self.assertFalse(on)                                   # the table's never-placed mark
-        self.assertIn("date-stamp", M.AWAITING_RULINGS)
+        self.assertTrue(on)                                    # placed (his ruling 4: no limit a film)
+        self.assertEqual(M.AWAITING_RULINGS, set())
         self.assertEqual((pics, chain, cap), (1, [], None))
-        self.assertEqual((lo, hi), (3.5, 8.0))                 # his 45-frame build, then 2 s of the settled date
-        self.assertAlmostEqual(M._need_s("date-stamp"), 3.8)
+        self.assertEqual((lo, hi), (3.2, 4.5))                 # "appears as spoken, ~3-4 s": his own shot is 4.1 s
+        self.assertAlmostEqual(M._need_s("date-stamp"), 3.5)   # his 45-frame build, then 2 s of the settled date
         self.assertIn("date-stamp", M.HARD_CUT_DEVICES)        # his clip cuts in and out hard
         self.assertEqual(M.BUILD_FRAMES["date-stamp"], 45)     # his entrance: 45 frames from the shot's first
         row = next(p for p in M.PREVIEW if p[0] == "date-stamp")
         self.assertEqual(row[2], 123)                          # his clip's length on screen
         self.assertEqual(row[5], {"id": "date-stamp", "date": "February", "year": "1994"})
 
-    def test_never_placed(self):
+    def test_placed_only_by_its_own_step(self):
         rows, cues = film_rows(n=20, secs=5.0, years=(3, 7))
-        for i in range(len(rows)):
-            self.assertFalse(M._can(rows, i, "date-stamp"))
-            self.assertFalse(M._can(rows, i, "date-stamp", ignore_len=True))
+        self.assertFalse(M._can(rows, 0, "date-stamp"))        # never the opening title's shot
+        self.assertTrue(M._can(rows, 3, "date-stamp", ignore_len=True))   # a shot that says a year is a date's (the G15
+        self.assertFalse(M._can(rows, 3, "shadow-up", ignore_len=True))    # keeps the others off it)
         script = " ".join(c[2] for c in cues)
         at = len(" ".join(c[2] for c in cues[:3])) + 1
         opps = [{"templateId": "date-stamp", "startChar": at, "headline": "1947"}]
@@ -62,7 +62,11 @@ class Planner(unittest.TestCase):
             sc = M.scenes(rows, Path(st), cues_of(rows))
         self.assertEqual(sc[2]["device"], {"id": "date-stamp", "date": "February", "year": "1994"})
         self.assertNotIn("ambience", sc[2])                    # no dust or leak over a template
-        self.assertIn("shadow", sc[2]["grade"])                # a text overlay keeps the shadow look (under its type)
+        # his ruling 8 (2026-10-11): clean and bright like his reference - no shadow look, vignette, grain or move
+        self.assertEqual(sc[2]["grade"], {"lut": M.GRADE["lut"], "vignette": 0.0, "grain": 0.0})
+        m = sc[2]["motion"]
+        self.assertEqual((m["fromScale"], m["toScale"], m["fromX"], m["toX"], m["fromY"], m["toY"]), (1.0, 1.0, 0, 0, 0, 0))
+        self.assertIn("shadow", sc[1]["grade"])                # the shots round it keep the house look
 
 
 class Renderer(unittest.TestCase):

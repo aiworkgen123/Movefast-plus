@@ -1,5 +1,6 @@
-"""Mr Truth: the owner's map animation (2026-10-11), `location-map` - in the library and the previews, never placed by the
-planner until he rules where it goes; its sound cued at his offset and level; its satellite plate made at planning time
+"""Mr Truth: the owner's map animation (2026-10-11), `location-map` - in the library and the previews, placed by its own
+step (places_and_dates, his ruling 3: tests/test_mrtruth_mapdate.py) and by nothing else; on 5-8 s; its sound cued at his
+offset and level, its quiet stretch shortened on a shorter shot; its satellite plate made at planning time
 (mrtruth_map.py: tiles stitched and cached, a lower zoom then nothing when the source is down, the place checked against
 the geocoder); the renderer's half in step with both. Synthetic data only: no network, no paid call, no render.
 
@@ -44,21 +45,20 @@ class Log:
 class Planner(unittest.TestCase):
     def test_in_the_library_and_the_previews_with_his_place(self):
         on, pics, lo, hi, cap, pos, chain, lim = M.LIBRARY["location-map"]
-        self.assertFalse(on)                                   # the table's never-placed mark
-        self.assertIn("location-map", M.AWAITING_RULINGS)
-        self.assertEqual((pics, lo, hi, cap, chain, lim), (1, 7.5, 8.0, None, [], {"label": 32}))
+        self.assertTrue(on)                                    # placed (his ruling 3: up to 3 a film)
+        self.assertEqual(M.AWAITING_RULINGS, set())
+        self.assertEqual((pics, lo, hi, cap, chain, lim), (1, 5.0, 8.0, 3, [], {"label": 32}))
         self.assertEqual(M.BUILD_FRAMES["location-map"], 51)   # his name settles on frame 51
-        self.assertAlmostEqual(M._need_s("location-map"), 7.8)
+        self.assertAlmostEqual(M._need_s("location-map"), 5.0)  # the floor itself (it holds his name 2.3 s)
         row = next(p for p in M.PREVIEW if p[0] == "location-map")
         self.assertEqual(row[2], 240)                          # his shot: 8.000 s
         self.assertEqual(row[3], "map:Lake Monoun:5.58:10.585:5.5729:10.5853")   # centred on his own ground
         self.assertEqual(row[5], {"id": "location-map", "label": "Lake Monoun"})
 
-    def test_never_placed(self):
+    def test_placed_only_by_its_own_step(self):
         rows, cues = film_rows(n=20, secs=6.0)
-        for i in range(len(rows)):
-            self.assertFalse(M._can(rows, i, "location-map"))
-            self.assertFalse(M._can(rows, i, "location-map", ignore_len=True))
+        self.assertFalse(M._can(rows, 0, "location-map"))      # never the opening title's shot
+        self.assertTrue(M._can(rows, 2, "location-map"))
         script = " ".join(c[2] for c in cues)
         at = len(" ".join(c[2] for c in cues[:3])) + 1
         M.assign(Engine(), rows, [{"templateId": "location-map", "startChar": at, "headline": "Lake Monoun"}], script,
@@ -156,17 +156,26 @@ class Sound(unittest.TestCase):
         self.assertIn(f"adelay={round(short[0] * 48000)}S:all=1", chain)      # to the sample
 
     def test_the_shortest_seat_cuts_only_his_tail(self):
-        # on 7.5 s (the library's floor since fix round 2) his sound is cut where it is already down to -48.6 dBFS (rms
-        # of its last 200 ms; -52.6 at his 8 s); on 5 s it was cut in the loudest whoosh (-23.7 dBFS). The floor is 7.5
-        # s, not 7: the camera's fastest moment comes n/2 frames in, 0.25 s before his whoosh expects it at 7.5 s
+        # (impl-z, 2026-10-11: the 5-8 s map) on a shorter shot his quiet stretch is shortened by half what the shot
+        # lacks, so his whoosh keeps its place after the camera's fastest moment (n/2) and the cut at the end lands in
+        # his decay: under -40 dBFS (rms of the last 200 ms kept) at the 5 s floor - it fell in his loudest whoosh,
+        # -23.7, before the splice - and his 8 s shot is untouched
         import numpy as np
         with wave.open(str(R / "sfx" / M.MAP_SFX)) as w:
             a = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, 2).astype(np.float64) / 32768
         db = lambda end: 20 * np.log10(np.sqrt((a[int((end - 0.2) * 48000):int(end * 48000)] ** 2).mean()))
         keep = lambda secs: M._map_sounds([shot(0, round(secs * M.FPS), dev=MAPDEV)])[0][1]
-        self.assertLess(db(keep(M.LIBRARY["location-map"][2])), -48)
-        self.assertGreaterEqual(M.LIBRARY["location-map"][2] * M.FPS, 240 - 15)            # at most 0.25 s early
-        self.assertGreater(db(keep(5.0)), -30)
+        floor = M.LIBRARY["location-map"][2]
+        self.assertEqual(M._map_splice(8.0), 0.0)
+        self.assertAlmostEqual(M._map_splice(floor), (8.0 - floor) / 2)          # 1.5 s at 5 s
+        self.assertLessEqual(M._map_splice(3.0), M.MAP_SFX_QUIET[1] - M.MAP_SFX_QUIET[0] - M.MAP_SFX_XFADE_S)
+        for secs in (floor, 6.0, 7.0, 7.5):                    # the file time where the kept sound ends: after the splice
+            self.assertLess(db(keep(secs) + M._map_splice(secs)), -40, secs)
+            self.assertEqual(round(M._map_splice(secs), 6), round((8.0 - secs) / 2, 6))   # the whoosh n/2 + his lag
+        q0, q1 = M.MAP_SFX_QUIET                               # the splice lies in his quiet stretch: under -50 dBFS
+        self.assertLess(20 * np.log10(np.sqrt((a[int(q0 * 48000):int(q1 * 48000)] ** 2).mean())), -50)
+        self.assertIn("acrossfade=ns=2880:c1=qsin:c2=qsin", M._map_sound_chain(1, 0.1, keep(floor), floor))
+        self.assertNotIn("asplit", M._map_sound_chain(1, 0.1, keep(8.0), 8.0))
 
     def test_a_music_bed_that_would_level_his_sound_is_named(self):
         class E:
@@ -611,7 +620,8 @@ class Renderer(unittest.TestCase):
             self.assertIn(want, entry)
         only = dev[dev.index("export const PLACED_BY_OPERATOR_ONLY"):]
         self.assertIn("'location-map'", only[:only.index("])")])
-        self.assertIn("z.object({ id: z.literal('location-map'), label: deviceText(LOCATION_MAP_LABEL_MAX_CHARS) })", dev)
+        self.assertIn("id: z.literal('location-map'),\n    label: deviceText(LOCATION_MAP_LABEL_MAX_CHARS),", dev)
+        self.assertIn("dateFrom: z.number().int().min(0).default(0)", dev)          # a date said while it shows
         self.assertIn("case 'location-map':", read("src/remotion/DeviceFrame.tsx"))
         self.assertIn("case 'location-map':", read("src/core/deviceChoice.ts"))
 

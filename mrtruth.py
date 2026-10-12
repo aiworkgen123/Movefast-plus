@@ -14,9 +14,10 @@ A visuals plugin (`look.visuals: "mrtruth"`): make_video hands it the script, th
 Owner rules (2026-10-06): photos only; only Mr Truth's own templates; the switched-off templates (P13, P16,
 pointer-label, name-card, name-plate) exist but are never placed; checks stay loose — a template that does not
 fit falls back or the shot stays a plain photograph, and nothing stops the run.
-The date stamp (date-stamp, owner 2026-10-11: his date overlay, copied 1:1) is in the library and in the previews,
-and is not placed by the planner until he sends its rulings. So is his map animation (location-map, the same day,
-copied 1:1 with his own sound; its satellite plate is made at planning time by mrtruth_map.py).
+The date stamp (date-stamp, owner 2026-10-11: his date overlay, copied 1:1) and his map animation (location-map, the
+same day, copied 1:1 with his own sound; its satellite plate is made at planning time by mrtruth_map.py) are placed by
+places_and_dates (his rulings 3, 4 and 8 of the same day): a map on the first mention of a specific place, at most 3 a
+film about a minute apart; a date overlay on every important date said, the month or season over the year.
 
     python mrtruth.py preview all            # every template, labelled, into preview/mrtruth/
     python mrtruth.py preview P03,P14        # just these
@@ -93,25 +94,25 @@ LIBRARY = {
     "pointer-label":  (False, 1, 3.0, 5.0, None, "any", [], {}),
     "name-card":      (False, 2, 3.0, 5.0, 3, "any", [], {}),
     "name-plate":     (False, 1, 3.0, 5.0, 3, "any", [], {}),
-    # the owner's date overlay (2026-10-11, renderer DateStamp.tsx), copied 1:1 off his reference: in the library and
-    # previewable, NOT placed yet - his placement rulings come later. Off here is the table's never-placed mark (as for
-    # the switched-off ones above); the preview labels it as waiting for its rulings, not as switched off. 3.5 s at
-    # least (until he rules): his 45-frame build and then 2 s of the settled date (his own shot holds it 78 frames)
-    "date-stamp":     (False, 1, 3.5, 8.0, None, "any", [], {}),
+    # the owner's date overlay (2026-10-11, renderer DateStamp.tsx), copied 1:1 off his reference, placed by
+    # places_and_dates on every important date said (his ruling 4: no limit; "appears as spoken, ~3-4 s"). Its shot:
+    # 3.5-4.5 s (_need_s: 3.2 + 0.3), his 45-frame build and then 2 s of the settled date at least (his own shot is
+    # 4.1 s); a longer one is cut on the narration by cap_shots, the rest a plain shot of its own
+    "date-stamp":     (True, 1, 3.2, 4.5, None, "any", [], {}),
     # the owner's map animation (2026-10-11, renderer LocationMap.tsx, planning half mrtruth_map.py), copied 1:1 with
-    # his sound (MAP_SFX): in the library and previewable, NOT placed yet, the same way. His shot is 8.0 s; on 7.5-8 s
-    # the camera move fills the shot and the ring and name keep his frames. Not shorter: his sound is his, never
-    # time-scaled, and its whoosh follows his camera's fastest moment (his 4.0 s); the move squeezed into the shot
-    # brings that moment n/2 frames in, 0.25 s early at 7.5 s (0.5 s at 7 s, 1.5 s at 5 s, where the cut also fell in
-    # his loudest whoosh, -23.7 dBFS; at 7.5 s it lands at -48.6, -52.6 at his 8 s). Fix round 2 raised the floor from
-    # 7 s. Its one picture is the place's satellite plate.
-    # FOR THE PLANNER, when his rulings come: the place's name as the narration says it (mrtruth_map.label_fits), its
-    # coordinates from the dossier or Claude, and the shot whose words name it (7.5-8 s); then at planning time
-    # pick = mrtruth_map.build_place(name, lat, lon, <job>/mrtruth/maps, <output>/_shared) - None (the geocoder unsure,
-    # no imagery) keeps the photograph - and row["device"] = {"id": "location-map", "label": name}
-    "location-map":   (False, 1, 7.5, 8.0, None, "any", [], {"label": 32}),
+    # his sound (MAP_SFX), placed by places_and_dates (his ruling 3: up to 3 a film, ~1 min apart, a 5-8 s shot that
+    # starts as the name is said). His shot is 8.0 s. On a shorter one the camera move is squeezed into the shot (it
+    # always ends on the last frame), the dot, ring, line and name keep his absolute frames (built by frame 51, never
+    # cut) and the name's exit keeps its place before the end; his sound is never time-scaled: the quiet stretch
+    # between his boom and his riser is shortened by half what the shot lacks (MAP_SFX_SPLICE), so his whoosh still
+    # follows the camera's fastest moment (n/2) as on his 8 s, and the cut at the end falls where it is already quiet
+    # (-42 dBFS at 5 s, was -23.7 in the loudest whoosh before the splice). Floor 5.0 s (impl-z, 2026-10-11): his name
+    # holds settled 2.3 s there (frames 51-121 of 150), the camera runs 1.6x his speed, and his quiet stretch allows
+    # a splice down to 4.8 s. In the first 30 s at most 6 s (_cap_ms: the owner's one shot over 6 s there is the
+    # title's). Its one picture is the place's satellite plate (or a ready-made one of its terrain)
+    "location-map":   (True, 1, 5.0, 8.0, 3, "any", [], {"label": 32}),
 }
-AWAITING_RULINGS = {"date-stamp", "location-map"}     # drawn and previewed, never placed, until the owner rules where they go
+AWAITING_RULINGS = set()     # templates drawn and previewed but not yet placed while the owner rules (none now)
 # the owner's templates that cut in and out hard: transitions() gives a shot carrying one a cut in (no flash, burn or
 # dip over the build: his page and his gallery open on one - a burn, flash or dip would lie over the first highlight,
 # or over the gallery's zoom-out and its first sound; his map's dot and ring and his date build likewise) and never a
@@ -119,6 +120,7 @@ AWAITING_RULINGS = {"date-stamp", "location-map"}     # drawn and previewed, nev
 # his map or date over his name's fade or his held date). A section turn that lands on one is a hard cut too, its dip
 # and thud left out and said in the log, until he rules otherwise
 HARD_CUT_DEVICES = {"highlight-page", "gallery-strip", "location-map", "date-stamp"}
+SPOT_DEVICES = ("location-map", "date-stamp")       # placed on their own spoken words by places_and_dates
 # frames each template needs to finish building (the repo's DEVICE_REGISTRY buildEndFrames) — never seated on a shorter shot
 BUILD_FRAMES = {"P12": 36, "P17": 42, "P03": 55, "P22": 123, "P19": 76, "gallery-strip": 131, "framed-card": 25,
                 "photo-pop": 61, "shadow-up": 60, "P08": 60, "P04": 60, "P02": 90, "P09": 90, "P05": 120, "P14": 71,
@@ -127,6 +129,7 @@ BUILD_FRAMES = {"P12": 36, "P17": 42, "P03": 55, "P22": 123, "P19": 76, "gallery
 # where each template writes over the photograph (x0, y0, x1, y1 as fractions) and how bright that strip may be;
 # the repo reads the ground under the letters (T-26), not the whole picture's average
 TYPE_BAND = {"shadow-up": ((0.12, 0.80, 0.88, 0.97), 0.50), "top-title": ((0.02, 0.04, 0.62, 0.32), 0.55),
+             "date-stamp": ((0.48, 0.04, 0.98, 0.30), 0.55),
              "corner-label": ((0.55, 0.03, 0.98, 0.24), 0.55), "P12": ((0.58, 0.03, 0.98, 0.32), 0.70),
              "P14": ((0.58, 0.03, 0.98, 0.30), 0.70), "P03": ((0.02, 0.52, 0.66, 0.92), 0.70)}
 NAMES_PICTURE = {"P04", "P05", "P17", "framed-card", "corner-label"}     # words that say what the photo IS (T-8/T-10)
@@ -219,6 +222,13 @@ MAP_SFX_RATE, MAP_SFX_OFFSET_SAMPLES, MAP_SFX_SAMPLES = 48000, 5431, 380899
 MAP_SFX_OFFSET_S = MAP_SFX_OFFSET_SAMPLES / MAP_SFX_RATE          # 0.113146 s
 MAP_SFX_TAIL_S, MAP_SFX_FADE_S = 0.0485, 0.04
 MAP_AUDIO_BITRATE = "320k"                 # the film's final AAC when any of his template sounds is in it (192k drops his peak)
+# his map sound on a shot shorter than his 8 s (impl-z, 2026-10-11, the 5-8 s map ruled the same day): never
+# time-scaled. The quiet stretch between his boom's tail and his riser (file 1.45-3.10 s, -54..-64 dBFS in 50 ms windows)
+# is shortened by half of what the shot lacks (_map_splice), so his riser and whoosh come that much earlier - with the
+# camera, whose fastest moment the squeezed move brings to n/2 (his: frame 120 of 240) - and the cut at the shot's end
+# (MAP_SFX_TAIL_S past it) lands later in his decay: -42 dBFS on a 5 s shot (it fell in his loudest whoosh, -23.7, before).
+# The two sides meet in an equal-power crossfade of MAP_SFX_XFADE_S centred in the quiet stretch
+MAP_SFX_REF_S, MAP_SFX_QUIET, MAP_SFX_XFADE_S = 8.0, (1.45, 3.10), 0.06
 # the owner's sounds for two of his templates (2026-10-11: "SFX for the first highlight, and then the second highlight.
 # Third highlight is same SFX as second highlight. It needs to be timed right like this reference ... SFX for the A8
 # container - gallery strip. Time it right"), cut losslessly from his two reference clips into mrtruth_renderer/sfx/ as
@@ -1434,8 +1444,8 @@ def _can(rows: list, i: int, tid: str, ignore_len: bool = False) -> bool:
         return False
     if i == 0 and tid != "P03":
         return False
-    if tid not in ("P12", "P14", "chapter-plate", "chapter-title") and i and _year_in(rows[i]["text"]):
-        return False                 # a shot that speaks a year belongs to P12/P14 (the repo's G15)
+    if tid not in ("P12", "P14", "chapter-plate", "chapter-title") + SPOT_DEVICES and i and _year_in(rows[i]["text"]):
+        return False                 # a shot that speaks a year belongs to P12/P14 (the repo's G15) - or a date overlay
     if ignore_len:
         return True
     return _dur(rows[i]) * FPS >= BUILD_FRAMES.get(tid, 0) + 4 and (_dur(rows[i]) <= hi + 0.05 or tid in ("P12", "P03"))
@@ -1715,6 +1725,11 @@ def _hold(engine, rows: list, i: int, secs: float, why: str) -> None:
 
 
 def _need_s(tid: str) -> float:
+    """How long a template's shot must last: its library minimum (or its build and 4 frames) and 0.3 s - the map's is
+    its floor itself (its build ends at 1.7 s; the floor already holds his name settled 2.3 s and keeps his sound's
+    splice in its quiet stretch)."""
+    if tid == "location-map":
+        return LIBRARY[tid][2]
     return max(LIBRARY[tid][2], (BUILD_FRAMES.get(tid, 0) + 4) / FPS) + 0.3
 
 
@@ -5083,6 +5098,9 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         borrowed = list(ex.map(borrow, range(len(rows))))
 
     info = _choose(engine, job, rows, states, found, borrowed, dossier)
+    for r in rows:                                   # a map's picture is its plate (places_and_dates), never searched
+        if _spot(r) == "map" and r.get("plate"):
+            r["pick"], r["step"] = r["plate"], "map"
     steps = info["steps"]
     by_round = [sum(1 for st in states if st.get("round") == k) for k in (1, 2, 3)]
     engine.log(f"  pictures in {time.time() - t0:.0f}s (search rounds: 1 {by_round[0]}, 2 {by_round[1]}, 3 {by_round[2]}; "
@@ -5114,9 +5132,10 @@ def _bare(r: dict) -> bool:
 
 
 def _covered(r: dict) -> bool:
-    """A template that covers the whole frame with its own page (highlight-page; chapter-title is off): the shot needs
-    no picture of its own, and the picture scenes() lays under the page is never seen (not a showing)."""
-    return (r.get("device") or {}).get("id") in ("chapter-title", "highlight-page")
+    """A template that covers the whole frame with its own page (highlight-page; chapter-title is off) or its own map
+    (location-map: its picture is the place's plate, made when it is placed): the shot is searched for no picture, and
+    what it shows is never a showing of a photo."""
+    return (r.get("device") or {}).get("id") in ("chapter-title", "highlight-page", "location-map")
 
 
 def _window_ok(times: list, t: int) -> bool:
@@ -7022,6 +7041,618 @@ def _hl_reasons(rejected: list, most: int = 5) -> str:
     return ", ".join(f"{v} {k}" for k, v in n.most_common(most)) + (", ..." if len(n) > most else "") if n else "none"
 
 
+# ── 5c-. the location map and the date overlay (owner 2026-10-11, rulings 3, 4 and 8) ───────────────────────────────
+# After the highlighted pages and before the pictures (a map's shot is searched for no picture - its plate is its
+# picture; a date's shot is searched as any other, for its own line). mrtruth_spots lists every place name and every
+# date the narration says, with when each is heard; ONE Claude call a film (MD_PROMPT, cached in
+# mrtruth/places_dates.json under its prompt; a failed call is never cached) says which names are specific places and
+# which dates are important, and gives each place its label, coordinates and terrain; the code checks every answer,
+# Nominatim confirms each place, and each spot is cut into the film where its words are said (_md_take).
+MD_V = 1                                   # what the step is told: a change asks again
+MAP_MAX = LIBRARY["location-map"][4]       # 3 a film (his ruling: "up to 3 times in the video")
+MAP_MIN_S = LIBRARY["location-map"][2]     # 5.0 s (see the library)
+MAP_AIM_S = 7.0                            # a map shot runs about this long when its sentence lets it (his: 8 s)
+MAP_GAP_S = 60.0                           # maps about a minute apart, start to start
+MAP_NEXT_S = 60.0                          # a place first said under the opening title or on a highlighted page (his
+                                           # two exclusions) may take its next mention this soon after
+DATE_AIM_S = 4.1                           # his date shot (123 frames)
+DATE_SHARE_MIN_S = 2.5                     # a date on a map's shot shows at least this long (his 1.5 s build + 1 s)
+MD_ASK_MAX = 60                            # places, and dates, one call reads at most
+MD = {}                                    # this film's step: candidates, answers, spots (gate.json, plan log)
+
+MD_PROMPT = """You are marking the PLACES and the DATES in the narration of a photo documentary (channel: Mr Truth, dark
+and mysterious) for two on-screen templates the channel owner ruled on.
+
+THE LOCATION MAP: a satellite map of one specific place, a yellow ring round it and its name. The owner's words: "Use it
+whenever narration mentions a specific place or a specific location. Dont use it when the place that is mentioned is
+just a regular state in america like Texas. Instead of a specific place in texas, or for example Qumran Caves or Caddo
+Lake, Texas or some Forest in arizona etc. You can also use it when narration mentions a foreign place/city like Kairo,
+Egypt. ... This can be used up to 3 times in the video, don't miss the spots where this fits!" So YES - every one,
+even when it is named in passing: a city, town or village (in the US or abroad), a lake, river, cave, mountain, forest,
+island, desert site, monastery, church, library, castle, prison, any building or site with a place on the map. Do not
+judge whether the story happens there: a city someone came from, wrote in or sent a letter to is a specific place (rank
+it lower instead). NO: a US state alone ("Texas"), a country alone ("Egypt"), a continent or a wide region ("the
+eastern Mediterranean"), a word that only describes ("Sicilian", "Egyptian traditions"), a person, an institution or
+a church as a body of people rather than a building, a book, a document, a ship, a fictional place. Only the place's
+first mention counts. The film carries at most {maps} maps, about a minute apart: the code keeps the best by your rank
+(5 = the story happens there, 1 = named in passing).
+
+THE DATE OVERLAY: a big line and a small one in the top corner. The owner's words: "use it when the narration mentions A
+date, if narration says on 'On march 28th 2026', The text overlay will say March 2026 for example. It can also be
+'Spring 1998' Depending on narration ... use this animation in all the important date mentions." The big line is the
+month or the season as said ("March", "Spring"), the small line the year ("2026"); the day is dropped; a year alone is
+the big line alone ("1994", small line ""). NO: a date said in passing (a side remark, one of several dates said
+together), a number that is not a date ("1500 manuscripts"), a decade, a century, a relative date ("six months
+later"). The same date again: only its first time.
+
+THE CANDIDATES below were found by code in the narration; many are not places or not dates at all. Decide each one.
+
+THE FILM'S NOTES (from the research)
+{notes}
+
+<script>
+{script}
+</script>
+
+PLACE CANDIDATES (id, second it is said, the name as found, the sentence)
+{places}
+
+DATE CANDIDATES (id, second it is said, the words as said, how the code reads them, the sentence)
+{dates}
+
+For EACH place: {{"id": "p1", "use": true or false, "label": the name to print on the map as the narration says it (at
+most 32 letters, no leading "the"; "Caddo Lake", "Cairo, Egypt"), "lat": decimal degrees, "lon": decimal degrees (that
+very place, your best knowledge), "kind": "city|town|village|lake|river|cave|mountain|forest|desert|island|coast|
+building|site|region|state|country|other", "terrain": "green|desert|mountains|coast|snow" (the land round it seen from
+above), "rank": 1-5, "why": a few words}}.
+For EACH date: {{"id": "d1", "use": true or false, "date": the big line, "year": the small line or "", "why": a few
+words}}.
+Never invent a place or a date the narration does not say. Return {{"places": [...], "dates": [...]}}"""
+
+
+def _spot(r) -> str:
+    """'map' / 'date' for a shot carrying the location map / the date overlay, else ''."""
+    tid = (r.get("device") or {}).get("id")
+    return "map" if tid == "location-map" else "date" if tid == "date-stamp" else ""
+
+
+def _md_blocking(rows: list, k: int) -> str:
+    """Why shot k cannot give its time to a map or a date ("" when it can): a highlighted page (his rule), a chapter,
+    a planned hold, the gallery strip, another map or date."""
+    r = rows[k]
+    tid = (r.get("device") or {}).get("id")
+    if tid in ("highlight-page", "chapter-title"):
+        return "a highlighted page holds the frame"
+    if r.get("section_turn") or tid == "chapter-plate":
+        return "a chapter opens there"
+    if r.get("hold"):
+        return "a planned long hold"
+    if tid == "gallery-strip":
+        return "the gallery strip"
+    if tid in SPOT_DEVICES:
+        return f"the {_spot(r)} at {r['startMs'] / 1000:.1f}s"
+    return ""
+
+
+def _md_cap_ms(tid: str, t0: int) -> int:
+    cap = int(LIBRARY[tid][3] * 1000)
+    if tid == "location-map" and t0 < PACE_OPEN_S * 1000:      # the first 30 s: one shot over 6 s, the title's
+        cap = min(cap, int(PACE_OPEN_LONG_S * 1000))
+    return cap
+
+
+def _md_room(rows: list, t0: int, tid: str):
+    """((i, lo, hi), "") - shot i holds t0, and the spot may end anywhere in [lo, hi] - or (None, why not)."""
+    need, cap = int(1000 * _need_s(tid)), _md_cap_ms(tid, t0)
+    i = next((k for k, r in enumerate(rows) if r["startMs"] <= t0 < r["endMs"]), None)
+    if i is None:
+        return None, "said outside the film's shots"
+    if i == 0:
+        if t0 < rows[0]["startMs"] + _need_ms(rows[0]):
+            return None, "the opening title holds the frame"
+    else:
+        why = _md_blocking(rows, i)
+        if why:
+            return None, why
+    limit, block = rows[-1]["endMs"], "the film's end"
+    for k in range(i + 1, len(rows)):
+        if rows[k]["startMs"] >= t0 + cap:
+            break
+        why = _md_blocking(rows, k)
+        if why:
+            limit, block = rows[k]["startMs"], why
+            break
+    lo, hi = t0 + need, min(t0 + cap, limit)
+    if hi < lo:
+        return None, f"only {(limit - t0) / 1000:.1f}s before {block} (it needs {need / 1000:.1f}s)"
+    return (i, lo, hi), ""
+
+
+def _md_end(rows: list, lo: int, hi: int, aim: int, cues: list, heard: list, sentences: list) -> int:
+    """Where the spot's shot ends inside [lo, hi]: a sentence's start near `aim` (from aim - 1 s), else the subtitle
+    start nearest it, else the word heard nearest it, else `aim`; a rest of the shot it ends in shorter than
+    SYNC_MIN_SHOT_MS joins the spot (or is left a second long) - never a sliver of a shot."""
+    aim = min(hi, max(lo, aim))
+    sent = [s for s in sentences if max(lo, aim - 1000) <= s <= hi]
+    starts = sorted({int(a) for a, _, _ in cues if lo <= a <= hi})
+    words = [ms for ms, w in heard or [] if w and lo <= ms <= hi]
+    pool = sent or starts or words
+    t1 = min(pool, key=lambda x: (abs(x - aim), x)) if pool else aim
+    j = next((k for k, r in enumerate(rows) if r["startMs"] < t1 <= r["endMs"]), None)
+    if j is not None:
+        rest = rows[j]["endMs"] - t1
+        if 0 < rest < SYNC_MIN_SHOT_MS:
+            if rows[j]["endMs"] <= hi:
+                t1 = rows[j]["endMs"]
+            elif rows[j]["endMs"] - SYNC_MIN_SHOT_MS >= lo:
+                t1 = rows[j]["endMs"] - SYNC_MIN_SHOT_MS
+    return int(t1)
+
+
+def _md_said(toks: list, lo: int, hi: int) -> str:
+    """The words said from lo to hi, each on its own heard time (mrtruth_spots.timed)."""
+    return " ".join(t["w"] for t in toks if lo <= t["ms"] < hi)
+
+
+_MD_DROP_KEYS = ("device", "overlay", "hl_was", "typedCaption", "companions", "type_shade", "filler", "held", "pick",
+                 "spare", "pool", "step", "_said", "_seated", "_pin", "plate", "spot", "spot_date", "section_turn", "hold")
+
+
+def _md_words(kind: str, block) -> str:
+    return " / ".join(block.get("lines") or []) if kind == "caption" else _dev_text(block)
+
+
+def _md_overlays_off(engine, rows: list, k: int, said: str, what: str, span: int = 2) -> None:
+    """A beat overlay (the brief's words, drawn on a shot with a picture and no template) within `span` shots of
+    shot k that repeats the words of a map or a date: taken off (one block of words a frame, and the same words
+    never twice - a year card's own overlay showed the year again once its card gave way)."""
+    want = _wordset(said) | set(re.findall(r"\b\d{3,4}\b", said))
+    if not want:
+        return
+    for x in rows[max(0, k - span):k + span + 1]:
+        o = str((x.get("overlay") or {}).get("text") or "")
+        if o.strip() and (_wordset(o) | set(re.findall(r"\b\d{3,4}\b", o))) & want:
+            x.pop("overlay", None)
+            MD.setdefault("blocks", []).append({"at_s": round(x["startMs"] / 1000, 1), "what": "beat overlay",
+                                                "words": o[:60], "how": f"taken off (it repeats the {what}'s words)"})
+            engine.log(f"      beat overlay '{o[:40]}' at {x['startMs'] / 1000:.1f}s taken off (it repeats the {what}'s words)")
+
+
+def _md_take(engine, rows: list, t0: int, t1: int, dev: dict, toks: list, src: int, extra: dict) -> dict:
+    """The film re-cut round a map or a date, before the pictures: one shot from t0 (its words, less SYNC_LEAD_MS) to t1
+    with the brief of shot `src` (the one whose line says it). What is said before t0 in the shot it opens in stays
+    that shot (its template or caption kept when its words are still said there); a rest under SYNC_MIN_SHOT_MS goes
+    to the shot before it. What is said after t1 is a plain shot of its own (the brief of the shot it came from, its
+    own picture search). Any other words on the shots it takes move to the nearest free shot within two that says them
+    (owner ruling 4: one block of words a frame - the date keeps the corner, the other text moves), else go; a year
+    card (P12, P14) there is replaced. Returns the spot's row."""
+    idx = [k for k, r in enumerate(rows) if r["endMs"] > t0 and r["startMs"] < t1]
+    i, j = idx[0], idx[-1]
+    s, e = rows[i]["startMs"], rows[j]["endMs"]
+    what = "map" if dev["id"] == "location-map" else "date"
+    base = rows[src] if 0 <= src < len(rows) else rows[i]
+    blocks = []                                      # (kind, block, from the row at ms, it was on the first / last)
+    for k in idx:
+        x = rows[k]
+        if x.get("typedCaption"):
+            blocks.append(("caption", x["typedCaption"], x["startMs"], k == i, k == j))
+        if x.get("device") and not (k == 0 and x["device"].get("id") == "P03"):
+            blocks.append(("device", x["device"], x["startMs"], k == i, k == j))
+    plain = lambda r, lo, hi: dict({k_: v for k_, v in r.items() if k_ not in _MD_DROP_KEYS}, startMs=int(lo),
+                                   endMs=int(hi), device=None, text=_md_said(toks, lo, hi) or r["text"])
+    head, prev = None, rows[i - 1] if i > 0 else None
+    if t0 > s:
+        if i == 0 or t0 - s >= SYNC_MIN_SHOT_MS:
+            head = dict(rows[i], endMs=int(t0), text=_md_said(toks, s, t0) or rows[i]["text"])
+            for key in ("_said", "_pin"):
+                head.pop(key, None)
+        elif prev is not None and not _md_blocking(rows, i - 1) and (i - 1 or t0 - prev["startMs"] <= _cap_ms(prev)):
+            prev["endMs"] = int(t0)                  # a rest under a second: the shot before says it (cap_shots cuts it
+                                                     # on the narration after the last sync if that takes it past its cap)
+            prev["text"] = f"{prev.get('text') or ''} {_md_said(toks, s, t0)}".strip()
+        else:
+            t0 = s                                   # nothing can take it: the spot opens on the shot's own cut
+    tail = plain(rows[j], t1, e) if e - t1 >= SYNC_MIN_SHOT_MS else None
+    if tail is None:
+        t1 = max(t1, e)
+    r = dict({k_: v for k_, v in base.items() if k_ not in _MD_DROP_KEYS}, startMs=int(t0), endMs=int(t1),
+             text=_md_said(toks, t0, t1) or base["text"], device=dev,
+             entities=list(dict.fromkeys(e_ for x in rows[i:j + 1] for e_ in x.get("entities") or [])))
+    r.update(extra)
+    if head is not None:                             # the head keeps its own words only when they are said there
+        head.pop("typedCaption", None)
+        hd = head.get("device")
+        if hd and not (i == 0 and hd.get("id") == "P03"):
+            head["device"] = None
+    out = rows[:i] + [x for x in (head, r, tail) if x is not None] + rows[j + 1:]
+    rows[:] = out
+    for kind, block, at, on_first, on_last in blocks:   # the other words on the shots it took: stay, move or go
+        tid = block.get("id") if kind == "device" else "typed caption"
+        words = _md_words(kind, block)
+        if kind == "device" and tid in ("P12", "P14"):
+            MD.setdefault("year_cards", []).append({"at_s": round(at / 1000, 1), "year": block.get("year"),
+                                                    "how": f"replaced by the {what}"})
+            engine.log(f"      {tid} '{block.get('year')}' at {at / 1000:.1f}s gives way to the {what}")
+            continue
+        if not _content(words) or (kind == "device" and not _overlay_words({"device": block})):
+            # a template with no words (a photo pop, a framed source): it stays on what is left of its own shot
+            stay = next((x for x, ok in ((tail, on_last), (head, on_first)) if ok and x is not None and not x.get("device")
+                         and (x["endMs"] - x["startMs"]) / 1000 >= _need_s(tid)), None)
+            if stay is not None:
+                stay["device"] = dict(block)
+                how = f"stays on the rest of its shot ({stay['startMs'] / 1000:.1f}s)"
+            else:
+                how = "dropped (no room left on its shot)"
+            MD.setdefault("blocks", []).append({"at_s": round(at / 1000, 1), "what": tid, "how": how})
+            engine.log(f"      {tid} at {at / 1000:.1f}s gives way to the {what}: {how}")
+            continue
+        k_r = rows.index(r)
+        near = sorted((k for k in range(max(1, k_r - 3), min(len(rows), k_r + 4)) if k != k_r),
+                      key=lambda k: (abs(rows[k]["startMs"] - at), k))
+        moved = None
+        for k in near:
+            x = rows[k]
+            if x.get("device") or x.get("typedCaption") or x.get("section_turn") or x.get("hold") or _covered(x):
+                continue
+            if not _spoken_in(words, x["text"]):          # on its words: said on that very shot
+                continue
+            if kind == "caption":
+                x["typedCaption"] = dict(block, startFrame=TYPED_CAPTION_START_F)
+            elif _can(rows, k, tid, ignore_len=True):
+                x["device"] = dict(block)
+            else:
+                continue
+            moved = x
+            break
+        how = f"moved to the shot at {moved['startMs'] / 1000:.1f}s" if moved else "dropped (no free shot near it says its words)"
+        MD.setdefault("blocks", []).append({"at_s": round(at / 1000, 1), "what": tid, "words": words[:60], "how": how})
+        engine.log(f"      {tid} '{words[:40]}' at {at / 1000:.1f}s gives way to the {what}: {how}")
+    _md_overlays_off(engine, rows, rows.index(r), " ".join(str(dev.get(f) or "") for f in ("label", "date", "year")), what)
+    return r
+
+
+def _md_shared(engine) -> Path:
+    root = getattr(engine, "OUTPUT_ROOT", None)
+    return Path(root) / "_shared" if root else HERE / "output" / "_shared"
+
+
+def _md_clean_label(x, name: str) -> str:
+    import mrtruth_map
+    lab = re.sub(r"^\s*the\s+", "", re.sub(r"\s+", " ", str(x or "")).strip(), flags=re.I).strip(" ,.;:")
+    words = lambda s: {w for w in re.findall(r"[^\W\d_]{3,}", s.lower()) if w not in ("the", "and", "of")}
+    if not words(lab) & words(name):                     # a label that names something else: the name he said
+        lab = ""
+    for c in [lab, lab.split(",")[0].strip(), name, name.split(",")[0].strip()]:
+        if c and len(c) <= LIBRARY["location-map"][7]["label"] and mrtruth_map.label_fits(c):
+            return c
+    return ""
+
+
+def places_and_dates(engine, job: Path, rows: list, script: str, dossier: dict, cues: list, force: bool = False) -> dict:
+    """The owner's location map and date overlay (2026-10-11, rulings 3, 4 and 8), after the highlighted pages and
+    before the pictures:
+      1. the candidates (mrtruth_spots): every capitalised place name, "City, State", "a forest in Arizona"; every date
+         - each with the moment it is heard. Refused by the code itself, never asked: a US state, a country or a
+         continent alone; a decade, a century, a relative date, a month with no year, dates said as a list;
+      2. ONE Claude call (MD_PROMPT; cached in mrtruth/places_dates.json under its prompt, a failure never cached and
+         the film goes on with its year cards as before) decides each candidate: a specific place (its label,
+         coordinates, terrain, rank) or not; an important date (its big and small lines) or one said in passing;
+      3. the maps, best rank first: at most MAP_MAX, MAP_GAP_S apart, never on the opening title or a highlighted page
+         (a place first said there may take its next mention within MAP_NEXT_S), its shot 5-8 s from its name (at
+         most 6 s in the first 30 s), the place confirmed by Nominatim (never a state, a country or a continent; near
+         Claude's point), its own satellite plate (A), else - its imagery or the geocoder out of reach, or the name
+         unknown to it - the ready-made plate of its terrain (B);
+      4. the dates, in film order: his format checked in code (the code's reading of the words wins over Claude's
+         text), the same date once, its shot 3.5-4.5 s from its words; a date said while a map is on screen shares
+         the map's shot (the map's name in the map, the date in the corner) once the name is clear of the corner,
+         else the map ends at the date when it has had its 5 s, else the date goes;
+      5. the year cards (P12, P14) on every year the step read are taken off: the date overlay replaces them.
+    Every candidate is logged with what became of it, and kept in MD (gate.json reports it)."""
+    import mrtruth_map
+    import mrtruth_spots as S
+    MD.clear()
+    MD.update(ran=False, claude="", places=[], dates=[], placed=[], year_cards=[], blocks=[], dropped=[])
+    if len(rows) < 3:
+        return MD
+    heard = _heard(job, cues)
+    toks = S.timed(cues, heard)
+    places = S.place_candidates(toks, dossier)
+    dates = S.date_candidates(toks)
+    ask_p = [c for c in places if not c["skip"]][:MD_ASK_MAX]
+    ask_d = [c for c in dates if not c["skip"]][:MD_ASK_MAX]
+    cut = lambda t: (t[:220] + "...") if len(t) > 220 else t
+    answer = {}
+    if ask_p or ask_d:
+        prompt = MD_PROMPT.format(
+            maps=MAP_MAX, notes=_hl_notes(dossier), script=script,
+            places="\n".join(f"{c['id']} ({c['at_ms'] / 1000:.1f}s) \"{c['name']}\" - {cut(c['said'])}" for c in ask_p)
+            or "(none)",
+            dates="\n".join(f"{c['id']} ({c['at_ms'] / 1000:.1f}s) \"{c['said']}\" reads as "
+                            f"{c['big']!r}{' / ' + repr(c['small']) if c['small'] else ''} - {cut(c['sentence'])}"
+                            for c in ask_d) or "(none)")
+        out = job / "mrtruth" / "places_dates.json"
+        key = _hash([MD_V, prompt])
+        got = None if force else _load(out)
+        fresh = not (isinstance(got, dict) and got.get("key") == key and isinstance(got.get("answer"), dict))
+        if fresh:
+            engine.log(f"Mr Truth: places and dates - {len(ask_p)} place name(s) and {len(ask_d)} date(s) to decide, "
+                       f"one Claude call...")
+            try:
+                got = {"key": key, "answer": _ask(engine, prompt, 6000, model=engine.SCRIPT_MODEL)}
+            except RuntimeError as e:
+                MD["claude"] = "failed"
+                for c in places:
+                    MD["places"].append({"id": c["id"], "name": c["name"], "at_s": round(c["at_ms"] / 1000, 2),
+                                         "status": "skipped", "why": c["skip"] or "Claude did not answer"})
+                for c in dates:
+                    MD["dates"].append({"id": c["id"], "said": c["said"], "at_s": round(c["at_ms"] / 1000, 2),
+                                        "status": "skipped", "why": c["skip"] or "Claude did not answer"})
+                engine.log(f"  places and dates: {e} - no map or date overlay this run, the year cards stay (asked "
+                           f"again next run)")
+                return MD
+            _dump(out, got)
+        MD["claude"] = "asked" if fresh else "cached"
+        answer = got["answer"] if isinstance(got.get("answer"), dict) else {}
+    MD["ran"] = True
+    pa = {str(x.get("id")): x for x in answer.get("places") or [] if isinstance(x, dict)}
+    da = {str(x.get("id")): x for x in answer.get("dates") or [] if isinstance(x, dict)}
+    rec_p = {c["id"]: {"id": c["id"], "name": c["name"], "at_s": round(c["at_ms"] / 1000, 2), "status": "skipped",
+                       "why": c["skip"]} for c in places}
+    rec_d = {c["id"]: {"id": c["id"], "said": c["said"], "kind": c["kind"], "at_s": round(c["at_ms"] / 1000, 2),
+                       "status": "skipped", "why": c["skip"], "big": c["big"], "small": c["small"]} for c in dates}
+    sentences = _sentence_starts(cues)
+    shared = _md_shared(engine)
+    maps_dir = job / "mrtruth" / "maps"
+    num = lambda v: float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else \
+        float(v) if isinstance(v, str) and re.fullmatch(r"\s*-?\d+(\.\d+)?\s*", v) else None
+
+    # 3. the maps, best rank first (then in film order)
+    chosen = []
+    for c in ask_p:
+        a = pa.get(c["id"])
+        rec = rec_p[c["id"]]
+        if a is None:
+            rec["why"] = "Claude gave no answer for it"
+            continue
+        if not a.get("use"):
+            rec["why"] = f"Claude: {str(a.get('why') or 'not a specific place')[:80]}"
+            continue
+        if str(a.get("kind") or "").lower() in ("state", "country", "region"):
+            rec["why"] = f"a {a['kind']} (the owner: never a US state or a country alone)"
+            continue
+        rank = num(a.get("rank"))
+        chosen.append((-(rank if rank is not None else 3), c["at_ms"], c, a))
+    for _, _, c, a in sorted(chosen, key=lambda x: (x[0], x[1])):
+        rec = rec_p[c["id"]]
+        label = _md_clean_label(a.get("label"), c["name"])
+        rec.update(label=label, rank=a.get("rank"), terrain=a.get("terrain"))
+        if not label:
+            rec["why"] = "its name does not fit the map's label (32 letters, two lines)"
+            continue
+        lat, lon = num(a.get("lat")), num(a.get("lon"))
+        seat, why, first = None, "", None
+        for n, ms in enumerate(sorted(set(c["mentions"]))):
+            if n and (first is None or ms - first > MAP_NEXT_S * 1000):
+                break
+            first = ms if first is None else first
+            t0 = max(0, ms - SYNC_LEAD_MS)
+            near = next((x for x in MD["placed"] if x["kind"] == "map" and abs(x["t0"] - t0) < MAP_GAP_S * 1000), None)
+            if near:
+                why = f"within {MAP_GAP_S:.0f}s of the map of {near['label']} at {near['t0'] / 1000:.1f}s"
+                break
+            got, why = _md_room(rows, t0, "location-map")
+            if got:
+                seat = (ms, t0, got)
+                break
+            if why not in ("the opening title holds the frame", "a highlighted page holds the frame"):
+                break                                # only his two exclusions let a later mention take it
+        if seat is None:
+            rec["why"] = why or "no room"
+            continue
+        if len([x for x in MD["placed"] if x["kind"] == "map"]) >= MAP_MAX:
+            rec["why"] = f"the film's {MAP_MAX} maps are placed (its rank {a.get('rank')})"
+            continue
+        ms, t0, (i, lo, hi) = seat
+        if lat is None or lon is None:
+            g = {"ok": False, "status": "input", "why": "Claude gave no coordinates"}
+        else:
+            g = mrtruth_map.geocode(label, lat, lon, shared / "geocode_nominatim.json")
+        rec["geocode"] = {k: g.get(k) for k in ("ok", "status", "why", "name", "km", "query", "osm_type") if g.get(k) is not None}
+        if not g["ok"] and g.get("status") not in ("unreachable", "unknown"):
+            rec["why"] = f"Nominatim: {g['why']}"
+            continue
+        pick = None
+        if g["ok"]:
+            pick = mrtruth_map.build_place(label, lat, lon, maps_dir, shared, say=engine.log, g=g)
+        terrain = S.terrain_of(a.get("terrain"), g.get("osm_type", ""), lat)
+        if pick is None:
+            why_b = g["why"] if not g["ok"] else "its satellite imagery could not be fetched"
+            pick = mrtruth_map.fallback_place(label, terrain, why_b)
+            if pick is None:
+                rec["why"] = f"no imagery and no ready-made plate ({why_b})"
+                continue
+            rec["imagery"] = f"a ready-made {terrain} plate ({why_b})"
+        else:
+            rec["imagery"] = "its own satellite plate (EOX Sentinel-2 2016)"
+        t1 = _md_end(rows, lo, hi, t0 + int(MAP_AIM_S * 1000), cues, heard, sentences)
+        src = next((k for k, r in enumerate(rows) if r["startMs"] <= ms < r["endMs"]), i)
+        r = _md_take(engine, rows, t0, t1, {"id": "location-map", "label": label}, toks, src,
+                     {"plate": pick, "spot": {"kind": "map", "ms": int(ms), "id": c["id"], "name": label}})
+        rec.update(status="placed", why="", at_s=round(ms / 1000, 2), shot_at_s=round(r["startMs"] / 1000, 2),
+                   shot_s=round((r["endMs"] - r["startMs"]) / 1000, 2), mention=sorted(set(c["mentions"])).index(ms) + 1)
+        MD["placed"].append({"kind": "map", "label": label, "t0": r["startMs"], "ms": int(ms), "id": c["id"]})
+        engine.log(f"      map '{label}' at {r['startMs'] / 1000:.1f}s ({(r['endMs'] - r['startMs']) / 1000:.1f}s), said at "
+                   f"{ms / 1000:.2f}s: {rec['imagery']}" + (f" - its mention {rec['mention']}" if rec["mention"] > 1 else ""))
+
+    # 4. the dates, in film order
+    shown = {}
+    for c in dates:
+        rec = rec_d[c["id"]]
+        if c["skip"]:
+            continue
+        a = da.get(c["id"])
+        if a is None:
+            rec["why"] = "Claude gave no answer for it"
+            continue
+        if not a.get("use"):
+            rec["why"] = f"Claude: {str(a.get('why') or 'said in passing')[:80]}"
+            continue
+        big, small = c["big"], c["small"]
+        cb, cs = str(a.get("date") or "").strip(), str(a.get("year") or "").strip()
+        if (cb, cs) != (big, small):
+            rec["claude_text"] = f"{cb} / {cs}" if cs else cb
+        bad = S.date_ok(big, small)
+        if bad:
+            rec["why"] = f"its words do not make his date ({bad})"
+            continue
+        if (big, small) in shown:
+            rec["why"] = f"the same date again (shown at {shown[(big, small)] / 1000:.1f}s)"
+            continue
+        t0 = max(0, c["at_ms"] - SYNC_LEAD_MS)
+        m = next((x for x in rows if _spot(x) == "map" and x["startMs"] <= t0 < x["endMs"]), None)
+        if m is not None:                            # said while a map is on screen
+            frames = round((m["endMs"] - m["startMs"]) * FPS / 1000)
+            f_date = round((t0 - m["startMs"]) * FPS / 1000)
+            clear = S.corner_clear_frame(m["device"]["label"], big, small, frames)
+            if clear is not None and f_date >= clear and m["endMs"] - t0 >= DATE_SHARE_MIN_S * 1000 \
+                    and not m["device"].get("date"):
+                m["device"].update(date=big, year=small)
+                m["spot_date"] = {"ms": int(c["at_ms"]), "id": c["id"], "said": c["said"]}
+                shown[(big, small)] = t0
+                rec.update(status="placed", why="", shared=True, shot_at_s=round(m["startMs"] / 1000, 2))
+                engine.log(f"      date '{big}{' ' + small if small else ''}' at {t0 / 1000:.1f}s shares the map of "
+                           f"{m['device']['label']} (the corner clear of the name from frame {clear})")
+                continue
+            if t0 - m["startMs"] >= _need_s("location-map") * 1000:
+                k = rows.index(m)                    # the map has had its time: it ends where the date is said
+                rest = dict({k_: v for k_, v in m.items() if k_ not in _MD_DROP_KEYS}, startMs=int(t0),
+                            endMs=m["endMs"], device=None, text=_md_said(toks, t0, m["endMs"]) or m["text"])
+                m["endMs"], m["text"] = int(t0), _md_said(toks, m["startMs"], t0) or m["text"]
+                rows.insert(k + 1, rest)
+                engine.log(f"      map of {m['device']['label']} ends at {t0 / 1000:.1f}s, where a date is said")
+            else:
+                into = (t0 - m["startMs"]) / 1000
+                rec["why"] = (f"said {into:.1f}s into the map of {m['device']['label']}, " + (
+                    f"while its name crosses the date's corner (clear from {clear / FPS:.1f}s)"
+                    if clear is None or f_date < clear else
+                    f"{(m['endMs'] - t0) / 1000:.1f}s before it ends (a date needs {DATE_SHARE_MIN_S}s there)"
+                    if not m["device"].get("date") else "which carries a date already"))
+                continue
+        got, why = _md_room(rows, t0, "date-stamp")
+        if not got:
+            rec["why"] = why
+            continue
+        i, lo, hi = got
+        t1 = _md_end(rows, lo, hi, t0 + int(DATE_AIM_S * 1000), cues, heard, sentences)
+        src = next((k for k, r in enumerate(rows) if r["startMs"] <= c["at_ms"] < r["endMs"]), i)
+        r = _md_take(engine, rows, t0, t1, {"id": "date-stamp", "date": big, "year": small}, toks, src,
+                     {"spot": {"kind": "date", "ms": int(c["at_ms"]), "id": c["id"], "said": c["said"]}})
+        shown[(big, small)] = r["startMs"]
+        rec.update(status="placed", why="", shot_at_s=round(r["startMs"] / 1000, 2),
+                   shot_s=round((r["endMs"] - r["startMs"]) / 1000, 2))
+        MD["placed"].append({"kind": "date", "label": f"{big} {small}".strip(), "t0": r["startMs"], "ms": int(c["at_ms"]),
+                             "id": c["id"]})
+        engine.log(f"      date '{big}{' / ' + small if small else ''}' at {r['startMs'] / 1000:.1f}s "
+                   f"({(r['endMs'] - r['startMs']) / 1000:.1f}s), said at {c['at_ms'] / 1000:.2f}s ('{c['said']}')")
+
+    # 5. the year cards on every year the step read: the date overlay replaces them
+    for c in dates:
+        y = re.search(r"\b(1[0-9]{3}|20[0-9]{2})\b", c["said"]) or re.search(r"\b(1[0-9]{3}|20[0-9]{2})\b", c["small"] or c["big"])
+        if not y:
+            continue
+        for x in rows:
+            d = x.get("device") or {}
+            if d.get("id") in ("P12", "P14") and str(d.get("year")) == y.group(1) and \
+                    x["startMs"] - 1500 <= c["at_ms"] < x["endMs"] + 1500:
+                x["device"] = None
+                _md_overlays_off(engine, rows, rows.index(x), y.group(1), "date", span=0)
+                MD["year_cards"].append({"at_s": round(x["startMs"] / 1000, 1), "year": y.group(1),
+                                         "how": f"taken off: {rec_d[c['id']]['why'] or 'its date overlay is placed'}"})
+                engine.log(f"      {d['id']} '{y.group(1)}' at {x['startMs'] / 1000:.1f}s taken off (the date overlay "
+                           f"replaces the year cards: {rec_d[c['id']]['why'] or 'placed'})")
+    MD["places"], MD["dates"] = list(rec_p.values()), list(rec_d.values())
+    for rec in MD["places"]:
+        engine.log(f"      place {rec['name']!r} ({rec['at_s']:.1f}s): " + ("MAP" if rec["status"] == "placed" else
+                                                                             f"skipped - {rec['why']}"))
+    for rec in MD["dates"]:
+        engine.log(f"      date {rec['said']!r} ({rec['at_s']:.1f}s): " + (
+            f"DATE '{rec['big']}{' ' + rec['small'] if rec['small'] else ''}'" + (" (on the map)" if rec.get("shared") else "")
+            if rec["status"] == "placed" else f"skipped - {rec['why']}"))
+    n_map = sum(1 for x in MD["places"] if x["status"] == "placed")
+    n_date = sum(1 for x in MD["dates"] if x["status"] == "placed")
+    engine.log(f"  places and dates: {n_map} map(s) of at most {MAP_MAX} ({len(places)} place name(s) found, "
+               f"{len(ask_p)} asked), {n_date} date overlay(s) ({len(dates)} date(s) found, {len(ask_d)} asked); Claude "
+               f"{MD['claude'] or 'not asked'}; {len(MD['year_cards'])} year card(s) replaced")
+    return MD
+
+
+def _md_safe(engine, job: Path, rows: list, script: str, dossier: dict, cues: list, force: bool = False) -> dict:
+    """places_and_dates, which never stops the film: anything it raises leaves the rows as they were (with their year
+    cards), no map and no date, and is logged."""
+    keep = copy.deepcopy(rows)
+    try:
+        return places_and_dates(engine, job, rows, script, dossier, cues, force)
+    except PlanningStopped:
+        raise
+    except Exception as e:                                           # noqa: BLE001 - the film goes on without them
+        rows[:] = keep
+        MD.update(ran=False, placed=[], claude=f"failed ({type(e).__name__})")
+        engine.log(f"  places and dates: none this run ({type(e).__name__}: {str(e)[:120]}) - the film goes on without them")
+        return MD
+
+
+def _md_drop(rows: list, k: int, why: str) -> None:
+    """A map or a date goes (the gate, sync): the shot shows a picture of its own (a map's plate is not one: the reuse
+    guard gives the shot its picture on the re-cut, as for a split part)."""
+    r = rows[k]
+    kind = _spot(r)
+    dev = r.get("device") or {}
+    MD.setdefault("dropped", []).append({"at_s": round(r["startMs"] / 1000, 1), "kind": kind,
+                                         "what": dev.get("label") or f"{dev.get('date', '')} {dev.get('year', '')}".strip(),
+                                         "why": why})
+    DEV_DROPS.append((k, dev.get("id"), why))
+    if kind == "map":
+        if r.get("pick") is r.get("plate") or (r.get("pick") or {}).get("provider") == "map":
+            r["pick"] = None
+        r.pop("plate", None)
+    for key in ("spot", "spot_date", "type_shade"):
+        r.pop(key, None)
+    r["device"] = None
+
+
+def _md_report(rows: list, heard: list) -> dict:
+    """The maps and dates for gate.json and the log: each on screen (where, how long, how far from its words), and
+    what became of every candidate (MD)."""
+    import mrtruth_spots as S
+    on = []
+    for r in rows:
+        kind = _spot(r)
+        if not kind:
+            continue
+        dev = r["device"]
+        sp = r.get("spot") or {}
+        x = {"kind": kind, "at_s": round(r["startMs"] / 1000, 2), "shot_s": round((r["endMs"] - r["startMs"]) / 1000, 2),
+             "said_s": round(sp["ms"] / 1000, 2) if sp.get("ms") is not None else None,
+             "offset_s": round((r["startMs"] - (sp["ms"] - SYNC_LEAD_MS)) / 1000, 2) if sp.get("ms") is not None else None}
+        if kind == "map":
+            p = r.get("pick") or r.get("plate") or {}
+            x.update(label=dev.get("label"), imagery=("fallback " + p["map"]["fallback"]) if (p.get("map") or {}).get("fallback")
+                     else "own" if p else "none", place=(p.get("map") or {}).get("place"))
+            if dev.get("date"):
+                f = round(((r.get("spot_date") or {}).get("ms", r["startMs"]) - SYNC_LEAD_MS - r["startMs"]) * FPS / 1000)
+                x.update(date=f"{dev['date']} {dev.get('year') or ''}".strip(), date_frame=f,
+                         corner_clear_frame=S.corner_clear_frame(dev["label"], dev["date"], dev.get("year") or "",
+                                                                 round((r["endMs"] - r["startMs"]) * FPS / 1000)))
+        else:
+            x.update(date=dev.get("date"), year=dev.get("year"))
+        on.append(x)
+    return {"ran": MD.get("ran", False), "claude": MD.get("claude", ""), "on_screen": on,
+            "maps": sum(1 for x in on if x["kind"] == "map"), "dates": sum(1 for x in on if x["kind"] == "date")
+            + sum(1 for x in on if x["kind"] == "map" and x.get("date")),
+            "map_max": MAP_MAX, "places": MD.get("places", []), "candidate_dates": MD.get("dates", []),
+            "year_cards": MD.get("year_cards", []), "blocks": MD.get("blocks", []), "dropped": MD.get("dropped", [])}
+
+
 # ── 5c. every overlay lands on the word it shows (owner 2026-10-09: cards were seconds early) ─────────────────────
 SYNC_LEAD_MS = 150          # the overlay starts this much before its first word is heard
 SYNC_TOLERANCE_MS = 400     # closer than this is left alone
@@ -7034,6 +7665,8 @@ def _overlay_words(r: dict) -> list:
     dev, tc = r.get("device") or {}, r.get("typedCaption") or {}
     if dev.get("id") == "highlight-page":           # its passage is context: what the narrator says is its main phrase
         dev = {"id": "highlight-page", "line": _hl_phrase(dev)}
+    elif dev.get("id") == "location-map":           # a map is pinned on its name; a date it carries has its own moment
+        dev = {"id": "location-map", "label": str(dev.get("label") or "")}
     text = " ".join([str(v) for k, v in dev.items() if k != "id" and isinstance(v, str)]
                     + [str(x) for v in dev.values() if isinstance(v, list) for x in v if isinstance(x, str)]
                     + list(tc.get("lines") or []))
@@ -7079,7 +7712,8 @@ def _spoken_at(words: list, heard: list, lo: int, hi: int):
 SYNC_MAX_LATE_MS = 350      # an overlay crowded by the one before may start this much after its word, no more (was
                             # 1.5 s; owner 2026-10-10: ON its words, within half a second as the viewer sees it - a
                             # caption types 0.27 s into its shot, so 0.35 s late is 0.47 s after the word)
-_SYNC_RANK = {"P03": 9, "chapter-plate": 8, "typed caption": 7, "highlight-page": 6, "corner-label": 5, "P04": 5, "P17": 5,
+_SYNC_RANK = {"P03": 9, "chapter-plate": 8, "location-map": 7.5, "date-stamp": 7.5, "typed caption": 7, "highlight-page": 6,
+              "corner-label": 5, "P04": 5, "P17": 5,
               "P12": 4}
 # the capped layout (owner 2026-10-10: no shot over SCENE_MAX_S anywhere, cuts on the narration, a second sync changes
 # nothing; the pod's 11-min film had five shots of 8-12.4 s, all made here, and 179 of 206 cuts off the narration)
@@ -7105,6 +7739,9 @@ def _said_at(r: dict, heard: list, lo: int, hi: int, own: tuple = None):
     if dev.get("id") == "highlight-page" and not r.get("typedCaption"):
         at = _hl_said_at(dev, heard, own[0] - SYNC_TOLERANCE_MS, own[1]) if own else None
         return at if at is not None else _hl_said_at(dev, heard, lo, hi)
+    sp = r.get("spot") or {}
+    if dev.get("id") in SPOT_DEVICES and sp.get("ms") is not None and lo <= sp["ms"] <= hi:
+        return int(sp["ms"])                         # a map or a date: the very word places_and_dates heard it on
     return _spoken_at(_overlay_words(r), heard, lo, hi)
 
 
@@ -7123,6 +7760,8 @@ def _cap_ms(r: dict) -> int:
     tid, cap = (r.get("device") or {}).get("id"), int(SCENE_MAX_S * 1000)
     if not tid or r.get("typedCaption") or tid not in LIBRARY:
         return cap
+    if tid == "location-map" and r["startMs"] < PACE_OPEN_S * 1000:   # the first 30 s: the one shot over 6 s there is
+        return min(cap, max(_need_ms(r), int(PACE_OPEN_LONG_S * 1000)))   # the title's (owner's pace, 2026-10-11)
     return min(cap, max(_need_ms(r), int(LIBRARY[tid][3] * 1000)))
 
 
@@ -7310,6 +7949,8 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
         if tid(r) == "highlight-page":
             HL.setdefault("dropped", []).append({"at_s": round(r["startMs"] / 1000, 1), "main": _hl_phrase(r["device"]),
                                                  "why": f"sync: {why}"})
+        if _spot(r) and not r.get("typedCaption"):
+            _md_drop(rows, rows.index(r), f"sync: {why}")
         for key in ("typedCaption", "section_turn", "companions", "type_shade", "hl_was"):
             r.pop(key, None)
         r["device"] = None
@@ -7983,15 +8624,19 @@ THE GAPS
 Return {{"overlays": [{{"gap": n, "shot": n, "templateId": "...", "headline": "...", "kicker": "...", "lines": ["..."]}}]}}"""
 
 
-def _text_times(rows: list) -> list:
+def _text_times(rows: list, spots: bool = False) -> list:
     """Where the film shows words: every shot with a typed caption (from the moment it types in: a caption may type in
-    on its word inside its own shot) or a template that says something."""
-    return [_on_screen_ms(r) for r in rows if r.get("typedCaption") or (r.get("device") and _overlay_words(r))
-            or (r.get("device") or {}).get("id") == "chapter-plate"]
+    on its word inside its own shot) or a template that says something. A map or a date only with `spots` (the gate's
+    30 s rule and the reports: they are words on screen); never while the fillers are planned (owner 2026-10-11, ruling
+    4 CHANGE: "preserve these and also add the date overlay on top" - the fillers of a quiet stretch stay as they are,
+    maps and dates are added on top and never stand in for them)."""
+    return [_on_screen_ms(r) for r in rows if (r.get("typedCaption") or (r.get("device") and _overlay_words(r))
+                                               or (r.get("device") or {}).get("id") == "chapter-plate")
+            and (spots or not _spot(r))]
 
 
-def _gaps(rows: list) -> list:
-    marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
+def _gaps(rows: list, spots: bool = False) -> list:
+    marks = [0] + _text_times(rows, spots) + [rows[-1]["endMs"]]
     return [(a, b) for a, b in zip(marks, marks[1:]) if b - a > OVERLAY_MAX_GAP_S * 1000]
 
 
@@ -8035,8 +8680,9 @@ def fill_gaps(engine, job: Path, rows: list, build, force: bool = False) -> set:
         if g and sum(1 for x in rows if _group_of((x.get("device") or {}).get("id", "")) == g) >= \
                 OVERLAY_GROUPS[g][2] * max(1.0, minutes / 3):
             continue
-        if any(abs(x["startMs"] - r["startMs"]) < 8000 for x in rows if x.get("typedCaption") or (x.get("device") and _overlay_words(x))):
-            continue
+        if any(abs(x["startMs"] - r["startMs"]) < 8000 for x in rows if x.get("typedCaption")
+               or (x.get("device") and _overlay_words(x) and not _spot(x))):     # a map or a date never stands in for
+            continue                                                             # a filler (owner, ruling 4)
         if not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid):
             continue
         dev = build(tid, o, k)
@@ -8220,6 +8866,20 @@ def _filler_order(rows: list) -> list:
     return [tl for tl in sorted(_FILLERS, key=key) if _group_room(rows, tl[0]) >= 1]
 
 
+def _repeats_words(rows: list, text: str, at: int) -> bool:
+    """Would `text` on screen at `at` repeat a block of words shown within GATE_SAME_S (the gate's same-words rule, which
+    would take it back: impl-z 2026-10-11, a quiet stretch's line 'Terminology lists' set and taken back every round)?"""
+    x = _wordset(text)
+    for k, kind, name, other, on in _texts(rows):
+        if name in ("chapter-plate", "chapter-title", "P03") or abs(on - at) > GATE_SAME_S * 1000:
+            continue
+        y = _wordset(other)
+        both = x & y
+        if x and (x == y or len(both) >= 2 and len(both) / min(len(x), len(y)) >= GATE_SAME_SHARE):
+            return True
+    return False
+
+
 def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = None) -> set:
     """The guarantee under fill_gaps: any stretch still longer than OVERLAY_MAX_GAP_S gets a line of the narration
     of a free shot in its middle - words that are said there by definition, a phrase that reads whole (_spoken_phrase),
@@ -8243,7 +8903,8 @@ def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = No
                         continue
                     phrase = _spoken_phrase(r["text"], lim, rows[k - 1]["text"] if k else "",
                                             rows[k + 1]["text"] if k + 1 < len(rows) else "")
-                    if not phrase or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid):
+                    if not phrase or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid) \
+                            or _repeats_words(rows, phrase, r["startMs"]):
                         continue
                     dev = build(tid, {"headline": phrase, "lines": []}, k)
                     if dev:
@@ -8416,6 +9077,16 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
             sc["device"] = None
         if not dev and pick and not pick.get("ai") and n >= DUST_MIN_S * FPS:
             dusty.append((len(out), Path(pick["photo"]), n))
+        if (sc.get("device") or {}).get("id") == "date-stamp":
+            # the owner's ruling 8 (2026-10-11): the date's shot stays clean and bright like his reference - no shadow
+            # look, vignette, grain or move on it (the house curve stays: it is the house, not a strength)
+            sc["grade"] = {"lut": GRADE["lut"], "vignette": 0.0, "grain": 0.0}
+            sc["motion"] = dict(sc["motion"], fromScale=1.0, toScale=1.0, fromX=0.0, toX=0.0, fromY=0.0, toY=0.0)
+        elif (sc.get("device") or {}).get("id") == "location-map" and sc["device"].get("date"):
+            # a date said while the map is on screen: in the map's corner from its own word (places_and_dates)
+            at = (r.get("spot_date") or {}).get("ms")
+            f = int(round((at - SYNC_LEAD_MS - r["startMs"]) * FPS / 1000)) if at is not None else 0
+            sc["device"] = dict(sc["device"], year=sc["device"].get("year") or "", dateFrom=max(0, min(n - 1, f)))
         if r.get("typedCaption") and not sc.get("textCard"):     # see typed_captions(); a bright picture gets a scrim
             tc = r["typedCaption"]
             sc["typedCaption"] = {"lines": [ln[:48] for ln in tc["lines"][:2]],
@@ -8582,25 +9253,44 @@ def render(engine, work: Path, tasks: list, workers: int = 2) -> None:
     engine.log(f"  rendered in {time.time() - t0:.0f}s")
 
 
+def _map_splice(n: float) -> float:
+    """Seconds of his quiet stretch left out on a map shot `n` s long: half of what it lacks of his 8 s, at most what
+    the stretch holds less the crossfade (0 on 8 s or more)."""
+    q0, q1 = MAP_SFX_QUIET
+    return max(0.0, min((MAP_SFX_REF_S - n) / 2, q1 - q0 - MAP_SFX_XFADE_S))
+
+
 def _map_sounds(sc_list: list) -> list:
-    """(start s, length s, shot start s, shot end s) of the owner's map sound for each location-map shot (MAP_SFX)."""
+    """(start s, length s, shot start s, shot end s) of the owner's map sound for each location-map shot (MAP_SFX): its
+    length after the splice (_map_splice) and his own cut MAP_SFX_TAIL_S past the shot's last frame."""
     out = []
     for sc in sc_list:
         if (sc.get("device") or {}).get("id") == "location-map":
             a, n = sc["startFrame"] / FPS, sc["durationFrames"] / FPS
-            keep = min(MAP_SFX_SAMPLES / MAP_SFX_RATE, n + MAP_SFX_TAIL_S - MAP_SFX_OFFSET_S)
+            keep = min(MAP_SFX_SAMPLES / MAP_SFX_RATE - _map_splice(n), n + MAP_SFX_TAIL_S - MAP_SFX_OFFSET_S)
             if keep > 0:
                 out.append((a + MAP_SFX_OFFSET_S, keep, a, a + n))
     return out
 
 
-def _map_sound_chain(k: int, t: float, keep: float) -> str:
-    """The filter for one map sound on input k: cut (and faded) when the shot is shorter than his, placed to the sample."""
+def _map_sound_chain(k: int, t: float, keep: float, n: float = None) -> str:
+    """The filter for one map sound on input k: on a shot `n` s long, shorter than his 8 s, his quiet stretch shortened
+    (_map_splice: asplit, the two sides trimmed to the sample and joined by an equal-power crossfade); cut (and faded)
+    when the shot ends before the sound does; placed to the sample."""
+    d = _map_splice(n) if n is not None else 0.0
+    if d > 0:
+        q0, q1 = MAP_SFX_QUIET
+        at, xf = (q0 + q1 - d) / 2, MAP_SFX_XFADE_S
+        head, tail = round((at + xf / 2) * MAP_SFX_RATE), round((at + d - xf / 2) * MAP_SFX_RATE)
+        src = (f"[{k}:a]aresample={MAP_SFX_RATE},aformat=channel_layouts=stereo,asplit=2[m{k}h][m{k}t];"
+               f"[m{k}h]atrim=end_sample={head}[m{k}a];[m{k}t]atrim=start_sample={tail},asetpts=PTS-STARTPTS[m{k}b];"
+               f"[m{k}a][m{k}b]acrossfade=ns={round(xf * MAP_SFX_RATE)}:c1=qsin:c2=qsin,")
+    else:
+        src = f"[{k}:a]aresample={MAP_SFX_RATE},aformat=channel_layouts=stereo,"
     cut = ""
-    if keep < MAP_SFX_SAMPLES / MAP_SFX_RATE - 1e-3:
+    if keep < MAP_SFX_SAMPLES / MAP_SFX_RATE - d - 1e-3:
         cut = f"atrim=end={keep:.6f},afade=t=out:st={max(0.0, keep - MAP_SFX_FADE_S):.6f}:d={MAP_SFX_FADE_S},"
-    return (f"[{k}:a]aresample={MAP_SFX_RATE},aformat=channel_layouts=stereo,{cut}volume={MAP_SFX_DB}dB,"
-            f"adelay={round(t * MAP_SFX_RATE)}S:all=1")
+    return f"{src}{cut}volume={MAP_SFX_DB}dB,adelay={round(t * MAP_SFX_RATE)}S:all=1"
 
 
 def _bed_under(engine) -> bool:
@@ -8664,7 +9354,7 @@ def _template_sounds(sc_list: list) -> list:
         cues = [(a + dt, f) for dt, f in _template_cues(sc) if a + dt < b - TPL_SFX_FADE_S]
         for j, (t, f) in enumerate(cues):
             if f == MAP_SFX:                                # his own cut, as impl-m measured it
-                out += [(t, f, None if keep >= MAP_SFX_SAMPLES / MAP_SFX_RATE - 1e-3 else keep, a, b)
+                out += [(t, f, None if keep >= MAP_SFX_SAMPLES / MAP_SFX_RATE - _map_splice(b - a) - 1e-3 else keep, a, b)
                         for _, keep, _, _ in _map_sounds([sc])]
                 continue
             full = _sfx_samples(f) / TPL_SFX_RATE
@@ -8673,12 +9363,13 @@ def _template_sounds(sc_list: list) -> list:
     return out
 
 
-def _template_sound_chain(k: int, t: float, f: str, keep) -> str:
+def _template_sound_chain(k: int, t: float, f: str, keep, n: float = None) -> str:
     """The filter for one template sound on input k: stereo, at his level, the scribble faded in (his trim cut into it),
     cut (and faded) when `keep` says so, placed to the sample (adelay in samples: whole milliseconds would put it up to
-    1 ms early). The map's sound goes through its own chain (_map_sound_chain), unchanged."""
+    1 ms early). The map's sound goes through its own chain (_map_sound_chain), its shot `n` s long."""
     if f == MAP_SFX:
-        return _map_sound_chain(k, t, MAP_SFX_SAMPLES / MAP_SFX_RATE if keep is None else keep)
+        return _map_sound_chain(k, t, MAP_SFX_SAMPLES / MAP_SFX_RATE - (_map_splice(n) if n is not None else 0.0)
+                                if keep is None else keep, n)
     cut = f"afade=t=in:ns={round(HL_SFX_FIRST_FADE_IN_S * TPL_SFX_RATE)}," if f == HL_SFX_FIRST[0] else ""
     if keep is not None:
         n, fade = round(keep * TPL_SFX_RATE), round(TPL_SFX_FADE_S * TPL_SFX_RATE)
@@ -8728,8 +9419,8 @@ def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
     up = "" if not tpl else (",pan=stereo|c0=c0|c1=c0" if _channels(mp3) == 1 else ",aformat=channel_layouts=stereo")
     chains = [f"[{k + 1}:a]aresample=48000{',pan=stereo|c0=c0|c1=c0' if tpl else ''},volume={g}dB,"
               f"adelay={int(max(0.0, t - att) * 1000)}:all=1[s{k}]" for k, (t, f, g, att) in enumerate(cues)]
-    chains += [_template_sound_chain(len(cues) + 1 + j, t, f, keep) + f"[p{j}]"
-               for j, (t, f, keep, _, _) in enumerate(tpl)]
+    chains += [_template_sound_chain(len(cues) + 1 + j, t, f, keep, b - a) + f"[p{j}]"
+               for j, (t, f, keep, a, b) in enumerate(tpl)]
     mix = "".join(f"[s{k}]" for k in range(len(cues))) + "".join(f"[p{j}]" for j in range(len(tpl)))
     tail = ",alimiter=limit=1:attack=1:release=50:level=0:latency=1" if tpl else ""     # touches only overs
     fc = ";".join(chains + [f"[0:a]aresample=48000{up}[v];[v]{mix}amix=inputs={len(cues) + len(tpl) + 1}:normalize=0:"
@@ -8887,14 +9578,16 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     took("typed captions")
     _hl_safe(engine, job, rows, script, dossier, _cues(engine, srt), force)   # owner 2026-10-11
     took("highlighted pages")
+    _md_safe(engine, job, rows, script, dossier, _cues(engine, srt), force)   # owner 2026-10-11, rulings 3, 4 and 8
+    took("maps and dates")
     cap0 = getattr(engine, "AI_IMAGE_CAP", None)
     try:                                             # the film's AI budget lasts until its last picture decision (C2)
         _pictures_and_cut(engine, job, srt, rows, dossier, build, force, took, title)
     finally:                                         # the per-minute AI cap belongs to this film only
         if cap0 is not None:
             engine.AI_IMAGE_CAP = cap0
-    marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
-    left = _gaps(rows)
+    marks = [0] + _text_times(rows, True) + [rows[-1]["endMs"]]
+    left = _gaps(rows, True)
     engine.log(f"  words on screen: {len(marks) - 2} overlays, longest stretch without "
                f"{max(b - a for a, b in zip(marks, marks[1:])) / 1000:.0f}s" + (f" ({len(left)} over {OVERLAY_MAX_GAP_S:.0f}s)" if left else ""))
     for note in transitions(rows) or []:         # a section turn's dip given up for his template, said in the log
@@ -8990,8 +9683,8 @@ CARD_CHECK = (os.environ.get("MRTRUTH_CARD_CHECK") or "on").strip().lower() != "
 CARD_BATCH = int(os.environ.get("MRTRUTH_CARD_BATCH", "12"))   # labelled pictures one call looks at
 CARD_MAX = int(os.environ.get("MRTRUTH_CARD_MAX", "60"))       # pictures a film's card check may send (11 min: ~6-12)
 CARD_MEDIA = "HIGH"                     # a label is read against a sharp picture (1280 px), like a drawn stand-in
-GATE_RULES = ("opening", "text", "double text", "same words", "label", "groups", "words", "page", "too short", "quiet",
-              "long", "quick run", "average", "pace", "era", "ai", "reuse", "no picture")
+GATE_RULES = ("opening", "text", "double text", "same words", "label", "groups", "words", "page", "map", "date",
+              "too short", "quiet", "long", "quick run", "average", "pace", "era", "ai", "reuse", "no picture")
 GATE = {}                               # this film's gate: counts for gate.json and the log (reset by gate())
 # what a stop asks to change (C9: everything before the gate is saved, so a re-run stops in the same place)
 _GATE_HINT = {"opening": "the film's title or the dossier's first section must fit the opening card (26 letters, two lines)",
@@ -9001,7 +9694,8 @@ _GATE_HINT = {"opening": "the film's title or the dossier's first section must f
               "pace": "MRTRUTH_PACE_LEAD",
               "era": "a picture of the shot's own time (the stored answers found something later)",
               "text": "the template's words in the overlay plan", "no picture": "more pictures for the film",
-              "page": "the highlighted page's words (mrtruth/highlights.json), or MRTRUTH_HIGHLIGHT_PER_10MIN=0"}
+              "page": "the highlighted page's words (mrtruth/highlights.json), or MRTRUTH_HIGHLIGHT_PER_10MIN=0",
+              "map": "nothing: a map is repaired or dropped, never a stop", "date": "nothing: a date is repaired or dropped"}
 CARD_RULES = """You check the LABELS of a documentary before it is drawn. Each numbered picture is one shot with a label
 set over it that tells the viewer what the picture shows. Answer ONE question about EACH picture on its own: does the
 picture show what its label names? Never compare the pictures.
@@ -9112,7 +9806,9 @@ def _gate_ctx(job: Path, rows: list, dossier: dict, cues: list, title: str = "",
                                                    + [str(r.get("text") or "") for r in rows]).lower().replace("-", " ")))
     minutes = rows[-1]["endMs"] / 60000 if rows else 0
     planning = mode == "gate" and BUDGET.get("reuse_cap") is not None
-    return {"heard": heard, "heard_ms": [m for m, _ in heard], "vocab": vocab, "dossier": dossier or {},
+    md_years = {y for c in MD.get("dates") or [] for y in re.findall(r"\b(1[0-9]{3}|20[0-9]{2})\b", str(c.get("said") or ""))} \
+        if MD.get("ran") else set()
+    return {"heard": heard, "heard_ms": [m for m, _ in heard], "vocab": vocab, "dossier": dossier or {}, "md_years": md_years,
             "sentences": _sentence_starts(cues) if cues else [],
             "title": title, "mode": mode, "cards": {}, "resynced": set(), "ask": mode == "gate",
             "cap": BUDGET.get("cap", 0) if planning else round(AI_PER_MIN * minutes),
@@ -9221,7 +9917,8 @@ def _gate_find(rows: list, ctx: dict) -> list:
                     add("too short", k, f"{tid} is cut before its animation ends ({d[k]:.2f}s, it needs "
                                         f"{_build_frames(dev) / FPS:.2f}s)")
         if k and _year_in(r.get("text", "")) and not dev and not r.get("overlay") and not r.get("typedCaption") \
-                and (rows[k - 1].get("device") or {}).get("id") not in ("P12", "P14"):
+                and (rows[k - 1].get("device") or {}).get("id") not in ("P12", "P14") \
+                and _year_in(r.get("text", "")) not in ctx.get("md_years", ()):
             ctx["notes"].append(f"shot {k} ({r['startMs'] / 1000:.0f}s) says {_year_in(r['text'])} with no date on screen")
         off = min((abs(r["startMs"] - s) for s in ctx.get("sentences") or []), default=0)
         if k and (dev or {}).get("id") == "chapter-plate" and len(ctx.get("sentences") or []) > 1 and off > 250:
@@ -9328,10 +10025,83 @@ def _gate_find(rows: list, ctx: dict) -> list:
         if n and r["startMs"] - rows[pages[n - 1]]["startMs"] < HL_GAP_S * 1000:
             add("page", k, f"highlighted page '{main}' {(r['startMs'] - rows[pages[n - 1]]['startMs']) / 1000:.0f}s after "
                            f"the one before (at least {HL_GAP_S:.0f}s)", fix="drop")
-        elif k and _covered(rows[k - 1]):
+        elif k and (rows[k - 1].get("device") or {}).get("id") in ("chapter-title", "highlight-page"):
             add("page", k, f"highlighted page '{main}' beside another full-frame page", fix="drop")
-    marks = [0] + _text_times(rows) + [total]
-    for a, b in _gaps(rows):
+    # the owner's maps and dates (2026-10-11, rulings 3, 4 and 8): a map on its place's plate, its name fitting his
+    # label, 5-8 s (6 s in the first 30 s: the long rule), never on the opening shot, at most MAP_MAX a film, MAP_GAP_S
+    # apart, a place once; a date in his format (a month or a season over its year, or a year alone; never a day), its
+    # shot at least LIBRARY's 3.2 s (4.5 s at most: the long rule), a date once; a date on a map's shot only from the
+    # frame the map's name is clear of its corner, and for DATE_SHARE_MIN_S at least. Each repaired or dropped
+    # (_gate_fix), never a stop; on its words: the words rule, as every overlay
+    import mrtruth_map
+    import mrtruth_spots as S
+    maps, seen_l, seen_d = [], {}, {}
+    for k, r in enumerate(rows):
+        kind = _spot(r)
+        if not kind:
+            continue
+        dev = r["device"]
+        if k == 0:
+            add(kind, k, f"a {kind} on the opening title's shot", fix="drop")
+            continue
+        if kind == "map":
+            lab = str(dev.get("label") or "")
+            if (r.get("pick") or {}).get("provider") != "map":
+                add("map", k, f"map '{lab}' without its place's plate", fix="drop")
+                continue
+            if not mrtruth_map.label_fits(lab):
+                add("map", k, f"map '{lab}': its name does not fit his label", fix="drop")
+                continue
+            if d[k] < MAP_MIN_S - 0.5 / FPS:
+                add("map", k, f"map '{lab}' on a {d[k]:.1f}s shot (at least {MAP_MIN_S:.0f}s)", fix="hold")
+                continue
+            if _norm(lab) in seen_l:
+                add("map", k, f"map '{lab}' again (first at {seen_l[_norm(lab)] / 1000:.0f}s)", fix="drop")
+                continue
+            if maps and r["startMs"] - rows[maps[-1]]["startMs"] < MAP_GAP_S * 1000:
+                add("map", k, f"map '{lab}' {(r['startMs'] - rows[maps[-1]]['startMs']) / 1000:.0f}s after the one before "
+                              f"(at least {MAP_GAP_S:.0f}s)", fix="drop")
+                continue
+            if len(maps) >= MAP_MAX:
+                add("map", k, f"map '{lab}' over the film's {MAP_MAX}", fix="drop")
+                continue
+            maps.append(k)
+            seen_l[_norm(lab)] = r["startMs"]
+            if dev.get("date") or dev.get("year"):
+                big, small = str(dev.get("date") or ""), str(dev.get("year") or "")
+                at = (r.get("spot_date") or {}).get("ms")
+                f = round((at - SYNC_LEAD_MS - r["startMs"]) * FPS / 1000) if at is not None else int(dev.get("dateFrom") or 0)
+                frames = round(d[k] * FPS)
+                clear = S.corner_clear_frame(lab, big, small, frames)
+                bad = S.date_ok(big, small)
+                if bad:
+                    add("map", k, f"the date on the map '{lab}': {bad}", fix="unshare")
+                elif (big, small) in seen_d:
+                    add("map", k, f"the date on the map '{lab}' again (first at {seen_d[(big, small)] / 1000:.0f}s)",
+                        fix="unshare")
+                elif clear is None or f < clear:
+                    add("map", k, f"the date on the map '{lab}' comes in at frame {f}, while the map's name crosses its "
+                                  f"corner (clear from frame {clear})", fix="unshare")
+                elif (frames - f) / FPS < DATE_SHARE_MIN_S - 0.5 / FPS:
+                    add("map", k, f"the date on the map '{lab}' shows {(frames - f) / FPS:.1f}s (at least "
+                                  f"{DATE_SHARE_MIN_S}s)", fix="unshare")
+                else:
+                    seen_d[(big, small)] = r["startMs"]
+        else:
+            big, small = str(dev.get("date") or ""), str(dev.get("year") or "")
+            bad = S.date_ok(big, small)
+            if bad:
+                add("date", k, f"date '{(big + ' ' + small).strip()}': {bad}", fix="drop")
+                continue
+            if d[k] < LIBRARY["date-stamp"][2] - 0.5 / FPS:
+                add("date", k, f"date '{big}' on a {d[k]:.1f}s shot (at least {LIBRARY['date-stamp'][2]}s)", fix="hold")
+                continue
+            if (big, small) in seen_d:
+                add("date", k, f"date '{big} {small}' again (first at {seen_d[(big, small)] / 1000:.0f}s)", fix="drop")
+                continue
+            seen_d[(big, small)] = r["startMs"]
+    marks = [0] + _text_times(rows, True) + [total]
+    for a, b in _gaps(rows, True):
         add("quiet", next((k for k, r in enumerate(rows) if r["startMs"] >= a), None),
             f"{(b - a) / 1000:.0f}s without words on screen ({a / 1000:.0f}-{b / 1000:.0f}s)")
     # pacing: nothing over 8 s but a planned hold, at most four quick shots in a row, the average in its band
@@ -9426,6 +10196,9 @@ def _gate_find(rows: list, ctx: dict) -> list:
                       "word_offsets_s": [round(min(offs) / 1000, 2), round(max(offs) / 1000, 2)] if offs else None,
                       "era_unverified": unverified, "pacing": pace, "pages": len(pages), "page_cap": _hl_cap(rows),
                       "page_offsets_s": [round(x / 1000, 2) for x in hl_offs],
+                      "maps": sum(1 for r in rows if _spot(r) == "map"),
+                      "dates": sum(1 for r in rows if _spot(r) == "date") + sum(1 for r in rows if _spot(r) == "map"
+                                                                                and (r["device"].get("date"))),
                       "groups": {g: sum(1 for r in rows if (r.get("device") or {}).get("id") in ts)
                                  for g, (ts, _, _) in OVERLAY_GROUPS.items()}}
     return v
@@ -9595,6 +10368,8 @@ def _drop_words(rows: list, k: int, kind: str, why: str) -> None:
         r.pop("overlay", None)
     elif (r.get("device") or {}).get("id") == "highlight-page":
         _hl_drop(rows, k, why)
+    elif _spot(r):
+        _md_drop(rows, k, why)
     elif r.get("device"):
         tid = r["device"]["id"]
         r.pop("section_turn", None)
@@ -9904,7 +10679,7 @@ def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
                 if (r.get("device") or {}).get("id") == tid:
                     return f"{dev['id']} '{words[:30]}' re-set as {tid}"
                 r["device"] = dev
-    marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
+    marks = [0] + _text_times(rows, True) + [rows[-1]["endMs"]]
     longest = sorted(zip(marks, marks[1:]), key=lambda ab: ab[0] - ab[1])
     free = [k for a, b in longest for k, r in sorted(enumerate(rows), key=lambda kr: -_tier(kr[1].get("pick") or {}))
             if a < r["startMs"] < b and k > 0 and _bare(r) and r.get("pick") and not _covered(r)]
@@ -9948,20 +10723,20 @@ def _gap_room(rows: list, build, refused: set) -> list:
     so no group goes over its cap. Tried for at most GATE_FILL_TRIES donors; a donor whose move places nothing is put
     back as it was. [(id of the row that took the line, what moved)]."""
     out = []
-    for a, b in _gaps(rows):
+    for a, b in _gaps(rows, True):
         full = [tid for tid, _ in _FILLERS if _group_room(rows, tid) < 1 or not _can_count(rows, tid)]
         if len(full) < len(_FILLERS) - sum(1 for tid, _ in _FILLERS if not LIBRARY[tid][0]):
             continue                                 # a template with room was refused for another reason: not this
-        base = {g for g in _gaps(rows) if g != (a, b)}
+        base = {g for g in _gaps(rows, True) if g != (a, b)}
 
         def opens(k):                                # would taking shot k's words away open a new long stretch?
             dev = rows[k]["device"]
             rows[k]["device"] = None
             try:
-                return not {g for g in _gaps(rows) if g != (a, b)} <= base
+                return not {g for g in _gaps(rows, True) if g != (a, b)} <= base
             finally:
                 rows[k]["device"] = dev
-        marks = [0] + _text_times(rows) + [rows[-1]["endMs"]]
+        marks = [0] + _text_times(rows, True) + [rows[-1]["endMs"]]
         room = lambda k: min((y for y in marks if y > _on_screen_ms(rows[k])), default=marks[-1]) - \
             max((y for y in marks if y < _on_screen_ms(rows[k])), default=0)
         donors = sorted((k for k, r in enumerate(rows) if (r.get("device") or {}).get("id") in full and _overlay_words(r)
@@ -10103,9 +10878,9 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
             r.pop("overlay", None)
             did(x, "beat overlay cleared (the caption stays)")
         elif r.get("typedCaption") and r.get("device"):
-            if r["device"]["id"] in ("P03", "chapter-plate"):
+            if r["device"]["id"] in ("P03", "chapter-plate") + SPOT_DEVICES:
                 r.pop("typedCaption", None)
-                did(x, "typed caption dropped (the title or chapter stays)")
+                did(x, "typed caption dropped (the title, chapter, map or date stays: the owner's one block of words)")
             else:
                 _drop_words(rows, k, "device", "a typed caption on the same shot")
                 did(x, "template dropped (the typed caption stays)")
@@ -10190,16 +10965,44 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         else:
             _drop_words(rows, k, "device", "too short for its animation")
             did(x, "template falls back")
+    for x in by.get("map", []) + by.get("date", []):   # a map or a date: re-timed, held, its date taken off, else gone
+        k = at(x["id"])
+        if k is None or not _spot(rows[k]):
+            continue                                 # gone with an earlier repair
+        r, kind = rows[k], _spot(rows[k])
+        if x["fix"] == "unshare":
+            dev = r["device"]
+            MD.setdefault("dropped", []).append({"at_s": round(r["startMs"] / 1000, 1), "kind": "date",
+                                                 "what": f"{dev.get('date', '')} {dev.get('year', '')}".strip(),
+                                                 "why": x["what"]})
+            for f in ("date", "year", "dateFrom"):
+                dev.pop(f, None)
+            r.pop("spot_date", None)
+            did(x, "the date taken off the map (the map stays)")
+            continue
+        if x["fix"] == "hold":
+            need = int(math.ceil((MAP_MIN_S if kind == "map" else LIBRARY["date-stamp"][2]) * 1000)) + int(1000 / FPS)
+            nxt = rows[k + 1] if k + 1 < len(rows) else None
+            miss = r["startMs"] + need - r["endMs"]
+            if nxt is not None and _bare(nxt) and nxt["endMs"] - nxt["startMs"] - miss >= SYNC_MIN_SHOT_MS \
+                    and r["endMs"] + miss - r["startMs"] <= _cap_ms(r):
+                r["endMs"] += miss
+                nxt["startMs"] = r["endMs"]
+                did(x, f"held {miss / 1000:.2f}s longer, from the plain shot after it")
+                continue
+        _md_drop(rows, k, x["what"])
+        moved = True
+        did(x, f"{kind} dropped (the shot shows a picture of its own)")
     if moved or len(ctx["fixed"]) > n_fixed:         # the words changed: the film is re-cut around them, and the
         _recut(engine, job, rows, cues, dossier)     # steps below work on the new cut
-    if by.get("quiet") and _gaps(rows):
+    if by.get("quiet") and _gaps(rows, True):
         # the fit step may take a filler back (a name over a picture with no person in it, a strip too bright): the
         # next free shot of the stretch is tried in the same round, and the one taken back is never tried again (impl-z,
         # 2026-10-11: the same refused P05 was set and taken back in every round, the repair said done, and the film
         # stopped on a 32 s stretch after five rounds)
         refused, kept = ctx.setdefault("fill_refused", set()), set()
         for _ in range(GATE_FILL_TRIES):
-            added = fill_gaps_plain(engine, rows, build, skip=refused) if build else set()
+            added = fill_gaps_plain(engine, rows, build, skip=refused, gaps=_gaps(rows, True)) if build else set()
             if not added:
                 break
             tids = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}
@@ -10212,9 +11015,9 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
                     r.pop("filler", None)
             refused |= {(i, tids[i]) for i in back if i in tids}
             kept |= added - back
-            if not back or not _gaps(rows):
+            if not back or not _gaps(rows, True):
                 break
-        moved_in = _gap_room(rows, build, refused) if build and _gaps(rows) else []
+        moved_in = _gap_room(rows, build, refused) if build and _gaps(rows, True) else []
         if kept or moved_in:
             _recut(engine, job, rows, cues, dossier)
         for x in by["quiet"]:
@@ -10376,6 +11179,15 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
     for x in [x for x in found if x["rule"] in ("average", "pace")]:   # pacing never stops a film (owner 2026-10-11)
         ctx["warnings"].append(f"pacing: {x['what']}")
         found.remove(x)
+    spots = [x for x in found if x["rule"] in ("map", "date")]
+    for x in spots:                                  # a map or a date never stops a film: what is still broken goes
+        k = next((k for k, r in enumerate(rows) if id(r) == x["id"]), None)
+        if k is not None and _spot(rows[k]):
+            _md_drop(rows, k, x["what"])
+        ctx["warnings"].append(f"{x['rule']}: {x['what']} - dropped after every repair")
+        found.remove(x)
+    if spots:
+        _reuse_guard(engine, job, rows, dossier)     # the shot it left shows a picture of its own
     off = [k for k, v in pace_sections([((r["startMs"] - rows[0]["startMs"]) / 1000, (r["endMs"] - r["startMs"]) / 1000)
                                         for r in rows]).items() if not v["ok"]]
     if not GATE_AVG_S[0] <= rows[-1]["endMs"] / 1000 / len(rows) <= GATE_AVG_S[1]:
@@ -10392,7 +11204,8 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
                                         "sent": GATE.get("card_sent", 0), "answers": GATE.get("card_answers", [])},
            "looks_missing": ctx.get("looks", []), "kept_on_exact": ctx.get("trusted", []),
            "warnings": ctx.get("warnings", []), "soft": ctx.get("soft", {}), "notes": ctx.get("notes", []),
-           "pacing": ctx.get("pacing", {}), "highlight": _hl_report(rows, ctx["heard"])}
+           "pacing": ctx.get("pacing", {}), "highlight": _hl_report(rows, ctx["heard"]),
+           "places_dates": _md_report(rows, ctx["heard"])}
     _dump(job / "mrtruth" / "gate.json", rec)
     cards = rec["card_check"]
     said_no = sum(1 for a in cards["answers"] if a["main"] and a["shows"] is False)
@@ -10416,6 +11229,18 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
     for p in hl["pages"]:
         engine.log(f"    page at {p['at_s']:.1f}s ({p['shot_s']:.1f}s, {p['frames']} frames): '{p['main']}' highlighted "
                    + (f"{p['offset_s']:+.2f}s from its words" if p["offset_s"] is not None else "- its words not heard"))
+    md = rec["places_dates"]
+    engine.log(f"  maps and dates: {md['maps']} map(s) of at most {md['map_max']}, {md['dates']} date overlay(s) on screen "
+               f"({sum(1 for x in md['places'] if x['status'] == 'placed')} map(s) and "
+               f"{sum(1 for x in md['candidate_dates'] if x['status'] == 'placed')} date(s) placed, "
+               f"{len(md['dropped'])} dropped later" + (": " + "; ".join(f"{x['what']} ({x['why'][:50]})" for x in md["dropped"][:3])
+                                                       if md["dropped"] else "") + f"; Claude {md['claude'] or 'not asked'})")
+    for x in md["on_screen"]:
+        engine.log(f"    {x['kind']} at {x['at_s']:.1f}s ({x['shot_s']:.1f}s): "
+                   + (f"'{x['label']}' ({x['imagery']} imagery)" + (f" + date '{x['date']}' from frame {x['date_frame']}"
+                                                                    if x.get("date") else "")
+                      if x["kind"] == "map" else f"'{x['date']}{' / ' + x['year'] if x['year'] else ''}'")
+                   + (f", {x['offset_s']:+.2f}s from its words" if x["offset_s"] is not None else ""))
     if ctx["fixed"]:
         engine.log(f"  pre-render gate: {first['broken']} break(s) found ({', '.join(first['rules'])}), "
                    f"{len(ctx['fixed'])} repair(s) in {rounds} round(s): "
@@ -10522,6 +11347,7 @@ def _plan_rows(job: Path) -> list:
         r = {"startMs": round(sc["startFrame"] * 1000 / FPS), "endMs": round((sc["startFrame"] + sc["durationFrames"]) * 1000 / FPS),
              "text": sh.get("text", ""), "device": sc.get("device"), "step": sh.get("step"),
              "pick": {"photo": by_key.get(a.get("path")) or ident(sh.get("photo"), a, bool(sh.get("ai"))), "ai": bool(sh.get("ai")),
+                      "provider": sh.get("provider") or "",
                       "reused": sh.get("step") in ("reused", "split-reused"), "title": a.get("attribution", ""),
                       "tier": TIERS.index(sh["tier"]) if sh.get("tier") in TIERS else KIND, "clean": True} if a else None}
         for key in ("typedCaption", "overlay"):
@@ -10572,6 +11398,8 @@ def check(job: Path) -> list:
     ctx["cards"] = {(a["pid"], _norm(a["label"])): (a.get("shows"), a.get("why", ""), a.get("how", ""))
                     for a in (rec.get("card_check") or {}).get("answers") or [] if a.get("pid")}
     ctx["soft"] = dict(rec.get("soft") or {})        # the gate's own warnings (a group no shot could carry)
+    ctx["md_years"] = {y for c in (rec.get("places_dates") or {}).get("candidate_dates") or []
+                       for y in re.findall(r"\b(1[0-9]{3}|20[0-9]{2})\b", str(c.get("said") or ""))}
     found = _gate_find(rows, ctx)
     out += [f"FAIL  {x['rule']}" + (f" shot {x['k']} ({x['at'] / 1000:.1f}s)" if x.get("k") is not None else "")
             + f": {x['what']}" for x in found]
@@ -10693,7 +11521,7 @@ def preview(which: str = "all") -> Path:
     total, ins = at / FPS, []
     for _, f, *_ in sounds:
         ins += ["-i", str(RENDERER / "sfx" / f)]
-    chains = [_template_sound_chain(j + 1, t, f, keep) + f"[p{j}]" for j, (t, f, keep, _, _) in enumerate(sounds)]
+    chains = [_template_sound_chain(j + 1, t, f, keep, b - a) + f"[p{j}]" for j, (t, f, keep, a, b) in enumerate(sounds)]
     mix = "".join(f"[p{j}]" for j in range(len(sounds)))
     graph = ";".join(chains + [f"anullsrc=r={TPL_SFX_RATE}:cl=stereo,atrim=end={total:.6f}[z]",
                                f"[z]{mix}amix=inputs={len(sounds) + 1}:normalize=0:duration=first[a]"])

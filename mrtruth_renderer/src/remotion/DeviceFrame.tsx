@@ -427,8 +427,9 @@ export function DeviceFrame({ device, src, companionSrcs, grade, pictureMove }: 
      * The owner's date overlay of 2026-10-11, over the scene's own picture. It
      * mounts the scene's grade itself, under its type, so his pure white is not
      * greyed by the house grade on top (`carriesOwnGrade: true`, as top-title).
-     * Never chosen today (`PLACED_BY_OPERATOR_ONLY`); it draws for previews and
-     * for any plan that carries one.
+     * Never chosen by this package's chooser (`PLACED_BY_OPERATOR_ONLY`): Mr
+     * Truth's planner places it (places_and_dates, the owner's rulings of
+     * 2026-10-11), with a clean grade (no shadow, vignette or grain) and no move.
      */
     case 'date-stamp':
       return <DateStamp src={src} grade={grade} date={device.date} year={device.year} pictureMove={pictureMove} />
@@ -438,11 +439,14 @@ export function DeviceFrame({ device, src, companionSrcs, grade, pictureMove }: 
      * plate (made at planning time), drawn as his camera sees it; neither the
      * scene's grade nor the plan's picture move applies: his camera IS the move
      * and his look is baked into the plate (`carriesOwnGrade: true`). Never
-     * chosen today (`PLACED_BY_OPERATOR_ONLY`); it draws for previews and for
-     * any plan that carries one.
+     * chosen by this package's chooser (`PLACED_BY_OPERATOR_ONLY`): Mr Truth's
+     * planner places it (places_and_dates), with a date in its corner when one
+     * is said while it is on screen.
      */
     case 'location-map':
-      return <LocationMap src={src} label={device.label} />
+      return (
+        <LocationMap src={src} label={device.label} date={device.date} year={device.year} dateFrom={device.dateFrom} />
+      )
 
     /* ---- registered, disabled, and refused by the chooser before here ---- */
     case 'pointer-label':

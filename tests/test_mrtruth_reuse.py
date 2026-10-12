@@ -622,7 +622,7 @@ class Order(unittest.TestCase):
                 ("beats", lambda *a, **k: rows), ("opportunities", lambda *a, **k: []), ("assign", lambda *a, **k: None),
                 ("fill_overlays", lambda *a, **k: None), ("typed_captions", lambda *a, **k: None),
                 ("pictures", pics), ("_fit_devices", lambda *a, **k: None), ("sync_overlays", lambda *a, **k: None),
-                ("_gaps", lambda rows: []), ("cap_shots", note("cap_shots")), ("fill_parts", note("fill_parts")),
+                ("_gaps", lambda rows, spots=False: []), ("cap_shots", note("cap_shots")), ("fill_parts", note("fill_parts")),
                 ("_reuse_guard", note("_reuse_guard")), ("gate", note("gate")), ("_gate_scenes", lambda *a, **k: []),
                 ("transitions", lambda rows: None),
                 ("scenes", lambda *a, **k: []), ("_credits", lambda *a, **k: None), ("_cues", lambda *a, **k: []))]

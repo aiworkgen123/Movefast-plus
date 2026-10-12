@@ -1,0 +1,83 @@
+{
+ "green": {
+  "zoom": 11,
+  "size": [
+   2200,
+   1560
+  ],
+  "soft": false,
+  "exposure": 1.0,
+  "haze": 0.3436,
+  "water": 0.0039,
+  "place": "Lake Monoun, Cameroon (his own reference's ground)",
+  "lat": 5.5729,
+  "lon": 10.5853,
+  "file": "terrain_green.jpg",
+  "bytes": 358513
+ },
+ "desert": {
+  "zoom": 10,
+  "size": [
+   2200,
+   1560
+  ],
+  "soft": false,
+  "exposure": 0.5237,
+  "haze": 0.0,
+  "water": 0.0,
+  "place": "Erg Chebbi, Morocco (the Sahara's edge)",
+  "lat": 31.15,
+  "lon": -3.97,
+  "file": "terrain_desert.jpg",
+  "bytes": 210573
+ },
+ "mountains": {
+  "zoom": 10,
+  "size": [
+   2200,
+   1560
+  ],
+  "soft": false,
+  "exposure": 1.0,
+  "haze": 0.0,
+  "water": 0.0001,
+  "place": "Leadville, Colorado (the Rocky Mountains)",
+  "lat": 39.2508,
+  "lon": -106.2925,
+  "file": "terrain_mountains.jpg",
+  "bytes": 646830
+ },
+ "coast": {
+  "zoom": 10,
+  "size": [
+   2200,
+   1560
+  ],
+  "soft": false,
+  "exposure": 1.0,
+  "haze": 0.3556,
+  "water": 0.2865,
+  "place": "Itea, Greece (the Gulf of Corinth)",
+  "lat": 38.4326,
+  "lon": 22.4227,
+  "file": "terrain_coast.jpg",
+  "bytes": 504029
+ },
+ "snow": {
+  "zoom": 10,
+  "size": [
+   2200,
+   1560
+  ],
+  "soft": false,
+  "exposure": 1.0,
+  "haze": 0.1342,
+  "water": 0.0223,
+  "place": "the Jungfrau, Switzerland (the Alps' snowfields)",
+  "lat": 46.547,
+  "lon": 7.985,
+  "file": "terrain_snow.jpg",
+  "bytes": 674829
+ },
+ "licence": "EOxCloudless 2016 https://cloudless.eox.at by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016), served by EOX::Maps https://maps.eox.at (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/)"
+}

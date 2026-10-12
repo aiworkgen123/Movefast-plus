@@ -1,9 +1,10 @@
-import { AbsoluteFill, useCurrentFrame, useVideoConfig } from 'remotion'
+import { AbsoluteFill, Sequence, useCurrentFrame, useVideoConfig } from 'remotion'
 import { useId } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { LOCATION_MAP_LABEL_FAMILY } from '../constants.js'
 import { useLocationMapFont } from '../fonts.js'
 import { SourcedImg as Img } from '../SourcedImg.js'
+import { DateStampType } from './DateStamp.js'
 import {
   LOCATION_MAP,
   locationMapCamera,
@@ -57,6 +58,14 @@ export type LocationMapProps = {
   src: string
   /** The name, as written; it is set in capitals. */
   label: string
+  /**
+   * A date said while the map is on screen (owner 2026-10-11): his date overlay's two lines in the top right corner,
+   * over the map and its vignette, entering from `dateFrom` (scene-relative). The planner seats it only from the frame
+   * the map's name is clear of that corner. Absent or '' draws none.
+   */
+  date?: string
+  year?: string
+  dateFrom?: number
 }
 
 /**
@@ -71,7 +80,7 @@ const LABEL_BOX = { x0: 60, y0: -200, x1: 720, y1: 120 }
 /** CSS px per M unit in the overlays' plane: see the box above. */
 const OVERLAY_DENSITY = 4
 
-export function LocationMap({ src, label }: LocationMapProps): ReactNode {
+export function LocationMap({ src, label, date, year, dateFrom }: LocationMapProps): ReactNode {
   useLocationMapFont()
   const frame = useCurrentFrame()
   const { width, durationInFrames } = useVideoConfig()
@@ -163,6 +172,12 @@ export function LocationMap({ src, label }: LocationMapProps): ReactNode {
           }}
         />
       </div>
+      {/* His date overlay in the corner, over the vignette (its white stays #FFFFFF), from its own word. */}
+      {date ? (
+        <Sequence from={Math.max(0, dateFrom ?? 0)} layout="none">
+          <DateStampType date={date} year={year ?? ''} />
+        </Sequence>
+      ) : null}
     </AbsoluteFill>
   )
 }
