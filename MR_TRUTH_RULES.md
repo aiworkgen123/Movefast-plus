@@ -130,6 +130,9 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   or Europe, at least 97% reliable, with fast internet and a recent processor. A drawing machine is never above
   $1.00/h, the planner never above $1.50/h. A source whose balance is too low is not used, and the page shows both
   balances.
+- **Slow and broken computers are skipped** (owner 2026-10-12, as the price stays about the same: about 2 cents more on
+  a 20-minute film): after each film, a Vast computer whose machine drew its share more than 1.6 times slower than the
+  film's fastest machine is passed over for a week; one that could not start our machine at all, for 6 hours.
 - **Reliability** (owner 2026-10-12): a film that finds no machine waits and tries again every 2 minutes for up to an
   hour, instead of failing. A drawing machine that cannot be found yet is looked for again while it can still help;
   otherwise the planner draws that share. A planning machine that dies, freezes (no sign of life for 12 minutes) or

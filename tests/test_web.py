@@ -232,7 +232,7 @@ class FakeSources:
         self.free -= 1
         mid = f"m{len(self.made) + 1}"
         self.made[mid] = name
-        return {"id": mid, "hr": self.hr, "desc": f"test machine, ${self.hr}/h"}, []
+        return {"id": mid, "hr": self.hr, "desc": f"test machine, ${self.hr}/h", "host": f"c{len(self.made)}"}, []
 
     def list(self):
         return [{"id": m, "name": n, "hr": self.hr, "state": "running"} for m, n in self.made.items()
@@ -388,6 +388,38 @@ class Runner(unittest.TestCase):
         with mock.patch.object(self.J.requests, "post", side_effect=self.J.requests.ConnectionError("down")):
             self.assertEqual(self.J.claude_credit("a"), "")
         self.assertEqual(self.J.claude_credit(""), "")
+
+    def test_a_slow_machines_computer_is_passed_over_for_a_week_and_remembered(self):
+        import web.machines as M
+        self.addCleanup(M.AVOID.clear)
+        jid = self.job()
+        self.answers(jid)
+        self.s._guard(jid, self.s._run)
+        self.assertEqual(json.loads(self.s.store.job(jid)["runs"])[-1]["host"], "c1")   # the planner's computer
+        K = self.K(jid)
+        drawers = [{"part": 2, "log": K["dlog"](2), "host": "c2", "state": "ended"},
+                   {"part": 3, "log": K["dlog"](3), "host": "c3", "state": "ended"},
+                   {"part": 4, "log": K["dlog"](4), "host": "c4", "state": "ended", "why": "kept"}]
+        self.s.store.update(jid, drawers=json.dumps(drawers))
+        self.b.put_bytes(K["dlog"](2), b"20:55:18 DRAW start: share 2/3, workers 4\n21:07:33 PART 2 uploaded 34M in 735s\n")
+        self.b.put_bytes(K["dlog"](3), b"21:00:02 PART 3 uploaded 30M in 330s\n")
+        self.b.put_bytes(K["dlog"](4), b"21:00:02 PART 4 uploaded 30M in 900s\n")       # an earlier attempt's: not judged
+        log = "20:59:32 PART 1 drawn here exit=0 seconds=265\n"
+        self.s._judge_speed(jid, self.b, self.s.store.job(jid), log)
+        self.assertEqual(set(M.AVOID), {"c2"})                       # 735 > 1.6 x 265; 330 is not
+        self.assertGreater(M.AVOID["c2"], time.time() + 6 * 86400)
+        M.AVOID.clear()                                              # the website restarts: the list comes back
+        from web.jobs import Studio
+        s2 = Studio(self.s.store, self.d)
+        s2._loop = lambda: None
+        s2.stop.set()                                                # its background threads end at once
+        s2.start()
+        self.assertEqual(set(M.AVOID), {"c2"})
+        M.AVOID.clear()                                              # shares too short to judge, or one machine alone
+        self.s._judge_speed(jid, self.b, self.s.store.job(jid), "PART 1 drawn here exit=0 seconds=40\n")
+        self.s.store.update(jid, drawers="[]")
+        self.s._judge_speed(jid, self.b, self.s.store.job(jid), log)
+        self.assertEqual(M.AVOID, {})
 
     def test_a_film_done_while_the_site_was_down_past_its_limit_is_read_back(self):
         jid = self.job()
@@ -1113,7 +1145,7 @@ class Machines(unittest.TestCase):
             self.assertTrue(self.src.terminate("vast:6"))
 
     def test_a_vast_machine_that_could_not_start_is_dead_and_its_computer_passed_over(self):
-        self.addCleanup(self.M.BAD_HOSTS.clear)
+        self.addCleanup(self.M.AVOID.clear)
         broken = {"actual_status": "created", "cur_state": "stopped", "intended_status": "stopped", "machine_id": 90944,
                   "status_msg": "Error response from daemon: failed to create task for container ... failed to start"}
         starting = {"actual_status": None, "cur_state": "running", "intended_status": "running", "machine_id": 7}
@@ -1121,11 +1153,11 @@ class Machines(unittest.TestCase):
                    "https://console.vast.ai/api/v0/instances/9/": self.resp(body={"instances": starting})}
         with mock.patch.object(self.M.requests, "get", lambda url, **k: answers[url]):
             self.assertEqual([self.src.state("vast:8"), self.src.state("vast:9")], ["stopped", "starting"])
-        self.assertEqual(list(self.M.BAD_HOSTS), [90944])
+        self.assertEqual(list(self.M.AVOID), ["90944"])
         offers = [dict(self.vast_offer(1, 0.10), machine_id=90944), dict(self.vast_offer(2, 0.12), machine_id=5)]
         with mock.patch.object(self.M.requests, "post", lambda *a, **k: self.resp(body={"offers": offers})):
             self.assertEqual([o["offer"] for o in self.src.vast_offers(16, 32)], [2])
-            self.M.BAD_HOSTS[90944] -= self.M.VAST_BAD_HOST_S                 # hours later it is tried again
+            self.M.AVOID["90944"] -= self.M.VAST_BAD_HOST_S                   # hours later it is tried again
             self.assertEqual([o["offer"] for o in self.src.vast_offers(16, 32)], [1, 2])
 
     def test_balances_are_read_once_a_minute(self):

@@ -31,7 +31,7 @@ CODE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(CODE))
 from farm.s3 import Bucket, S3Error  # noqa: E402
 from web import verdict_sync as VS  # noqa: E402
-from web.machines import Sources, REST, GRAPHQL, GPUS  # noqa: E402,F401  (REST: the Settings test)
+from web.machines import Sources, REST, GRAPHQL, GPUS, AVOID, VAST_SLOW_HOST_S, avoid  # noqa: E402,F401  (REST: Settings)
 
 # the keys the website keeps (keys.env in its data folder, never in the code): name, label, needed, where to get it
 KEYS = [
@@ -78,6 +78,10 @@ BEAT_EVERY_S, CHECK_EVERY_S = 120, 300         # how often the log's age and a m
 # the drawing machines are rented while the planner is still choosing pictures (the longest part of planning: about 66-72 s
 # a minute of film on the 11- and 16-minute films), timed to be set up (2-4 min) just as the plan is ready
 PICTURES_S_MIN, DRAWER_LEAD_S = 60, 240
+# a machine that drew its share this many times slower than the film's fastest is slow: its Vast computer is passed over
+# for a week (the 5-films test: normal machines within 1.3x of each other, the two on one busy computer 1.8x and 2.8x);
+# shares under SLOW_MIN_S are too short to judge
+SLOW_RATIO, SLOW_MIN_S = 1.6, 120
 STAGES = [                                     # the pod's own log lines, latest first: stage, progress from, to
     ("video uploaded", "Saving the video", 98, 99),
     ("FINISH exit", "Saving the video", 96, 98),
@@ -256,6 +260,11 @@ class Studio:
             return 3
 
     def start(self) -> None:
+        try:                                         # the Vast computers passed over, kept across restarts
+            AVOID.update({k: v for k, v in json.loads(self.store.get("vast_avoid", "{}") or "{}").items()
+                          if v > time.time()})
+        except (ValueError, TypeError, AttributeError):
+            pass
         threading.Thread(target=self._loop, name="studio", daemon=True).start()
         if not self.fake:
             threading.Thread(target=self._money_loop, name="balances", daemon=True).start()
@@ -581,8 +590,9 @@ class Studio:
                 self.stop.wait(RENT_RETRY_S)
             # the machine is saved first (so a cancel or a crash from here on switches it off), then the film becomes
             # "running" only if nobody pressed Stop while it was being rented
+            runs[-1]["host"] = pod.get("host")            # its Vast computer, to judge its speed at the end
             self.store.update(jid, pod_id=pod["id"], pod_hr=float(pod.get("hr") or 0), pod_desc=pod["desc"],
-                              pod_started=time.time(), log_tail=None)
+                              pod_started=time.time(), log_tail=None, runs=json.dumps(runs))
         finally:
             self.renting.discard(name)
         if not self.store.update_if(jid, ("starting",), status="running", stage="Machine starting", progress=5):
@@ -754,7 +764,7 @@ class Studio:
                     d["tries"] = d.get("tries", 0) + 1
                     if pod:
                         d.update(state="running", id=pod["id"], hr=float(pod.get("hr") or 0), desc=pod["desc"],
-                                 started=time.time(), name=name, log=logkey)
+                                 started=time.time(), name=name, log=logkey, host=pod.get("host"))
                     else:
                         d.update(next=now + RENT_RETRY_S, desc=f"none free yet (tried {d['tries']}x)")
                         self._note(jid, f"no drawer for share {k} (try {d['tries']}): " + "; ".join(tried)[:1500])
@@ -883,7 +893,12 @@ class Studio:
         cost = self.costs(d / "result.tgz")
         cost["pod"] = self._machine_cost(j, now)
         cost["total"] = round(sum(v for k, v in cost.items() if k in ("pod", "gemini", "claude", "ai_pictures")), 2)
-        tail = (d / "pod_log.txt").read_text("utf-8", "replace").splitlines()[-80:] if (d / "pod_log.txt").exists() else []
+        full = (d / "pod_log.txt").read_text("utf-8", "replace") if (d / "pod_log.txt").exists() else ""
+        tail = full.splitlines()[-80:]
+        try:
+            self._judge_speed(jid, b, j, full)
+        except Exception:                            # never in the way of the film
+            self._note(jid, traceback.format_exc())
         fields = dict(finished=now, cost=json.dumps(cost), log_tail="\n".join(tail) or j["log_tail"])
         if not ok:
             fields["error"] = "a machine did not confirm it was switched off - check runpod.io / vast.ai"
@@ -910,6 +925,40 @@ class Studio:
             self.store.update(jid, status="failed", stage="Stopped", error=f"the film did not finish: {why}"[:400],
                               **fields)
         self._cleanup(jid, b)
+
+    def _judge_speed(self, jid, b, j, log: str) -> None:
+        """Each machine's time for its share (the planner's own, each drawer's from its log); a Vast computer that was
+        SLOW_RATIO times slower than the film's fastest machine is passed over for a week."""
+        runs = json.loads(j.get("runs") or "[]")
+        took = []                                    # (seconds, Vast computer, which)
+        m = re.search(r"PART 1 drawn here exit=0 seconds=(\d+)", log)
+        if m:
+            took.append((int(m.group(1)), runs[-1].get("host") if runs else None, "the planning machine"))
+        for d in json.loads(j.get("drawers") or "[]"):
+            if not d.get("log") or d.get("why") == "kept":
+                continue
+            try:
+                dl = b.get_bytes(d["log"]).decode("utf-8", "replace")
+            except S3Error:
+                continue
+            m = re.search(rf"PART {d['part']} uploaded \S+ in (\d+)s", dl)
+            if m:
+                took.append((int(m.group(1)), d.get("host"), f"drawing machine {d['part']}"))
+        if len(took) < 2:
+            return
+        fastest = min(t for t, _, _ in took)
+        if fastest < SLOW_MIN_S:
+            return
+        for t, host, which in took:
+            if host and t > SLOW_RATIO * fastest:
+                avoid(host, VAST_SLOW_HOST_S)
+                self._note(jid, f"{which} took {t}s, {t / fastest:.1f}x the fastest ({fastest}s): its Vast computer "
+                                f"{host} is passed over for a week")
+        self._save_avoid()
+
+    def _save_avoid(self) -> None:
+        now = time.time()
+        self.store.put("vast_avoid", json.dumps({k: v for k, v in AVOID.items() if v > now}))
 
     @staticmethod
     def _why(tail) -> str:
@@ -1023,6 +1072,7 @@ class Studio:
                 if self._terminate(m["id"]):
                     gone.append(m["id"])
                     self._note("sweep", f"switched off {m['id']} ({name}): no film counts on it")
+        self._save_avoid()                               # a broken computer noticed meanwhile is kept too
         return gone
 
     @staticmethod

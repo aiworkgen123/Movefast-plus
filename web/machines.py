@@ -38,7 +38,8 @@ VAST_MAX_GB_COST = 0.05                        # $ per GB of traffic some hosts 
 VAST_OLD_CPU = re.compile(r"E5-|E7-|E3-|\bX5\d{3}|\bL5\d{3}|\bE5\d{3}|Silver 41|Bronze|Opteron|Phenom|FX-", re.I)
 VAST_DISK_GB = 40
 VAST_BAD_HOST_S = 6 * 3600                     # a Vast computer whose machine would not start is passed over this long
-BAD_HOSTS = {}                                 # Vast machine_id -> when one of ours failed to start there
+VAST_SLOW_HOST_S = 7 * 86400                   # and one that drew far slower than the film's other machines, this long
+AVOID = {}                                     # Vast computer (its machine_id, as text) -> passed over until then
 MIN_BALANCE = 3.0                              # a source with less than this (or 2 h of its spending) is not used
 
 
@@ -47,6 +48,12 @@ def _ago(text: str) -> float:
         return email.utils.parsedate_to_datetime(text).timestamp()
     except (TypeError, ValueError):
         return 0.0
+
+
+def avoid(host, seconds: float) -> None:
+    """Pass a Vast computer over for `seconds` (the website keeps the list across restarts)."""
+    if host:
+        AVOID[str(host)] = max(AVOID.get(str(host), 0), time.time() + seconds)
 
 
 class Sources:
@@ -144,7 +151,7 @@ class Sources:
             if (country not in VAST_COUNTRIES or VAST_OLD_CPU.search(str(o.get("cpu_name") or ""))
                     or float(o.get("inet_up_cost") or 0) > VAST_MAX_GB_COST
                     or float(o.get("inet_down_cost") or 0) > VAST_MAX_GB_COST or o.get("is_bid")
-                    or time.time() - BAD_HOSTS.get(o.get("machine_id"), 0) < VAST_BAD_HOST_S):
+                    or AVOID.get(str(o.get("machine_id")), 0) > time.time()):
                 continue
             cores = int(float(o.get("cpu_cores_effective") or 0))
             # the hourly price with our disk (charged by the GB a month; the search counts it when told the size),
@@ -153,7 +160,7 @@ class Sources:
             price = max(float(o.get("dph_total") or 0), float(o.get("dph_base") or 0) + disk) + cost
             cpu = re.sub(r"\s*\d+-Core Processor|\(R\)|®|™", "", str(o.get("cpu_name") or "")).strip()
             out.append({"src": "vast", "price": round(price, 4), "offer": o["id"], "vcpu": cores,
-                        "desc": f"{cores}-core {cpu}, Vast {country}"})
+                        "host": o.get("machine_id"), "desc": f"{cores}-core {cpu}, Vast {country}"})
         return sorted(out, key=lambda o: o["price"])
 
     def offers(self, min_vcpu: int, ram: int, max_hr=None, fallback: bool = False, backup: bool = True) -> tuple:
@@ -237,7 +244,7 @@ class Sources:
         if not r.ok or not got.get("new_contract"):
             return None, f"Vast HTTP {r.status_code}: {str(got.get('msg') or got.get('error') or r.text)[:120]}"
         hr = float(offer.get("price") or 0)
-        return {"id": f"vast:{got['new_contract']}", "hr": hr, "vcpu": offer.get("vcpu"),
+        return {"id": f"vast:{got['new_contract']}", "hr": hr, "vcpu": offer.get("vcpu"), "host": offer.get("host"),
                 "desc": f"{offer['desc']}, ${hr:.2f}/h"}, ""
 
     def _found(self, name, offer):
@@ -245,7 +252,8 @@ class Sources:
         if not m:
             return None
         hr = float(m.get("hr") or offer.get("price") or 0)
-        return {"id": m["id"], "hr": hr, "vcpu": offer.get("vcpu"), "desc": f"{offer['desc']}, ${hr:.2f}/h"}
+        return {"id": m["id"], "hr": hr, "vcpu": offer.get("vcpu"), "host": offer.get("host"),
+                "desc": f"{offer['desc']}, ${hr:.2f}/h"}
 
     def rent(self, name: str, env: dict, script: str, min_vcpu: int = 16, ram: int = 32, max_hr=None,
              fallback: bool = False, backup: bool = True, stop=lambda: False, boot=None) -> tuple:
@@ -328,8 +336,8 @@ class Sources:
                 if "stopped" in (str(inst.get("cur_state") or "").lower(), str(inst.get("intended_status") or "").lower()):
                     # we never stop a machine (only delete it): the host gave up on it, e.g. "failed to start
                     # containers" on a broken computer, seen 2026-10-12 - that computer is passed over for a while
-                    if s != "running" and inst.get("machine_id"):
-                        BAD_HOSTS[inst["machine_id"]] = time.time()
+                    if s != "running":
+                        avoid(inst.get("machine_id"), VAST_BAD_HOST_S)
                     return "stopped"
                 return ("running" if s == "running" else "starting" if s in ("", "loading", "created", "scheduling")
                         else "stopped")
