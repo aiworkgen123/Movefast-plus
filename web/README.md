@@ -10,11 +10,13 @@ already shown in the list as "coming".
 | Part | Where | Cost |
 |---|---|---|
 | The website, the list of films, the keys | your small server (DigitalOcean, Hetzner...) | about $6 a month |
-| Making a film | one RunPod machine per film, switched off when done | about $1 per 20-minute film |
+| Making a film | a few small RunPod machines per film (Settings → Machines per film, 3 by default), each the cheapest one free right now, switched off when done | about $0.30–0.60 per 20-minute film |
 | Your files and finished videos | your Cloudflare R2 storage | pennies |
 
-The small server never makes videos, so it does not slow them down. If the website restarts in the middle of a film,
-the machine carries on and the film appears when it is done.
+The small server never makes videos, so it does not slow them down. One machine plans the film and draws a share of
+the shots; the others only draw their share and are switched off as soon as it is sent. If one of them cannot be rented
+or fails, the planning machine draws that share itself, so the film still finishes (a little later). If the website
+restarts in the middle of a film, the machines carry on and the film appears when it is done.
 
 ## Install (once)
 

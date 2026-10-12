@@ -193,7 +193,10 @@ td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
       <div class="card">
         <h2>Films at the same time</h2>
         <div class="row"><input type="number" id="maxPar" min="1" max="10" style="width:100px"><button class="btn" id="saveMax">Save</button>
-        <span class="hint">Each film rents its own machine. Extra films wait in the queue.</span></div>
+        <span class="hint">Each film rents its own machines. Extra films wait in the queue.</span></div>
+        <h3>Machines per film</h3>
+        <div class="row"><input type="number" id="machines" min="1" max="5" style="width:100px"><button class="btn" id="saveMachines">Save</button>
+        <span class="hint">One cheap machine plans the film and draws a share; the others only draw. 3 is the usual. Each is the cheapest one RunPod has free.</span></div>
       </div>
       <div class="card">
         <h2>People</h2>
@@ -403,6 +406,7 @@ async function loadSettings(){
      ${k.set?` · <a href="#" data-clear="${k.name}">remove</a>`:''}</div>
      <input type="password" name="${k.name}" placeholder="${esc(k.help)}" autocomplete="off"></div>`).join('');
   $('#maxPar').value = d.max_parallel;
+  $('#machines').value = d.machines;
   $('#people').innerHTML = d.users.map(u => `<tr><td>${esc(u.name)}</td><td>${u.role}</td><td style="text-align:right">
      <button class="btn small" data-pw="${esc(u.name)}">New password</button>
      ${u.name!==ME.user.name?`<button class="btn small danger" data-rm="${esc(u.name)}">Remove</button>`:''}</td></tr>`).join('');
@@ -420,6 +424,7 @@ $('#testKeys').onclick = async () => { $('#testOut').textContent = 'Testing…';
   const r = await api('/api/settings/test', {json:{}});
   $('#testOut').innerHTML = r.error ? esc(r.error) : Object.entries(r.results).map(([k,v]) => `${esc(k)}: <b style="color:var(--${String(v).startsWith('ok')?'ok':'bad'})">${esc(v)}</b>`).join('<br>'); };
 $('#saveMax').onclick = async () => { const r = await api('/api/settings', {json:{max_parallel:+$('#maxPar').value}}); toast(r.error || 'Saved.'); };
+$('#saveMachines').onclick = async () => { const r = await api('/api/settings', {json:{machines:+$('#machines').value}}); toast(r.error || 'Saved. New films use it.'); };
 $('#addUser').onsubmit = async e => { e.preventDefault(); $('#userErr').textContent='';
   const r = await api('/api/users', {json:Object.fromEntries(new FormData(e.target))});
   if (r.error) return $('#userErr').textContent = r.error; e.target.reset(); toast('Added. Send them the website address, their name and password.'); loadSettings(); };

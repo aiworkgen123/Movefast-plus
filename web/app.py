@@ -171,7 +171,11 @@ def own_password():
 def _view(j: dict) -> dict:
     out = {k: j.get(k) for k in ("id", "user", "title", "status", "stage", "progress", "run_on", "created",
                                  "started", "finished", "seconds", "minutes", "voice_name", "music_name", "music_vol",
-                                 "pod_desc", "video_mb", "error", "commit_id")}
+                                 "pod_desc", "video_mb", "error", "commit_id", "machines")}
+    ds = json.loads(j.get("drawers") or "[]")
+    used = [d for d in ds if d.get("id")]
+    if used:                                        # the drawing machines, shown with the planner's
+        out["pod_desc"] = f"{j.get('pod_desc') or ''} + {len(used)} drawing ({', '.join(sorted({d['desc'].split(',')[0] for d in used}))})"
     out["cost"] = json.loads(j.get("cost") or "{}")
     if j.get("status") == "done":
         try:
@@ -305,7 +309,7 @@ def retry_job(jid):
     if not studio.inputs(jid).get("voice"):
         return jsonify(error="This film's files are gone; make it again."), 400
     store.update(jid, status="queued", stage="Waiting to start", progress=0, error=None, pod_id=None,
-                 pod_started=None, finished=None, cost=None, log_tail=None)
+                 pod_started=None, finished=None, cost=None, log_tail=None, drawers=None)
     return jsonify(ok=True)
 
 
@@ -344,7 +348,8 @@ def get_settings():
     shown = [{"name": k, "label": label, "needed": need_, "help": help_, "set": bool(keys.get(k)),
               "hint": ("…" + keys[k][-4:]) if keys.get(k) and len(keys[k]) > 8 else ("set" if keys.get(k) else "")}
              for k, label, need_, help_ in J.KEYS]
-    return jsonify(keys=shown, max_parallel=studio.max_parallel(), users=store.users(), version=_version())
+    return jsonify(keys=shown, max_parallel=studio.max_parallel(), machines=studio.machines(), users=store.users(),
+                   version=_version())
 
 
 @app.post("/api/settings")
@@ -358,6 +363,8 @@ def save_settings():
             studio.save_keys({k: "" for k in d["clear"]})
         if d.get("max_parallel") is not None:
             store.put("max_parallel", max(1, min(10, int(d["max_parallel"]))))
+        if d.get("machines") is not None:
+            store.put("machines", max(1, min(J.MACHINES_MAX, int(d["machines"]))))
     except (ValueError, TypeError) as e:
         return jsonify(error=str(e)), 400
     return jsonify(ok=True)

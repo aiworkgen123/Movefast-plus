@@ -121,8 +121,13 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
 ## How films are made
 
 - On the website (`web/README.md`): sign in, drop the voiceover, the script and optional music, then press Create.
-- Each film rents its own RunPod machine (about $0.89/h, about 1–1.25 h for a 20-minute film), which is switched off when
-  done. Several films can run at once.
+- Each film rents a few small RunPod machines (owner 2026-10-12, after the first film rented a $2.49/h machine): one
+  planner (at least 16 processor cores) plans the film, draws its share of the shots and finishes it; the others (2 by
+  default, "Machines per film" in Settings) only draw their share. Every machine is the cheapest one RunPod has free at
+  that moment, read from its live price list. A drawing machine dearer than $1.00/h is not rented, and its share is
+  drawn by the planner instead; the planner is never dearer than $1.50/h (when none is free under that, the film
+  stops and says so, and Try again rents later). Every machine is switched off when its part is done. Several films
+  can run at once.
 - An NVIDIA GPU does not speed this tool up; the drawing is processor-bound.
 - Keys live only in the website's Settings (`keys.env` on the server) and as private settings on the machine while it
   runs. **Never in git.**

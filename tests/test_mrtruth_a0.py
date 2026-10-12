@@ -262,14 +262,21 @@ class RenderSplit(unittest.TestCase):
         import remote_render as R
         seen = []
 
-        def run(cmd, **kw):
-            seen.append([t["name"] for t in json.loads(Path(cmd[2]).read_text())["tasks"]])
-            return mock.Mock(returncode=0, stdout="", stderr="")
+        class Popen:                                  # each render process (remote_render keeps them to stop them)
+            def __init__(self, cmd, **kw):
+                seen.append([t["name"] for t in json.loads(Path(cmd[2]).read_text())["tasks"]])
+                self.returncode, self.pid = 0, 0
+
+            def communicate(self):
+                return "", ""
+
+            def poll(self):
+                return 0
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "renderer" / "node_modules").mkdir(parents=True)
             (root / "manifest.json").write_text(json.dumps({"tasks": [task(f"{k:04d}.mp4", f) for k, f in enumerate(self.FRAMES)]}))
-            with mock.patch.object(R, "HERE", root), mock.patch.object(R.subprocess, "run", run), \
+            with mock.patch.object(R, "HERE", root), mock.patch.object(R.subprocess, "Popen", Popen), \
                     mock.patch.object(R.shutil, "which", lambda n: "/usr/bin/node"), \
                     mock.patch.object(sys, "argv", ["remote_render.py", "--workers", "3", "--out", str(root / "s.tgz")]):
                 R.main()

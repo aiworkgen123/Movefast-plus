@@ -2,6 +2,7 @@
   .venv/bin/python run_test.py script.txt voice.mp3 "Title" [minutes]                 plan + draw here
   .venv/bin/python run_test.py script.txt voice.mp3 "Title" [minutes] --export        plan here, write render_package.tgz, stop
   .venv/bin/python run_test.py script.txt voice.mp3 "Title" [minutes] --segments segments.tgz   unpack drawn shots, finish here
+  (--segments may be given once per machine that drew a share: --segments seg_1.tgz --segments seg_2.tgz ...)
 A finish joins the drawn shots under the plan the --export run saved (mrtruth/plan.json): nothing is planned again
 and no paid service is asked (MRTRUTH_FINISH=1).
 """
@@ -11,9 +12,10 @@ here = Path(__file__).resolve().parent
 os.chdir(here); sys.path.insert(0, str(here))
 args = sys.argv[1:]
 export = "--export" in args
-seg_file = ""
-if "--segments" in args:
-    i = args.index("--segments"); seg_file = args[i + 1]; del args[i:i + 2]
+seg_files = []
+while "--segments" in args:
+    i = args.index("--segments"); seg_files.append(args[i + 1]); del args[i:i + 2]
+seg_file = seg_files[0] if seg_files else ""
 args = [x for x in args if x != "--export"]
 if export:
     os.environ["MT_EXPORT_PACKAGE"] = "1"
@@ -28,10 +30,11 @@ script = Path(script_file).read_text(encoding="utf-8-sig").strip()
 if seg_file:
     seg_dir = mv.job_dir(title, "mr_truth") / "mrtruth" / "segments"
     seg_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(seg_file) as tar:
-        for m in tar.getmembers():
-            if m.isfile() and m.name.endswith(".mp4") and "/" not in m.name and not m.name.startswith("."):
-                tar.extract(m, seg_dir)
+    for one in seg_files:
+        with tarfile.open(one) as tar:
+            for m in tar.getmembers():
+                if m.isfile() and m.name.endswith(".mp4") and "/" not in m.name and not m.name.startswith("."):
+                    tar.extract(m, seg_dir)
     print(f"unpacked drawn shots into {seg_dir}")
 t0 = time.time()
 try:
