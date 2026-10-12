@@ -905,17 +905,19 @@ class Machines(unittest.TestCase):
     def test_vast_offers_keep_good_hosts_and_count_their_traffic(self):
         offers = [self.vast_offer(1, 0.12), self.vast_offer(2, 0.10, cpu="Xeon E5-2697A v4"),
                   self.vast_offer(3, 0.11, geo="Beijing, CN"), self.vast_offer(4, 0.13, up=0.02),
-                  self.vast_offer(5, 0.09, up=0.2), dict(self.vast_offer(6, 0.08), is_bid=True)]
+                  self.vast_offer(5, 0.09, up=0.2), dict(self.vast_offer(6, 0.08), is_bid=True),
+                  dict(self.vast_offer(7, 0.105), dph_base=0.1, storage_cost=0.54)]   # its disk not counted: 0.13
         seen = {}
         def post(url, json=None, headers=None, timeout=0):
             seen.update(json)
             return self.resp(body={"offers": offers})
         with mock.patch.object(self.M.requests, "post", post):
             got = self.src.vast_offers(16, 32)
-        self.assertEqual([(o["offer"], o["price"]) for o in got], [(1, 0.12), (4, 0.15)])
+        self.assertEqual([(o["offer"], o["price"]) for o in got], [(1, 0.12), (7, 0.13), (4, 0.15)])
         self.assertEqual(got[0]["desc"], "24-core AMD Ryzen 9 5900X, Vast US")
         self.assertEqual((seen["cpu_cores_effective"], seen["cpu_ram"], seen["type"]), ({"gte": 16}, {"gte": 32000}, "ondemand"))
         self.assertTrue(seen["verified"]["eq"] and seen["reliability"]["gte"] >= 0.97)
+        self.assertEqual(seen["allocated_storage"], self.M.VAST_DISK_GB)
 
     def test_offers_merge_the_sources_and_the_backup_comes_after_an_equal(self):
         self.src.runpod_offers = lambda v, r: [{"src": "runpod", "price": 0.13, "desc": "rp"},

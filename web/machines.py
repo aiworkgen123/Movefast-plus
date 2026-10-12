@@ -131,7 +131,8 @@ class Sources:
              "cpu_cores_effective": {"gte": int(min_vcpu)}, "cpu_ram": {"gte": int(ram) * 1000},
              "reliability": {"gte": VAST_MIN_RELIABILITY}, "inet_up": {"gte": VAST_MIN_NET_MBPS},
              "inet_down": {"gte": VAST_MIN_NET_MBPS}, "disk_space": {"gte": VAST_DISK_GB},
-             "dph_total": {"lte": 2.0}, "order": [["dph_total", "asc"]], "limit": 200}
+             "dph_total": {"lte": 2.0}, "allocated_storage": VAST_DISK_GB, "order": [["dph_total", "asc"]],
+             "limit": 200}
         r = requests.post(f"{VAST}/api/v0/bundles/", json=q, headers=self._vast_headers(), timeout=60)
         r.raise_for_status()
         out = []
@@ -143,7 +144,10 @@ class Sources:
                     or float(o.get("inet_down_cost") or 0) > VAST_MAX_GB_COST or o.get("is_bid")):
                 continue
             cores = int(float(o.get("cpu_cores_effective") or 0))
-            price = float(o.get("dph_total") or 0) + cost        # about a GB each way per machine-hour
+            # the hourly price with our disk (charged by the GB a month; the search counts it when told the size),
+            # and about a GB each way per machine-hour of traffic
+            disk = float(o.get("storage_cost") or 0) * VAST_DISK_GB / 720
+            price = max(float(o.get("dph_total") or 0), float(o.get("dph_base") or 0) + disk) + cost
             cpu = re.sub(r"\s*\d+-Core Processor|\(R\)|®|™", "", str(o.get("cpu_name") or "")).strip()
             out.append({"src": "vast", "price": round(price, 4), "offer": o["id"], "vcpu": cores,
                         "desc": f"{cores}-core {cpu}, Vast {country}"})
