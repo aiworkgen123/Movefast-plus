@@ -9318,6 +9318,77 @@ def _sfx_audio(engine, job: Path, mp3: Path, sc_list: list) -> Path:
     return out
 
 
+# the owner's background music (website, 2026-10-12: "drop voiceover + script and a background music"): MRTRUTH_MUSIC
+# names his file; it is laid under the whole film at MRTRUTH_MUSIC_DB loudness units under the narration (measured on
+# both, EBU R128; -18 unless set: a bed you hear but never over the words), looped when shorter than the film, faded in
+# MUSIC_FADE_IN_S and out over the last MUSIC_FADE_OUT_S, and ducked a further few dB while he speaks (a sidechain on
+# the voice), so it rises a little in the pauses. Peaks of voice + sounds + music go through the same MIX_CEILING
+# limiter; the mix is FLAC so the final mux's AAC is the film's only encode.
+MUSIC_DB_DEFAULT, MUSIC_FADE_IN_S, MUSIC_FADE_OUT_S = -18.0, 2.0, 5.0
+MUSIC_DUCK = "sidechaincompress=threshold=0.05:ratio=2:attack=40:release=700:makeup=1"
+
+
+def _music_file():
+    """The owner's music file (MRTRUTH_MUSIC), or None when unset or missing."""
+    p = (os.environ.get("MRTRUTH_MUSIC") or "").strip()
+    return Path(p) if p and Path(p).is_file() and Path(p).stat().st_size > 0 else None
+
+
+def _music_db() -> float:
+    try:
+        return max(-40.0, min(-6.0, float(os.environ.get("MRTRUTH_MUSIC_DB") or MUSIC_DB_DEFAULT)))
+    except ValueError:
+        return MUSIC_DB_DEFAULT
+
+
+def _loudness(path: Path, seconds: float = 0) -> float:
+    """Integrated loudness (LUFS) of a file, or of its first `seconds` - None when it cannot be read or is silent."""
+    args = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path)] + (["-t", f"{seconds:.1f}"] if seconds else [])
+    try:
+        got = subprocess.run(args + ["-af", "ebur128=framelog=quiet", "-f", "null", "-"], capture_output=True,
+                             text=True, timeout=900).stderr
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.findall(r"I:\s+(-?[\d.]+) LUFS", got)
+    return float(m[-1]) if m and float(m[-1]) > -70 else None
+
+
+def _seconds_of(path: Path) -> float:
+    try:
+        return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                     str(path)], capture_output=True, text=True, timeout=60).stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
+def _music_under(engine, job: Path, audio: Path) -> Path:
+    """The film's sound (`audio`: the voice, with its sounds when it has them) with the owner's music under it
+    (MRTRUTH_MUSIC); `audio` unchanged when there is no music or it cannot be read."""
+    music = _music_file()
+    if not music:
+        return audio
+    film = _seconds_of(audio)
+    voice, bed = _loudness(audio), _loudness(music, 600)
+    if not film or voice is None or bed is None:
+        engine.log(f"  music: WARNING - {music.name} or the narration could not be measured; the film has no music")
+        return audio
+    gain = voice + _music_db() - bed
+    out = job / "voice_music.flac"
+    fo = max(0.0, film - MUSIC_FADE_OUT_S)
+    fc = (f"[0:a]aresample=48000,aformat=channel_layouts=stereo,asplit=2[v][key];"
+          f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=duration={film:.3f},volume={gain:.2f}dB,"
+          f"afade=t=in:d={MUSIC_FADE_IN_S},afade=t=out:st={fo:.3f}:d={MUSIC_FADE_OUT_S}[m0];"
+          f"[m0][key]{MUSIC_DUCK}[m];"
+          f"[v][m]amix=inputs=2:normalize=0:duration=first,"
+          f"alimiter=limit={MIX_CEILING}:attack=1:release=50:level=0:latency=1[a]")
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(audio), "-stream_loop", "-1", "-i", str(music),
+                    "-filter_complex", fc, "-map", "[a]", "-c:a", "flac", str(out)], check=True)
+    engine.log(f"  music: {music.name} under the narration at {_music_db():+.0f} LU (narration {voice:.1f} LUFS, "
+               f"music {bed:.1f} LUFS, gain {gain:+.1f} dB), looped to {film:.0f}s, faded in {MUSIC_FADE_IN_S:.0f}s "
+               f"and out {MUSIC_FADE_OUT_S:.0f}s, ducked under the voice")
+    return out
+
+
 # a finish (run_test.py --segments sets MRTRUTH_FINISH=1): the drawn shots are joined under the saved plan, nothing is
 # planned again and no paid service is asked (owner 2026-10-10: the pod's finish re-planned from the caches, pinged
 # Gemini, Brave and Claude, and matched the drawn shots only while every cache hit)
@@ -9375,6 +9446,10 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     render(engine, work, tasks, workers=int(_cfg(engine, style).get("render_processes") or 2))
     engine._concat_segments([Path(t["output"]) for t in tasks], job / "_visual.mp4")
     audio = _sfx_audio(engine, job, mp3, sc_list)
+    voiced = audio
+    audio = _music_under(engine, job, audio)     # his background music (MRTRUTH_MUSIC), when the website sent one
+    if voiced not in (mp3, audio):
+        voiced.unlink(missing_ok=True)
     his = _template_sounds(sc_list)              # the owner's own template sounds (map, highlighted page, gallery)
     if his and _bed_under(engine):
         engine.log("  sound: WARNING - a music bed (assets/VOICE DESIGN) is mixed under this film and its normaliser "
@@ -9387,7 +9462,7 @@ def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, b
     # with the same FLAC mix and limiter, so the same encode. Only a film that carries one of them pays for it
     engine._final_mux(job, audio, srt, False, add_qr=False, vignette=False,
                       cuts=[sc["startFrame"] / FPS for sc in sc_list],
-                      **({"audio_bitrate": MAP_AUDIO_BITRATE} if his else {}))
+                      **({"audio_bitrate": MAP_AUDIO_BITRATE} if his or audio.name == "voice_music.flac" else {}))
     (job / "_visual.mp4").unlink(missing_ok=True)
     if audio != mp3:
         audio.unlink(missing_ok=True)

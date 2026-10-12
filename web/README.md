@@ -1,0 +1,48 @@
+# Mr Truth Studio (the website)
+
+A private website for making Mr Truth films. You sign in, drop a voiceover, a script and (if you like) background
+music, and press **Create film**. The film is made on a rented RunPod machine and shows up in the list with a player
+and a download button. Your PC and your own GPU machines will be added as places to make films later; they are
+already shown in the list as "coming".
+
+## What runs where
+
+| Part | Where | Cost |
+|---|---|---|
+| The website, the list of films, the keys | your small server (DigitalOcean, Hetzner...) | about $6 a month |
+| Making a film | one RunPod machine per film, switched off when done | about $1 per 20-minute film |
+| Your files and finished videos | your Cloudflare R2 storage | pennies |
+
+The small server never makes videos, so it does not slow them down. If the website restarts in the middle of a film,
+the machine carries on and the film appears when it is done.
+
+## Install (once)
+
+1. Create an Ubuntu 24.04 server (the $6 plan is enough) and open its web console.
+2. Make a GitHub token that can only read this repository: github.com → Settings → Developer settings →
+   Fine-grained tokens → Generate new token → Repository access: only `Movefast-plus` → Permissions:
+   Contents: Read-only.
+3. Paste this into the server console and answer its three questions (token, your sign-in name and password, web
+   address or Enter for a free one):
+
+   ```
+   read -s -p "GitHub token: " T; echo; curl -fsSL -H "Authorization: token $T" https://raw.githubusercontent.com/aiworkgen123/Movefast-plus/mrtruth-web/web/install.sh -o install.sh && GH_TOKEN=$T bash install.sh
+   ```
+4. Open the address it prints, sign in, go to **Settings**, paste your keys, press **Test keys**.
+5. Add your employees under **Settings → People** (members can make films, only owners see Settings).
+
+## Later
+
+* **Settings → Update the tool** fetches the newest version; films being made carry on.
+* A forgotten password: in the server console, `cd /opt/mrtruth/code && sudo -u mrtruth MRTRUTH_WEB_DATA=/var/lib/mrtruth /opt/mrtruth/venv/bin/python -m web.manage password NAME`
+* Your own web address: point it at the server's IP address (an A record), then run the installer again and type it.
+
+## For developers
+
+* `web/app.py` the website (Flask, one process), `web/jobs.py` the job runner and the pod's script, `web/store.py`
+  the records (SQLite), `web/static/index.html` the page, `web/install.sh` the server set-up.
+* Data lives in `MRTRUTH_WEB_DATA` (`/var/lib/mrtruth` on the server): `studio.sqlite`, `keys.env` (0600), each
+  film's uploaded files under `jobs/<id>/`, `studio.log`.
+* A no-cost local try: `MRTRUTH_WEB_DATA=/tmp/mt MRTRUTH_WEB_FAKE=1 python -m web.manage add-owner me` then
+  `MRTRUTH_WEB_DATA=/tmp/mt MRTRUTH_WEB_FAKE=1 python -m web.app` and open http://127.0.0.1:8080 ("Test run").
+* Tests: `python -m unittest tests/test_web.py tests/test_mrtruth_music.py`.

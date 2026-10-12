@@ -139,7 +139,7 @@ class Bucket:
             raise S3Error(f"Storage {method} HTTP {r.status_code}")
         return r
 
-    def presign(self, key: str, seconds: int = 6 * 3600, method: str = "GET") -> str:
+    def presign(self, key: str, seconds: int = 6 * 3600, method: str = "GET", params: dict | None = None) -> str:
         """A plain https link to one object that works for `seconds`, then stops.
 
         This is how a brand-new pod gets MoveFast's code: it has curl and nothing
@@ -160,6 +160,7 @@ class Bucket:
                  "X-Amz-Date": amz_date,
                  "X-Amz-Expires": str(int(seconds)),
                  "X-Amz-SignedHeaders": "host"}
+        query.update(params or {})        # e.g. response-content-disposition: a download saved under its own name
         canonical_qs = "&".join(f"{_quote(k, '')}={_quote(str(v), '')}"
                                 for k, v in sorted(query.items()))
         canonical_uri = "/" + _quote(f"{self.bucket}/{key}".rstrip("/"))

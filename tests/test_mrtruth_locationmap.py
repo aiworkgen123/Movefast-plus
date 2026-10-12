@@ -124,7 +124,7 @@ class Planner(unittest.TestCase):
         src = inspect.getsource(M.assemble)
         # (impl-z: any of his template sounds - map, highlighted page, gallery - is one list, _template_sounds)
         self.assertIn("his = _template_sounds(sc_list)", src)
-        self.assertIn('**({"audio_bitrate": MAP_AUDIO_BITRATE} if his else {})', src)
+        self.assertIn('**({"audio_bitrate": MAP_AUDIO_BITRATE} if his or audio.name == "voice_music.flac" else {})', src)
         self.assertTrue(M._template_sounds([shot(0, 240, dev=MAPDEV)]))
 
 

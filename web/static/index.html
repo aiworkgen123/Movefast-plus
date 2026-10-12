@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mr Truth Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23c8a24a'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='%23161a22' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f5f3ee; --panel:#ffffff; --ink:#1b1e25; --muted:#5d6472; --line:#e2ded4; --soft:#f0ede6;
+  --accent:#9a7426; --accent-ink:#ffffff; --ok:#2f7d4f; --bad:#b03a2e; --warn:#a46a00; --bar:#c8a24a;
+  --shadow:0 1px 2px rgba(0,0,0,.05),0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#12151b; --panel:#1a1e26; --ink:#eceae4; --muted:#9aa1ad; --line:#2a303b; --soft:#20252e;
+  --accent:#d4ae55; --accent-ink:#161a22; --ok:#5cbf86; --bad:#ec7a6d; --warn:#e4b04a; --bar:#d4ae55;
+  --shadow:none;
+}}
+:root[data-theme="dark"]{
+  --bg:#12151b; --panel:#1a1e26; --ink:#eceae4; --muted:#9aa1ad; --line:#2a303b; --soft:#20252e;
+  --accent:#d4ae55; --accent-ink:#161a22; --ok:#5cbf86; --bad:#ec7a6d; --warn:#e4b04a; --bar:#d4ae55;
+  --shadow:none;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+button,input,select,textarea{font:inherit;color:inherit}
+a{color:var(--accent)}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px}
+header{border-bottom:1px solid var(--line);background:var(--panel)}
+header .wrap{display:flex;align-items:center;gap:12px;height:58px}
+.brand{font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:10px}
+.logo{width:28px;height:28px;border-radius:7px;background:var(--bar);display:grid;place-items:center;color:#161a22;font-weight:800;font-size:15px}
+header nav{margin-left:auto;display:flex;gap:6px;align-items:center}
+.who{color:var(--muted);font-size:14px;margin-right:4px}
+.btn{border:1px solid var(--line);background:var(--panel);padding:8px 14px;border-radius:9px;cursor:pointer}
+.btn:hover{background:var(--soft)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{filter:brightness(1.05)}
+.btn.danger{color:var(--bad)}
+.btn.small{padding:5px 10px;font-size:13px}
+.btn:disabled{opacity:.5;cursor:default}
+main{padding:22px 0 60px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:var(--shadow);margin-bottom:18px}
+h1{font-size:20px;margin:0 0 14px}
+h2{font-size:17px;margin:0 0 12px}
+h3{font-size:15px;margin:18px 0 8px}
+label.f{display:block;font-weight:600;margin:0 0 6px}
+.hint{color:var(--muted);font-size:13px}
+input[type=text],input[type=password],input[type=number],select,textarea{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--bg)}
+textarea{min-height:120px;resize:vertical}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--bar);outline-offset:0;border-color:transparent}
+.drops{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}
+.drop{border:1.5px dashed var(--line);border-radius:12px;padding:14px;min-height:150px;display:flex;flex-direction:column;gap:6px;cursor:pointer;background:var(--bg);position:relative}
+.drop.over{border-color:var(--bar);background:var(--soft)}
+.drop.has{border-style:solid;border-color:var(--ok)}
+.drop .t{font-weight:600}
+.drop .file{font-size:13px;word-break:break-all;color:var(--ok)}
+.drop input[type=file]{display:none}
+.drop .opt{font-size:12px;color:var(--muted);font-weight:400}
+.drop .x{position:absolute;top:8px;right:8px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.places{display:grid;gap:8px;margin:8px 0 16px}
+.place{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--line);border-radius:10px}
+.place.off{opacity:.55}
+.place input{margin-top:4px}
+.bar{height:8px;background:var(--soft);border-radius:99px;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--bar);width:0;transition:width .6s}
+.err{color:var(--bad);font-size:14px;margin-top:8px;min-height:1em}
+.banner{border:1px solid var(--warn);color:var(--warn);background:transparent;border-radius:10px;padding:10px 14px;margin-bottom:16px}
+.film{border-top:1px solid var(--line);padding:16px 0}
+.film:first-of-type{border-top:0;padding-top:4px}
+.film .top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.film .name{font-weight:650;font-size:16px}
+.badge{font-size:12px;padding:2px 9px;border-radius:99px;border:1px solid currentColor}
+.badge.done{color:var(--ok)} .badge.failed{color:var(--bad)} .badge.running,.badge.starting,.badge.queued,.badge.cancelling{color:var(--warn)} .badge.cancelled{color:var(--muted)}
+.meta{color:var(--muted);font-size:13px;margin:2px 0 8px}
+.film .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+video{width:100%;max-height:420px;background:#000;border-radius:10px;margin-top:10px}
+pre.log{background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:10px;font-size:12px;max-height:280px;overflow:auto;white-space:pre-wrap;margin:10px 0 0}
+.costs{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.costs b{color:var(--ink);font-weight:600}
+.keys{display:grid;gap:12px}
+.key{display:grid;grid-template-columns:220px 1fr;gap:10px;align-items:center}
+.key .st{font-size:12px}
+.key .st.on{color:var(--ok)} .key .st.offk{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:14px}
+td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
+.empty{color:var(--muted);text-align:center;padding:26px 0}
+.login{max-width:380px;margin:12vh auto 0}
+.hide{display:none!important}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;z-index:9}
+@media (max-width:720px){
+  .drops{grid-template-columns:1fr}
+  .key{grid-template-columns:1fr}
+  header .who{display:none}
+}
+</style>
+</head>
+<body>
+<div id="loginView" class="wrap hide">
+  <div class="card login">
+    <div class="brand" style="margin-bottom:16px"><div class="logo">M</div>Mr Truth Studio</div>
+    <form id="loginForm">
+      <label class="f" for="ln">Name</label>
+      <input type="text" id="ln" autocomplete="username" autocapitalize="off" required>
+      <label class="f" for="lp" style="margin-top:12px">Password</label>
+      <input type="password" id="lp" autocomplete="current-password" required>
+      <div class="err" id="loginErr"></div>
+      <button class="btn primary" style="width:100%;margin-top:8px">Sign in</button>
+    </form>
+  </div>
+</div>
+
+<div id="appView" class="hide">
+  <header><div class="wrap">
+    <div class="brand"><div class="logo">M</div>Mr Truth Studio</div>
+    <nav>
+      <span class="who" id="who"></span>
+      <button class="btn small" data-go="films">Films</button>
+      <button class="btn small" data-go="settings" id="setBtn">Settings</button>
+      <button class="btn small" data-go="account">Account</button>
+      <button class="btn small" id="logout">Sign out</button>
+    </nav>
+  </div></header>
+
+  <main class="wrap">
+    <section id="films">
+      <div id="setupBanner" class="banner hide"></div>
+      <div class="card">
+        <h1>New film</h1>
+        <form id="newForm">
+          <label class="f" for="title">Title</label>
+          <input type="text" id="title" name="title" maxlength="150" placeholder="The Passage a Priest Memorised" required>
+          <div class="drops">
+            <div class="drop" data-for="voice">
+              <span class="t">Voiceover</span>
+              <span class="hint">Drop the narration here, or click. MP3, WAV, M4A…</span>
+              <span class="file"></span>
+              <input type="file" name="voice" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus">
+            </div>
+            <div class="drop" data-for="script">
+              <span class="t">Script</span>
+              <span class="hint">Drop the .txt script here, or click. <a href="#" id="pasteLink">Paste it instead</a></span>
+              <span class="file"></span>
+              <input type="file" name="script" accept=".txt,text/plain">
+            </div>
+            <div class="drop" data-for="music">
+              <span class="t">Background music <span class="opt">(optional)</span></span>
+              <span class="hint">Looped to the film's length, faded in and out, kept under the voice.</span>
+              <span class="file"></span>
+              <input type="file" name="music" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus">
+              <select name="music_level" id="mlevel" title="Music level" onclick="event.stopPropagation()" style="margin-top:auto">
+                <option value="quiet">Music: quiet</option>
+                <option value="normal" selected>Music: normal</option>
+                <option value="louder">Music: louder</option>
+              </select>
+            </div>
+          </div>
+          <div id="pasteBox" class="hide" style="margin:-4px 0 16px">
+            <label class="f" for="stext">Script text</label>
+            <textarea id="stext" name="script_text" placeholder="Paste the whole script here"></textarea>
+          </div>
+          <label class="f">Make it on</label>
+          <div class="places" id="places"></div>
+          <div class="row">
+            <button class="btn primary" id="create">Create film</button>
+            <div style="flex:1;min-width:160px" class="hide" id="upWrap"><div class="bar"><i id="upBar"></i></div><div class="hint" id="upText"></div></div>
+          </div>
+          <div class="err" id="newErr"></div>
+        </form>
+      </div>
+      <div class="card">
+        <div class="row" style="justify-content:space-between"><h2 style="margin:0">Films</h2><span class="hint" id="busy"></span></div>
+        <div id="list" style="margin-top:12px"><div class="empty">Loading…</div></div>
+      </div>
+    </section>
+
+    <section id="settings" class="hide">
+      <div class="card">
+        <h1>Keys</h1>
+        <p class="hint" style="margin-top:-6px">Kept on this server only, never shown in full. Leave a box empty to keep what is saved.</p>
+        <form id="keysForm"><div class="keys" id="keys"></div>
+          <div class="row" style="margin-top:16px">
+            <button class="btn primary">Save keys</button>
+            <button class="btn" type="button" id="testKeys">Test keys</button>
+          </div>
+          <div id="testOut" class="hint" style="margin-top:10px"></div>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Films at the same time</h2>
+        <div class="row"><input type="number" id="maxPar" min="1" max="10" style="width:100px"><button class="btn" id="saveMax">Save</button>
+        <span class="hint">Each film rents its own machine. Extra films wait in the queue.</span></div>
+      </div>
+      <div class="card">
+        <h2>People</h2>
+        <table><thead><tr><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="people"></tbody></table>
+        <h3>Add a person</h3>
+        <form id="addUser" class="row">
+          <input type="text" name="name" placeholder="name (e.g. maria)" style="flex:1;min-width:140px" autocapitalize="off" required>
+          <input type="password" name="password" placeholder="password, 10+ characters" style="flex:1;min-width:160px" autocomplete="new-password" required>
+          <select name="role" style="width:auto"><option value="member">Member: makes films</option><option value="owner">Owner: also settings</option></select>
+          <button class="btn primary">Add</button>
+        </form>
+        <div class="err" id="userErr"></div>
+      </div>
+      <div class="card">
+        <h2>Update the tool</h2>
+        <p class="hint" id="version"></p>
+        <button class="btn" id="update">Get the newest version</button>
+        <span class="hint" id="updOut"></span>
+      </div>
+    </section>
+
+    <section id="account" class="hide">
+      <div class="card" style="max-width:460px">
+        <h1>Change my password</h1>
+        <form id="pwForm">
+          <label class="f">Current password</label><input type="password" name="old" autocomplete="current-password" required>
+          <label class="f" style="margin-top:12px">New password (10+ characters)</label><input type="password" name="new" autocomplete="new-password" required>
+          <div class="err" id="pwErr"></div>
+          <button class="btn primary">Change password</button>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+let ME = null, timer = null, openLogs = new Set(), playing = new Set();
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(t){ const d=document.createElement('div'); d.className='toast'; d.textContent=t; document.body.append(d); setTimeout(()=>d.remove(),3200); }
+async function api(path, opt={}){
+  const o = Object.assign({headers:{}}, opt);
+  if (o.json !== undefined){ o.body = JSON.stringify(o.json); o.headers['Content-Type']='application/json'; o.method = o.method || 'POST'; }
+  let r; try { r = await fetch(path, o); } catch(e){ return {error:'No connection to the website.'}; }
+  if (r.status === 401 && path !== '/api/login'){ show('login'); return {error:'Please sign in.'}; }
+  try { const d = await r.json(); if (!r.ok && !d.error) d.error = 'Something went wrong ('+r.status+').'; return d; }
+  catch(e){ return {error:'Something went wrong ('+r.status+').'}; }
+}
+function show(v){
+  $('#loginView').classList.toggle('hide', v!=='login'); $('#appView').classList.toggle('hide', v==='login');
+}
+function go(tab){
+  ['films','settings','account'].forEach(t => $('#'+t).classList.toggle('hide', t!==tab));
+  if (tab==='settings') loadSettings();
+  location.hash = tab==='films' ? '' : tab;
+}
+$$('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go));
+
+async function boot(){
+  const d = await api('/api/me');
+  if (!d.user){ show('login'); $('#ln').focus(); return; }
+  ME = d; show('app');
+  $('#who').textContent = d.user.name + (d.user.role==='owner' ? ' (owner)' : '');
+  $('#setBtn').classList.toggle('hide', d.user.role!=='owner');
+  const b = $('#setupBanner');
+  if (d.setup_needed){
+    b.classList.remove('hide');
+    b.innerHTML = d.user.role==='owner'
+      ? 'Before the first film, add the keys in <a href="#" onclick="go(\'settings\');return false">Settings</a>: ' + esc((d.missing_keys||[]).join(', ')) + '.'
+      : 'An owner still has to add the keys before films can be made.';
+  } else b.classList.add('hide');
+  $('#places').innerHTML = d.run_on.map((p,i) => `<label class="place ${p.ready?'':'off'}">
+      <input type="radio" name="run_on" value="${esc(p.id)}" ${p.ready?'':'disabled'} ${p.ready && !d.run_on.slice(0,i).some(q=>q.ready)?'checked':''}>
+      <span><b>${esc(p.label)}</b><br><span class="hint">${esc(p.note)}</span></span></label>`).join('');
+  const t = (location.hash||'').slice(1);
+  go(t==='settings' && d.user.role==='owner' ? 'settings' : t==='account' ? 'account' : 'films');
+  refresh();
+}
+
+$('#loginForm').onsubmit = async e => {
+  e.preventDefault(); $('#loginErr').textContent='';
+  const d = await api('/api/login', {json:{name:$('#ln').value, password:$('#lp').value}});
+  if (d.error){ $('#loginErr').textContent = d.error; return; }
+  $('#lp').value=''; boot();
+};
+$('#logout').onclick = async () => { await api('/api/logout', {json:{}}); ME=null; clearTimeout(timer); show('login'); };
+
+// ── the three drop zones ──
+$$('.drop').forEach(z => {
+  const inp = z.querySelector('input[type=file]');
+  const set = f => {
+    if (!f) return;
+    const dt = new DataTransfer(); dt.items.add(f); inp.files = dt.files;
+    z.classList.add('has'); z.querySelector('.file').textContent = f.name + ' · ' + (f.size/1e6).toFixed(1) + ' MB';
+    if (z.dataset.for==='script'){ $('#pasteBox').classList.add('hide'); $('#stext').value=''; }
+    if (!z.querySelector('.x')){
+      const x = document.createElement('button'); x.type='button'; x.className='btn small x'; x.textContent='Remove';
+      x.onclick = ev => { ev.stopPropagation(); inp.value=''; z.classList.remove('has'); z.querySelector('.file').textContent=''; x.remove(); };
+      z.append(x);
+    }
+  };
+  z.onclick = e => { if (e.target.tagName!=='A' && e.target.tagName!=='SELECT' && !e.target.classList.contains('x')) inp.click(); };
+  inp.onchange = () => set(inp.files[0]);
+  z.ondragover = e => { e.preventDefault(); z.classList.add('over'); };
+  z.ondragleave = () => z.classList.remove('over');
+  z.ondrop = e => { e.preventDefault(); z.classList.remove('over'); set(e.dataTransfer.files[0]); };
+});
+$('#pasteLink').onclick = e => { e.preventDefault(); e.stopPropagation(); $('#pasteBox').classList.toggle('hide'); $('#stext').focus(); };
+
+$('#newForm').onsubmit = e => {
+  e.preventDefault(); $('#newErr').textContent='';
+  const f = e.target, fd = new FormData(f);
+  if (!fd.get('voice')?.size) return $('#newErr').textContent = 'Add the voiceover.';
+  if (!fd.get('script')?.size && !$('#stext').value.trim()) return $('#newErr').textContent = 'Add the script (a .txt file or paste it).';
+  if (!fd.get('music')?.size) fd.delete('music');
+  if (!fd.get('script')?.size) fd.delete('script');
+  const x = new XMLHttpRequest(); x.open('POST','/api/jobs');
+  $('#create').disabled = true; $('#upWrap').classList.remove('hide');
+  x.upload.onprogress = ev => { if (ev.lengthComputable){ const p = Math.round(ev.loaded/ev.total*100);
+    $('#upBar').style.width = p+'%'; $('#upText').textContent = p<100 ? `Uploading ${p}%` : 'Checking the files…'; } };
+  x.onload = () => {
+    $('#create').disabled = false; $('#upWrap').classList.add('hide'); $('#upBar').style.width='0';
+    let d = {}; try { d = JSON.parse(x.responseText); } catch(_){ d = {error:'Upload failed ('+x.status+').'}; }
+    if (x.status===401) return show('login');
+    if (d.error) { $('#newErr').textContent = d.error; return; }
+    f.reset(); $$('.drop').forEach(z => { z.classList.remove('has'); z.querySelector('.file').textContent=''; z.querySelector('.x')?.remove(); });
+    $('#pasteBox').classList.add('hide'); boot(); toast('Film added. It starts in a few seconds.');
+  };
+  x.onerror = () => { $('#create').disabled=false; $('#upWrap').classList.add('hide'); $('#newErr').textContent='The upload did not go through. Check your connection and try again.'; };
+  x.send(fd);
+};
+
+// ── the list ──
+const LABEL = {queued:'Waiting', starting:'Starting', running:'Making', cancelling:'Stopping', done:'Finished', failed:'Stopped', cancelled:'Cancelled'};
+const money = v => '$' + Number(v||0).toFixed(2);
+const when = t => t ? new Date(t*1000).toLocaleString([], {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}) : '';
+const dur = s => s ? (s>=3600 ? Math.floor(s/3600)+'h ' : '') + Math.round((s%3600)/60) + ' min' : '';
+function film(j){
+  const active = ['queued','starting','running','cancelling'].includes(j.status), c = j.cost||{};
+  let body = '';
+  if (active){
+    body += `<div class="bar" style="margin-top:8px"><i style="width:${Math.max(2,j.progress||0)}%"></i></div>
+      <div class="meta" style="margin-top:6px">${esc(j.stage||'')}${c.left_min && j.status==='running' ? ' · about '+c.left_min+' min left' : ''}${c.pod ? ' · machine so far '+money(c.pod) : ''}</div>`;
+  }
+  if (j.status==='done' && j.links){
+    body += playing.has(j.id) ? `<video controls preload="metadata" src="${esc(j.links.watch)}"></video>` : '';
+    const parts = [['Machine',c.pod],['Picture checks',c.gemini],['Claude',c.claude],['AI pictures',c.ai_pictures]].filter(p => p[1]!==undefined);
+    if (parts.length) body += `<div class="costs" style="margin-top:8px">${parts.map(p=>`<span>${p[0]} <b>${money(p[1])}</b></span>`).join('')}<span>Total <b>${money(c.total)}</b></span></div>`;
+  }
+  if (j.error) body += `<div class="err">${esc(j.error)}</div>`;
+  const acts = [];
+  if (j.status==='done' && j.links){
+    acts.push(`<button class="btn small primary" data-act="watch" data-id="${j.id}">${playing.has(j.id)?'Hide player':'Watch'}</button>`);
+    acts.push(`<a class="btn small" href="${esc(j.links.download)}" download>Download${j.video_mb ? ' ('+j.video_mb+' MB)' : ''}</a>`);
+  }
+  if (['queued','starting','running'].includes(j.status)) acts.push(`<button class="btn small danger" data-act="cancel" data-id="${j.id}">Stop</button>`);
+  if (['failed','cancelled'].includes(j.status)) acts.push(`<button class="btn small" data-act="retry" data-id="${j.id}">Try again</button>`);
+  if (!active) acts.push(`<button class="btn small danger" data-act="delete" data-id="${j.id}">Delete</button>`);
+  if (j.status!=='queued') acts.push(`<button class="btn small" data-act="log" data-id="${j.id}">${openLogs.has(j.id)?'Hide':'Show'} details</button>`);
+  const info = [j.user, when(j.created), dur(j.seconds) ? 'voice '+dur(j.seconds) : '', j.music_name ? 'music: '+j.music_name : 'no music', j.pod_desc||''].filter(Boolean).join(' · ');
+  return `<div class="film" id="f-${j.id}"><div class="top"><span class="name">${esc(j.title)}</span>
+    <span class="badge ${j.status}">${LABEL[j.status]||j.status}</span></div>
+    <div class="meta">${esc(info)}</div>${body}<div class="acts">${acts.join('')}</div>
+    ${openLogs.has(j.id) ? `<pre class="log" id="log-${j.id}">Loading…</pre>` : ''}</div>`;
+}
+async function refresh(){
+  clearTimeout(timer);
+  if (!ME) return;
+  const d = await api('/api/jobs');
+  if (d.error){ timer = setTimeout(refresh, 15000); return; }
+  const list = $('#list');
+  // a video being watched is not redrawn (it would restart)
+  const keep = {}; playing.forEach(id => { const v = $('#f-'+id+' video'); if (v) keep[id] = v; });
+  list.innerHTML = d.jobs.length ? d.jobs.map(film).join('') : '<div class="empty">No films yet. Add one above.</div>';
+  Object.entries(keep).forEach(([id,v]) => { const n = $('#f-'+id+' video'); if (n) n.replaceWith(v); });
+  openLogs.forEach(async id => { const l = $('#log-'+id); if (l){ const r = await api('/api/jobs/'+id+'/log'); l.textContent = r.log || '(nothing yet)'; l.scrollTop = l.scrollHeight; } });
+  $('#busy').textContent = d.busy ? `${d.busy} in progress · up to ${d.max_parallel} at once` : '';
+  timer = setTimeout(refresh, d.busy ? 5000 : 30000);
+}
+$('#list').onclick = async e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+  if (act==='watch'){ playing.has(id) ? playing.delete(id) : playing.add(id); return refresh(); }
+  if (act==='log'){ openLogs.has(id) ? openLogs.delete(id) : openLogs.add(id); return refresh(); }
+  if (act==='cancel' && !confirm('Stop this film? The machine is switched off and the film is not finished.')) return;
+  if (act==='delete' && !confirm('Delete this film and its video? This cannot be undone.')) return;
+  const r = await api(`/api/jobs/${id}/${act}`, {json:{}});
+  if (r.error) toast(r.error); refresh();
+};
+
+// ── settings ──
+async function loadSettings(){
+  const d = await api('/api/settings'); if (d.error) return toast(d.error);
+  $('#keys').innerHTML = d.keys.map(k => `<div class="key"><div><b>${esc(k.label)}</b>${k.needed?'':' <span class="hint">(optional)</span>'}<br>
+     <span class="st ${k.set?'on':(k.needed?'offk':'')}">${k.set ? 'saved '+esc(k.hint) : (k.needed?'not set':'not set')}</span>
+     ${k.set?` · <a href="#" data-clear="${k.name}">remove</a>`:''}</div>
+     <input type="password" name="${k.name}" placeholder="${esc(k.help)}" autocomplete="off"></div>`).join('');
+  $('#maxPar').value = d.max_parallel;
+  $('#people').innerHTML = d.users.map(u => `<tr><td>${esc(u.name)}</td><td>${u.role}</td><td style="text-align:right">
+     <button class="btn small" data-pw="${esc(u.name)}">New password</button>
+     ${u.name!==ME.user.name?`<button class="btn small danger" data-rm="${esc(u.name)}">Remove</button>`:''}</td></tr>`).join('');
+  $('#version').textContent = 'Installed version: ' + (d.version.current || 'unknown');
+}
+$('#keysForm').onsubmit = async e => {
+  e.preventDefault();
+  const keys = {}; new FormData(e.target).forEach((v,k) => { if (String(v).trim()) keys[k] = v; });
+  const r = await api('/api/settings', {json:{keys}});
+  toast(r.error || 'Keys saved.'); loadSettings(); boot();
+};
+$('#keys').onclick = async e => { const n = e.target.dataset.clear; if (!n) return; e.preventDefault();
+  if (!confirm('Remove this key?')) return; await api('/api/settings', {json:{clear:[n]}}); loadSettings(); boot(); };
+$('#testKeys').onclick = async () => { $('#testOut').textContent = 'Testing…';
+  const r = await api('/api/settings/test', {json:{}});
+  $('#testOut').innerHTML = r.error ? esc(r.error) : Object.entries(r.results).map(([k,v]) => `${esc(k)}: <b style="color:var(--${String(v).startsWith('ok')?'ok':'bad'})">${esc(v)}</b>`).join('<br>'); };
+$('#saveMax').onclick = async () => { const r = await api('/api/settings', {json:{max_parallel:+$('#maxPar').value}}); toast(r.error || 'Saved.'); };
+$('#addUser').onsubmit = async e => { e.preventDefault(); $('#userErr').textContent='';
+  const r = await api('/api/users', {json:Object.fromEntries(new FormData(e.target))});
+  if (r.error) return $('#userErr').textContent = r.error; e.target.reset(); toast('Added. Send them the website address, their name and password.'); loadSettings(); };
+$('#people').onclick = async e => {
+  const pw = e.target.dataset.pw, rm = e.target.dataset.rm;
+  if (pw){ const p = prompt('New password for '+pw+' (10+ characters):'); if (!p) return;
+    const r = await api(`/api/users/${encodeURIComponent(pw)}/password`, {json:{password:p}}); toast(r.error || 'Password changed.'); }
+  if (rm && confirm('Remove '+rm+'? They can no longer sign in.')){ const r = await api(`/api/users/${encodeURIComponent(rm)}/delete`, {json:{}}); toast(r.error || 'Removed.'); loadSettings(); }
+};
+$('#update').onclick = async () => { if (!confirm('Get the newest version? The website restarts for a few seconds; films being made carry on.')) return;
+  $('#updOut').textContent = ' Updating…'; const r = await api('/api/update', {json:{}});
+  if (r.error) return $('#updOut').textContent = ' '+r.error;
+  $('#updOut').textContent = r.changed ? ' Updated. Reloading…' : ' Already the newest version.';
+  if (r.changed) setTimeout(() => location.reload(), 6000); };
+$('#pwForm').onsubmit = async e => { e.preventDefault(); $('#pwErr').textContent='';
+  const r = await api('/api/password', {json:Object.fromEntries(new FormData(e.target))});
+  if (r.error) return $('#pwErr').textContent = r.error; e.target.reset(); toast('Password changed.'); };
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+boot();
+</script>
+</body>
+</html>
