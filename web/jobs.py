@@ -112,6 +112,25 @@ def media_seconds(path: Path) -> float:
         return 0.0
 
 
+CLAUDE_DRY = "the Claude (Anthropic) account is out of credit - please top up at console.anthropic.com (Plans & Billing)"
+
+
+def claude_credit(key: str) -> str:
+    """'' when Claude answers (or cannot be asked right now); otherwise why it will not plan: a dry account or a refused
+    key. A one-token call (a hundredth of a cent): the list of models answers even when the account has no credit."""
+    if not key:
+        return ""
+    try:
+        r = requests.post("https://api.anthropic.com/v1/messages", timeout=30,
+                          headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                          json={"model": "claude-haiku-5-5", "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]})
+    except requests.RequestException:
+        return ""
+    if "credit balance" in r.text.lower():
+        return CLAUDE_DRY
+    return "the Claude key was refused - check it in Settings" if r.status_code == 401 else ""
+
+
 class LocalBucket:
     """A folder standing in for R2 (MRTRUTH_WEB_FAKE=1: the website's own tests and a no-cost trial run). Links point
     at the website's /local/ route, which only signed-in people can open."""
@@ -537,10 +556,15 @@ class Studio:
             while True:                                # wait for a machine rather than fail (owner 2026-10-12)
                 if self.store.job(jid)["status"] == "cancelling":
                     return self._cancelled(jid)
-                if not tries:                          # later tries keep the "Waiting for a machine" message
-                    self.store.update(jid, stage="Renting a machine", progress=4)
-                pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU if n > 1 else 32,
-                                        ram=32, max_hr=PLANNER_MAX_HR, fallback=True, ttl=ttl)
+                # no machine is rented for a plan Claude cannot make (5 films stopped together when it ran dry)
+                dry = "" if plan else claude_credit(keys.get("ANTHROPIC_API_KEY", ""))
+                if dry:
+                    pod, tried = None, [dry]
+                else:
+                    if not tries:                      # later tries keep the "Waiting for a machine" message
+                        self.store.update(jid, stage="Renting a machine", progress=4)
+                    pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU if n > 1 else 32,
+                                            ram=32, max_hr=PLANNER_MAX_HR, fallback=True, ttl=ttl)
                 tries += 1
                 if pod:
                     break
@@ -548,12 +572,12 @@ class Studio:
                 if self.store.job(jid)["status"] == "cancelling":
                     return self._cancelled(jid)
                 money = [t for t in tried if "balance too low" in t]
-                why = (" and ".join(money) + " - please top up" if money else
-                       f"no machine free under ${PLANNER_MAX_HR:.2f}/h")
+                why = dry or (" and ".join(money) + " - please top up" if money else
+                              f"no machine free under ${PLANNER_MAX_HR:.2f}/h")
                 if time.time() >= deadline:
                     raise RuntimeError(f"{why} for {RENT_WAIT_S // 60} minutes - press Try again later")
-                self.store.update(jid, stage=f"Waiting for a machine: {why} (tried {tries}x, trying again every "
-                                             f"{RENT_RETRY_S // 60} min)", progress=4)
+                self.store.update(jid, stage=f"Waiting for {'Claude' if dry else 'a machine'}: {why} (tried {tries}x, "
+                                             f"trying again every {RENT_RETRY_S // 60} min)", progress=4)
                 self.stop.wait(RENT_RETRY_S)
             # the machine is saved first (so a cancel or a crash from here on switches it off), then the film becomes
             # "running" only if nobody pressed Stop while it was being rented
@@ -881,6 +905,8 @@ class Studio:
         else:                                        # the plan and shares stay: Try again carries on from them
             self._unboot(b, jid, j)
             why = done.get("why") or self._why(tail)
+            if "credit balance is too low" in why.lower():  # said plainly (the API's own words are cut short)
+                why = CLAUDE_DRY + ", then press Try again"
             self.store.update(jid, status="failed", stage="Stopped", error=f"the film did not finish: {why}"[:400],
                               **fields)
         self._cleanup(jid, b)
@@ -1084,7 +1110,7 @@ else
     done ) &
   MRTRUTH_SHOT_WORKERS=30 PYTHONUNBUFFERED=1 .venv/bin/python run_test.py "$JS" "$JV" "$JT" "$JM" --export > plan.log 2>&1; RC=$?; touch /root/plan.over
   T1=$(date +%s); say "PLAN exit=$RC seconds=$((T1-T0)) $(grep -o 'pictures in .*' plan.log | tail -1 | cut -c1-200)"
-  [ "$RC" -ne 0 ] && say "planning error: $(grep -E 'Error|stopped|STOP' plan.log | tail -1 | cut -c1-300)"
+  [ "$RC" -ne 0 ] && say "planning error: $(grep -iE 'error|stopped' plan.log | tail -1 | cut -c1-300)"
   push_verdicts "after planning"
 fi
 PK=$(ls output/*/_work/*/mrtruth/render_package.tgz 2>/dev/null | head -1)

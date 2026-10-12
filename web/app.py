@@ -422,7 +422,10 @@ def test_keys():
     def claude():
         r = requests.get("https://api.anthropic.com/v1/models?limit=1", timeout=30,
                          headers={"x-api-key": k.get("ANTHROPIC_API_KEY", ""), "anthropic-version": "2023-06-01"})
-        return "ok" if r.ok else f"failed: HTTP {r.status_code}"
+        if not r.ok:
+            return f"failed: HTTP {r.status_code}"
+        dry = J.claude_credit(k.get("ANTHROPIC_API_KEY", ""))    # the model list answers even with no credit
+        return f"failed: {dry}" if dry else "ok"
     run("Claude", claude)
 
     def wavespeed():

@@ -344,6 +344,51 @@ class Runner(unittest.TestCase):
         self.assertEqual(j["status"], "failed")
         self.assertIn("RunPod balance too low - please top up", j["error"])
 
+    def test_no_machine_is_rented_while_the_claude_account_is_dry(self):
+        jid = self.job()
+        self.s.keys = lambda: {"RUNPOD_API_KEY": "k", "ANTHROPIC_API_KEY": "a"}
+        answers, stages = [self.J.CLAUDE_DRY, self.J.CLAUDE_DRY, ""], []
+        def credit(key):
+            self.assertEqual(key, "a")
+            stages.append(self.s.store.job(jid)["stage"])
+            return answers.pop(0)
+        self.answers(jid)
+        with mock.patch.object(self.J, "claude_credit", credit):
+            self.s._guard(jid, self.s._run)
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+        self.assertEqual(len(self.src.rents), 1)                  # only once Claude answered
+        self.assertTrue(any(s.startswith("Waiting for Claude: the Claude (Anthropic) account is out of credit")
+                            for s in stages), stages)
+
+    def test_a_film_stopped_by_a_dry_claude_account_says_so_plainly(self):
+        jid = self.job()
+        def write(name, env):
+            K = self.K(jid)
+            self.b.put_bytes(K["done"], json.dumps({"ok": False, "why": (
+                "planning error: Claude API error: stream error: {'details': None, 'type': 'invalid_request_error', "
+                "'message': 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billin")}
+                ).encode())
+        self.src.on_rent = write
+        self.s._guard(jid, self.s._run)
+        j = self.s.store.job(jid)
+        self.assertEqual(j["status"], "failed")
+        self.assertIn("account is out of credit - please top up at console.anthropic.com", j["error"])
+        self.assertIn("then press Try again", j["error"])
+
+    def test_the_claude_check_tells_a_dry_account_from_a_refused_key_and_never_blocks_on_a_blip(self):
+        def post(code, text):
+            return mock.patch.object(self.J.requests, "post", return_value=mock.Mock(status_code=code, text=text))
+        with post(400, '{"error": {"message": "Your credit balance is too low to access the Anthropic API."}}'):
+            self.assertEqual(self.J.claude_credit("a"), self.J.CLAUDE_DRY)
+        with post(401, '{"error": {"message": "invalid x-api-key"}}'):
+            self.assertIn("refused", self.J.claude_credit("a"))
+        for code in (200, 429, 529):
+            with post(code, "{}"):
+                self.assertEqual(self.J.claude_credit("a"), "")
+        with mock.patch.object(self.J.requests, "post", side_effect=self.J.requests.ConnectionError("down")):
+            self.assertEqual(self.J.claude_credit("a"), "")
+        self.assertEqual(self.J.claude_credit(""), "")
+
     def test_a_film_done_while_the_site_was_down_past_its_limit_is_read_back(self):
         jid = self.job()
         run = "web-x-1"
