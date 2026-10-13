@@ -389,6 +389,108 @@ class Phrases(unittest.TestCase):
         self.assertEqual([w for w, _, _ in M._toks(f"he said '{w0}s' and the {C}' {w1}")],
                          ["he", "said", f"{w0}s", "and", "the", f"{C}'", w1])   # a closing quote is no possessive
 
+    # review 2026-10-13: a negation reaches through an auxiliary, an aside and a verb of saying, never through a verb
+    # that holds what follows true, and nothing turns round where nothing is negated; a number is read by value; an
+    # alternative counts only where the words touch it; a hedge stays on its number; an infinitive is no order
+    def test_a_negation_reaches_through_auxiliaries_asides_and_verbs_of_saying(self):
+        w0, w1 = word(66, 0), word(66, 1)
+        rules = lambda text, line_: [r for r, _, _ in M._wording(text, line_)]
+        for text, line_ in (("Seen at all", f"It was a {w0} that cannot be seen at all."),
+                            (f"Keep the {w0}", f"He did not, in the end, keep the {w0}."),
+                            (f"Saw the {w1} again", f"No one, not even the {w0} keeper, saw the {w1} again."),
+                            (f"Risky or {w0}", f"He had not said it was risky or {w0}."),
+                            (f"The {w0} was real", f"Nobody believed the {w0} was real."),
+                            (f"Endorse or {w1}", f"The {w0} was not prepared to endorse or {w1}."),
+                            (f"{w1.title()} teaching or citation", f"It put the {w0} outside the category of sources "
+                                                                   f"for {w1} teaching or citation."),
+                            (f"The {w0} was {w1} in origin", f"The {w0} was not {w1} in origin."),   # not said word
+                            (f"{w0.title()} {w1} in origin", f"The {w0} was not {w1} in origin.")):  # for word
+            self.assertIn("negation", rules(text, line_), (text, line_))
+        for text, line_ in ((f"The {w0} was real", f"He did not know the {w0} was real."),     # it holds it true
+                            ("Appeared at first", f"The phrase 'not {w0} for {w1}' had appeared at first."),
+                            (f"The keepers sold the {w0}", f"Not long after, the keepers sold the {w0}."),
+                            (f"He kept the {w0}", f"Without a word, he kept the {w0}."),
+                            (f"The {w1} judgment", f"It was placed rather than born, carrying marks, serving in the "
+                                                   f"{w1} judgment."),
+                            ("Seen", f"It was not the {w0} that was seen."),
+                            (f"The old {w0} hall", f"They found it outside the old {w0} hall."),
+                            (f"A {w0}", f"It was not a priest but a {w0}."),
+                            (f"The {w0} was real", f"There was no doubt the {w0} was real."),
+                            (f"A {w0}", f"He was nothing but a {w0}."),
+                            (f"Old and {w0}", f"The {w1} was rather old and {w0}.")):
+            self.assertNotIn("negation", rules(text, line_), (text, line_))
+        self.assertNotEqual(M._spoken_phrase(f"He did not, in the end, keep the {w0}.", 32), f"Keep the {w0}")
+        self.assertNotEqual(M._spoken_phrase(f"He had not said it was risky or {w0}.", 21), f"Risky or {w0}")
+        self.assertEqual(M._spoken_phrase(f"It was a {w1} that cannot be seen at all.", 21), "Cannot be seen at all")
+
+    def test_a_negated_phrase_keeps_its_had_and_what_it_is_said_of(self):
+        w0, w1 = word(67, 0), word(67, 1)
+        self.assertFalse(M._phrase_ok(f"Not said the {w0} was false", f"The {w1} had not said the {w0} was false."))
+        self.assertFalse(M._phrase_ok(f"Not {w0}", f"The {w1} is not {w0} in the abstract."))
+        self.assertFalse(M._phrase_ok(f"Not as {w0}", f"Not as {w0} received at a distance."))
+        self.assertFalse(M._phrase_ok(f"He never said the {w0}", f"He never said the {w0} was real."))
+        self.assertTrue(M._phrase_ok(f"Not {w0} in the abstract", f"The {w1} is not {w0} in the abstract."))
+        self.assertTrue(M._phrase_ok(f"Not a {w0} but a {w1}", f"It was not a {w0} but a {w1} that came."))
+
+    def test_numbers_are_read_by_value_digits_and_words_both_ways(self):
+        w0, C = word(68, 0), word(68, 1).title()
+        detail = lambda text, line_: [w for r, w, _ in M._wording(text, line_) if r == "detail"]
+        for text, line_ in ((f"Over 10,000 {w0}s", f"They copied over ten thousand {w0}s by hand."),
+                            ("Nearly 2,000 years old", "It is nearly two thousand years old."),
+                            (f"1,500 years of {w0}", f"It kept fifteen hundred years of {w0}."),
+                            (f"2.5 million {w0}s", f"It held two and a half million {w0}s."),
+                            (f"The 80s {w0}", f"The {w0} came back in the eighties."),
+                            ("Kept for 250 years", "It was kept for two hundred and fifty years."),
+                            ("Kept for 120 years", "It was kept for a hundred and twenty years."),
+                            ("Kept for 120 years", "It was kept for one hundred twenty years."),
+                            (f"Thirty-One {w0.title()}s", f"He kept 31 {w0}s."),
+                            (f"Two Hundred {w0.title()}s", f"He kept 200 {w0}s."),
+                            (f"1 {C} 15", f"It is in {C}, chapter fifteen.")):          # a number in a name
+            self.assertEqual(detail(text, line_), [], (text, line_))
+        for text, line_ in ((f"12 {w0.title()}s Remained", f"Eleven {w0}s remained."),     # Title Case names nothing
+                            ("Over 30 Years", "It lasted twenty years."),
+                            (f"Thirty {w0.title()}s", f"He kept 31 {w0}s.")):
+            self.assertTrue(detail(text, line_), (text, line_))
+        self.assertEqual(M._wording(f"12 {w0.title()}s Remained", f"Eleven {w0}s remained.")[0][2],
+                         f"Eleven {w0}s remained")                       # the number said there, for the repair
+        self.assertEqual(M._num_runs(M._toks("in the 4th-5th century, two and a half thousand")),
+                         [(4, 2, 3), (5, 2, 3), (2500, 4, 9)])
+
+    def test_an_alternative_counts_only_where_the_words_touch_it(self):
+        w0, w1, w2 = word(69, 0), word(69, 1), word(69, 2)
+        rules = lambda text, line_: [r for r, _, _ in M._wording(text, line_)]
+        before = f"The {w0} kept one or two {w1}s."
+        self.assertEqual(M._wording(f"One {w2} stayed behind", f"{before} One {w2} stayed behind."), [])
+        self.assertEqual(M._wording(f"In 1450 the first {w2} arrived",
+                                    f"The hall stood from 1450 to 1520. In 1450 the first {w2} arrived."), [])
+        self.assertEqual(M._wording(f"Two {w2.title()}s By Sea", f"{before} Later two {w2}s came by sea."), [])
+        self.assertIn("detail", rules(f"Two {w1}s", before))
+        self.assertIn("detail", rules(f"{w0.title()} Kept Two {w1.title()}s", before))    # a summary of that sentence
+        self.assertEqual(M._spoken_phrase(f"One {w2} stayed behind.", 32, before), f"One {w2} stayed behind")
+
+    def test_an_or_of_two_kinds_is_still_an_alternative(self):
+        w0, w1, w2 = word(78, 0), word(78, 1), word(78, 2)
+        self.assertFalse(M._phrase_ok(f"Leave the {w0} hall", f"He could stay or leave the {w0} hall."))
+        self.assertFalse(M._phrase_ok("He could stay or leave", f"He could stay or leave the {w0} hall."))
+        self.assertFalse(M._phrase_ok("It had not said it was ruinous", f"It had not said it was ruinous or {w0}."))
+        self.assertFalse(M._phrase_ok(f"Lessons through {w1}", f"They gave lessons through {w1} or pastoral {w2}."))
+        self.assertTrue(M._phrase_ok("They could stay", f"They could stay or {w0}s would leave."))    # a clause
+        self.assertTrue(M._phrase_ok(f"Neither {w1} nor openly {w2}",
+                                     f"Cargo that was neither {w1} nor openly {w2} sat."))
+
+    def test_a_hedge_stays_on_its_number_and_an_infinitive_is_no_order(self):
+        w0, w1 = word(79, 0), word(79, 1)
+        line_ = f"Its copies outlived the {w0} by at least two centuries."
+        self.assertFalse(M._phrase_ok("Two centuries", line_))
+        self.assertIn("At least two centuries", M._spoken_phrases(line_, 32))       # a hedge may open a phrase
+        self.assertNotIn("Two centuries", M._spoken_phrases(line_, 32))
+        self.assertTrue(M._phrase_ok("Eighteen months", f"He read seven {w1}s over eighteen months."))   # a span
+        line_ = f"It was a seal designed to keep it away from anyone who might open the {w0}."
+        self.assertFalse(M._phrase_ok("Keep it away from anyone", line_))
+        self.assertFalse(M._phrase_ok("Keep it away", line_))
+        self.assertTrue(M._phrase_ok(f"Keep the {w0} away", f"Keep the {w0} away."))          # an order said as one
+        self.assertTrue(M._phrase_ok(f"Work in the {w0} hall", f"He went back to work in the {w0} hall."))
+
 
 class Titles(unittest.TestCase):
     """2026-10-13: the opening's kicker and a chapter heading are never cut inside a name or before their noun."""
@@ -586,6 +688,113 @@ class Wording(Base):
         for rows in (film(), film(n=96)):
             self.assertFalse([x for x in self.find_with(rows) if x["rule"] in M._W_RULES])
 
+    # review 2026-10-13: the negation and detail rules, through the gate
+    def device_on(self, text):
+        return lambda rows: next((r["device"]["id"], M._shown(r)) for r in rows
+                                 if r["text"] == text and r.get("device"))
+
+    def kept(self, rows, k):
+        heard, before = copy.deepcopy(rows), copy.deepcopy(rows[k])
+        self.assertFalse([(x["rule"], x["what"]) for x in self.find_with(rows) if x["rule"] in M._W_RULES])
+        rec, _ = self.gate(rows, words_from=heard)
+        self.assertNotEqual(rec["result"], "STOPPED", rec.get("left"))
+        self.assertFalse([x for x in rec["repairs"] if x["rule"] in M._W_RULES], rec["repairs"])
+        self.assertEqual((rows[k].get("device"), rows[k].get("typedCaption")),
+                         (before.get("device"), before.get("typedCaption")))
+
+    def test_a_negation_dropped_through_an_auxiliary_an_aside_or_a_verb_of_saying_is_restored(self):
+        w0, w1 = word(80, 0), word(80, 1)
+        cases = ((f"It was a {w0} that cannot be seen at all.", "Seen at all", "shadow-up",
+                  ("shadow-up", "Cannot be seen at all")),
+                 (f"He did not, in the end, keep the {w0}.", f"Keep the {w0}", "shadow-up",
+                  ("P02", f"He did not, in the end, keep the {w0}")),
+                 (f"He had not said it was risky or {w0}.", f"Risky or {w0}", "shadow-up",
+                  ("P02", f"He had not said it was risky or {w0}")),
+                 (f"The {w0} was not {w1} in origin.", f"The {w0} was {w1} in origin", "P02",   # Claude's summary
+                  ("P02", f"The {w0} was not {w1} in origin")))
+        for text, words, tid, expected in cases:
+            with self.subTest(text=text):
+                self.repaired(self.spoken(text, words, tid=tid), 5, "negation", self.device_on(text), expected)
+
+    def test_no_negation_where_nothing_is_turned_round_and_no_alternative_far_away(self):
+        w0, w1, w2 = word(81, 0), word(81, 1), word(81, 2)
+        for text, words, tid in ((f"They found it outside the old {w0} hall.", f"The old {w0} hall", "top-title"),
+                                 (f"There was no doubt the {w0} was real.", f"The {w0} was real", "shadow-up"),
+                                 (f"The {w0} kept one or two {w1}s. One {w2} stayed behind.", f"One {w2} stayed behind",
+                                  "shadow-up")):
+            with self.subTest(text=text):
+                self.kept(self.spoken(text, words, tid=tid), 5)
+
+    def test_a_hedge_dropped_from_a_number_is_restored(self):
+        text = f"Its copies outlived the {word(82, 0)} by at least two centuries."
+        self.repaired(self.spoken(text, "Two centuries"), 5, "detail", self.line_on(text), "At least two centuries")
+
+    def test_a_caption_number_is_read_by_value_and_a_wrong_one_takes_the_number_said(self):
+        w1 = word(83, 0)
+        rows = film()
+        rows[29]["text"] = f"They copied over ten thousand {w1}s by hand."
+        rows[29]["typedCaption"] = {"lines": [f"Over 10,000 {w1.title()}s", "Copied By Hand"],
+                                    "startFrame": M.TYPED_CAPTION_START_F}       # was dropped: '000' not said
+        self.kept(rows, 29)
+        rows = film()
+        text = f"Eleven {w1}s remained in the hall."
+        rows[29]["text"] = text
+        rows[29]["typedCaption"] = {"lines": [f"Twelve {w1.title()}s Remained"], "startFrame": M.TYPED_CAPTION_START_F}
+        cap = lambda rows: " / ".join(next(r["typedCaption"]["lines"] for r in rows if r["text"] == text))
+        self.repaired(rows, 29, "detail", cap, f"Eleven {w1.title()}s Remained")
+
+    def test_numbers_the_recogniser_writes_in_digits_are_heard(self):
+        # the subtitles carry the script's words, words_heard.json the recogniser's digits ("4th or 5th"): the detail
+        # repair's own words were refused as not heard near the shot, and the century went from the screen
+        text = f"They dated the {word(84, 0)} to the fourth or fifth century."
+        rows = self.spoken(text, "Fifth century")
+        heard = copy.deepcopy(rows)
+        for r in heard:
+            r["text"] = r["text"].replace("fourth or fifth", "4th or 5th")
+        self.assertTrue(any(x["rule"] == "detail" and x["k"] == 5 for x in self.find_with(copy.deepcopy(rows))))
+
+        def gate():
+            write_job(self.job, heard)
+            voice = (self.job / "words_heard.json").read_text()      # the voice as the recogniser wrote it down,
+            write_job(self.job, rows)                                 # the subtitles and the script as written
+            (self.job / "words_heard.json").write_text(voice)
+            eng = Eng()
+            M._budget_set(eng, rows)
+            return M.gate(eng, self.job, rows, DOSSIER, cues_of(rows), make_build(rows), "")
+        rec = gate()
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        self.assertEqual(self.line_on(text)(rows), "Fourth or fifth century")
+        before = copy.deepcopy(rows)
+        self.assertEqual(gate()["result"], "PASS")
+        self.assertEqual(rows, before)
+        self.assertTrue(M._heard_same("4th", "fourth") and M._heard_same("30", "thirty"))
+        self.assertFalse(M._heard_same("1", "first") or M._heard_same("2", "second"))
+
+    def test_a_question_is_repaired_as_a_question(self):
+        K, w1 = word(85, 0).title(), word(85, 1)
+        text = f"What did {K} hide from the {w1}?"
+        rows = film()
+        rows[5]["text"] = text
+        rows[5]["device"], rows[5]["filler"] = {"id": "P09", "question": f"What did {K.lower()} hide from the {w1}?",
+                                                "sectionLabel": ""}, True
+
+        plain = make_build
+
+        def build_q(rows_):                                          # the planner's P09: a question said as one
+            base = plain(rows_)
+
+            def build(tid, o, i):
+                head = str((o or {}).get("headline") or "").strip()
+                win = " ".join(rows_[j]["text"] for j in range(max(0, i - 2), min(len(rows_), i + 3)))
+                if tid != "P09":
+                    return base(tid, o, i)
+                ok = head.endswith("?") and "?" in win and len(head) <= 51 and M._spoken_in(head, win)
+                return {"id": "P09", "sectionLabel": "", "question": head} if ok else None
+            return build
+        question = lambda rows: next(r["device"].get("question") for r in rows if r["text"] == text)
+        with mock.patch(f"{__name__}.make_build", build_q):
+            self.repaired(rows, 5, "names", question, f"What did {K} hide from the {w1}?")
+
 
 class WordingFlow(Base):
     """The wording repair inside the gate (review 2026-10-13): what nothing can change stays with a warning, never a
@@ -638,8 +847,9 @@ class WordingFlow(Base):
         # the drop's warning went to the list the next look empties: neither gate.json nor plan.log had it
         w0, w1 = word(912, 0), word(912, 1)
         caption = film()
-        caption[29]["text"] = f"There were 31 {w0}s in the {w1} hall."
-        caption[29]["typedCaption"] = {"lines": [f"Thirty-One {w0.title()}s"], "startFrame": M.TYPED_CAPTION_START_F}
+        caption[29]["text"] = f"There were 31 {w0}s in the {w1} hall."      # a number not said, and none said beside
+        caption[29]["typedCaption"] = {"lines": [f"Thirty Halls Of {w0.title()}s"],   # its words to take its place
+                                       "startFrame": M.TYPED_CAPTION_START_F}
         spoken = film()
         spoken[5]["text"] = f"The {w0} was not {w1} in origin."
         spoken[5]["device"], spoken[5]["filler"] = {"id": "shadow-up", "line": f"{w1.title()} in origin"}, True
