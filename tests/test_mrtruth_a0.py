@@ -192,6 +192,18 @@ class ChapterHeadings(unittest.TestCase):
         got = self.headings({"chapters": [{"shot": 12, "heading": "the zemblar's long vantle"}], "overlays": []}, [])
         self.assertEqual(got[0], "The zemblar's long vantle")
 
+    def test_a_filled_heading_keeps_what_it_was_made_from(self):
+        # (review 2026-10-13, round 4) the gate reads a heading only against what it was made from: a shortened
+        # section title filled in keeps it, as a planner's heading does
+        rows, _ = film_rows(n=60)
+        with tempfile.TemporaryDirectory() as d:
+            M.fill_overlays(Engine(lambda p: json.dumps({"chapters": [], "overlays": []})), Path(d), rows, "s",
+                            {"sections": [{"title": "x"}, {"title": "Keepers Unwritten Northern Ledgers"},
+                                          {"title": "Second Movement"}]}, lambda *a: None)
+        made = {r["device"]["heading"]: r.get("_cut_from") for r in rows
+                if (r.get("device") or {}).get("id") == "chapter-plate"}
+        self.assertEqual(made, {"Keepers Unwritten Ledgers": "Keepers Unwritten Northern Ledgers", "Second Movement": None})
+
 
 class Caches(unittest.TestCase):
     def test_visual_plan_failures_are_never_saved(self):

@@ -565,8 +565,8 @@ class Gate(G.Base):
             rows = gate_film(k=26, ms=4600)
             for j in (23, 30):                                           # (shot 29 has its typed caption)
                 rows[j]["text"] = "It was so."
-            rows[k]["text"] = "If you went and if you stayed and if you left, it was so."
-            rows[k]["device"], rows[k]["filler"] = {"id": "top-title", "line1": "If you went", "line2": ""}, True
+            rows[k]["text"] = "If we went and if we stayed and if we left, it was so."
+            rows[k]["device"], rows[k]["filler"] = {"id": "top-title", "line1": "If we went", "line2": ""}, True
             heard = copy.deepcopy(rows)
             with mock.patch.object(M, "_fix_wording", M._fix_wording if wording else lambda *a: ("", set())):
                 rec, _ = self.gate(rows, words_from=heard)
@@ -583,7 +583,7 @@ class Gate(G.Base):
                 self.assertEqual(page(rows), page(run(k, False)[0]))
                 self.assertFalse(rows[27].get("device"))                 # the shot it is held from stays plain
                 if k == 25:
-                    self.assertEqual(rows[25]["device"]["line1"], "If you went")
+                    self.assertEqual(rows[25]["device"]["line1"], "If we went")
                     self.assertTrue(any("left as it is" in w and "highlighted page" in w for w in rec["warnings"]))
 
     def test_read_back(self):
@@ -762,6 +762,27 @@ class Review(Tmp):
         self.assertIn("Each page a DIFFERENT source", ask)
         self.assertIn("keeps one tense", ask)
         self.assertIn("keep the quotation marks", ask)
+
+
+class Words(unittest.TestCase):
+    """Review 2026-10-13 (round 4): the on-screen text fix rewrote the word test the page step shares with it
+    (_nounish: decades, ordinals, a dot inside a word, 'beneath' / 'alongside' / 'throughout'), and the page step chose
+    other phrases. The page reads its words exactly as the published code does (29ee2a9's answers, made-up words)."""
+
+    def test_the_page_step_reads_its_words_as_it_always_did(self):
+        for s, good in (("the 1980s", False), ("the U.S.", False), ("brosks in the 1920s", False), ("the 4th", False),
+                        ("the wall beneath", True), ("the mist throughout", True), ("the tower alongside", True)):
+            self.assertEqual(M._hl_good(s), good, s)
+        par = "The glorpwick sealed the vantle in the 1980s and the zorins left it alone afterwards."
+        self.assertEqual(M._hl_resize(par, "vantle in the 1980s", 4), "glorpwick sealed the vantle")
+        self.assertEqual(M._hl_own("The zorins moved the kelvar beneath the brosk wall, and nobody asked why."),
+                         "the kelvar beneath")
+        dev = {"id": "highlight-page", "paragraphs": ["The zorins copied the kelin ledgers in the 1920s for the brosk hall.",
+                                                      "Nobody may open the glorp vantle again."],
+               "phrases": ["copied the kelin ledgers in the 1920s", "open the glorp vantle"], "main": 1}
+        for h, first in ((700, "ledgers"), (1200, "kelin ledgers"), (2200, "copied the kelin ledgers"),
+                         (4000, "The zorins copied the kelin ledgers")):
+            self.assertEqual(M._hl_fit(dev, 0, h, 99999)[0]["phrases"][0], first, h)
 
 
 class Wiring(unittest.TestCase):
