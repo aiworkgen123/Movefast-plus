@@ -1560,18 +1560,19 @@ def _fall_back(rows: list, i: int, tid: str, why: str = "") -> None:
             return
 
 
-def _auto_title(dossier: dict, title: str = ""):
+def _auto_title(dossier: dict, title: str = "", said: str = "", names=None):
     """The opening title when the planner's did not fit (T-11): the first section's title, else the film's own, two
     lines of P03 that share no word; the kicker is a whole part of the setting, else of the period, that cuts no name
     (_kicker; the pod film opened on "The Vatican Apostolic Li", 2026-10-10, and the cut at whole words that followed
-    still opened all six test films on "The Vatican Apostolic", 2026-10-13). None when no title fits."""
+    still opened all six test films on "The Vatican Apostolic", 2026-10-13), read against the narration of the first
+    shot (`said`) and the film's names as the gate reads it. None when no title fits."""
     dossier = dossier or {}
     sections = dossier.get("sections") or []
     cand = [str(s.get("title") or "") for s in sections[:1]] + [re.sub(r"\s*[—:|(-].*$", "", str(title or ""))]
     head = next((h for h in cand if h and len(h) <= 26 and p03_fits(h)), "")
     if not head:
         return None
-    kick = _kicker(dossier, head)
+    kick = _kicker(dossier, head, names, said)
     hw = next((w for w in head.split() if w.lower() not in JOINING), head.split()[0])
     return {"id": "P03", "kicker": kick, "headline": head, "highlightWords": [re.sub(r"[^\w'-]", "", hw) or hw]}
 
@@ -1702,7 +1703,8 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
     # the opening carries P03 (T-11): the planner's, else the film's own title. Placed before the years, so the first
     # shot is never handed a P12 that the title then covers
     if (rows[0].get("device") or {}).get("id") != "P03":
-        dev = _auto_title(dossier, title)
+        said = _said_around(rows, 0, {"cues": sorted(cues or [])})       # its kicker read as the gate reads it
+        dev = _auto_title(dossier, title, said, _film_names(dossier, script))
         if dev:
             old = (rows[0].get("device") or {}).get("id")
             if old:                                  # never covered silently: the count stays true
@@ -1867,7 +1869,7 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         return next((j for j, x in enumerate(rows) if 0 <= n < len(snap) and x is snap[n]), -1)
 
     # chapters first: mandatory, so they may take a shot from a lesser template and hold their picture
-    chapters, last = 0, -1e9
+    chapters, last, names = 0, -1e9, _film_names(dossier, script)
     for c in sorted(got.get("chapters") or [], key=lambda c: int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1):
         try:
             k = at(int(c["shot"]))
@@ -1879,13 +1881,14 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         src = ""
         if len(head) > 25:                       # never cut inside a word (owner 2026-10-10) nor before its head noun
             used = {_norm((x.get("device") or {}).get("heading")) for x in rows if (x.get("device") or {}).get("id") == "chapter-plate"}
-            cut = _short_heading(head, 25, [s_.get("title") for s_ in (dossier.get("sections") or [])[1:]], used)
+            cut = _short_heading(head, 25, [s_.get("title") for s_ in (dossier.get("sections") or [])[1:]], used, names)
             if not cut:                          # (2026-10-13: "The Translator's Narrow Role" was "The Translator's
                 engine.log(f"      chapter '{head}' skipped (no whole heading of it fits)")      # Narrow")
                 continue
             src, head = head, cut
         head = " ".join(w.lower() if j and w.lower() in ("of", "the", "a", "an", "and", "in", "on", "to", "for", "at", "by")
                         else w for j, w in enumerate(head.split()))
+        head = head[:1].upper() + head[1:]       # a capital first, whatever case it was written in (2026-10-13)
         r = rows[k]
         if r["startMs"] < CHAPTER_FIRST_S * 1000 or r["startMs"] - last < 30000 or (r.get("device") or {}).get("id") in ("P03", "gallery-strip"):
             engine.log(f"      chapter '{head}' at shot {k} skipped (opening, too close, or the title shot)")
@@ -1905,7 +1908,7 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
                     key=lambda k: abs(rows[k]["startMs"] - f * total_s * 1000), default=None)
             if k is None:
                 break
-            head = _short_heading(titles[min(chapters, len(titles) - 1)], 25) or "The Turn"   # whole (2026-10-13)
+            head = _short_heading(titles[min(chapters, len(titles) - 1)], 25, names=names) or "The Turn"   # whole
             rows[k]["device"], rows[k]["section_turn"] = {"id": "chapter-plate", "heading": head}, True
             _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
             chapters += 1
@@ -8758,6 +8761,16 @@ _HEADING_VERBS = {"remember", "forget", "open", "turn", "end", "return", "begin"
                   "burn", "break", "keep", "hold", "find", "lose", "know", "see", "hear", "tell", "say", "read",
                   "write", "matter", "count", "last", "stay", "go", "come", "leave", "watch", "listen", "answer",
                   "follow", "wake", "grow", "fade", "move", "arrive", "decide", "refuse", "deny", "explain"}
+# pasts a heading tells its story in that no other list has ("How the Abbot Hid the Ledgers": its "Hid" was deleted as
+# a modifier, review 2026-10-13); local to headings, so the statement rules (_VERB_FORMS) stay as they are
+_HEADING_PASTS = {"hid", "fled", "broke", "stole", "sold", "built", "bought", "chose", "forgot", "drew", "grew", "threw",
+                  "swore", "tore", "woke", "wore", "struck", "fought", "sought", "caught", "burnt", "dug", "slew", "spent",
+                  "lent", "hung", "shook", "rode", "sang", "wept", "slept", "crept", "swept", "paid", "laid"}
+# an adjective a title may not end on after a possessive or a determiner ("The Translator's Narrow"): the listed ones
+# that are never a noun as well - the suffix test read "The Betrayal", "The Heretic" and "Kalomi's Missive" as cut
+# (review 2026-10-13), and "The Abbot's Secret", "The General" or "The Prior" are whole
+_TITLE_ADJ = _ADJ_WORDS - {"secret", "public", "standard", "final", "general", "prior", "western", "antique", "lighter",
+                           "whole"}
 # a verb or a particle a clause may end on before its adjunct (a preposition other than "to" or "of", a subordinator)
 _DONE_WORDS = {"says", "said", "made", "done", "became", "become", "began", "seemed", "away", "back", "out", "up", "down",
                "off", "together", "once", "twice", "again"}
@@ -9154,17 +9167,51 @@ def _detail_faults(shown: list, ws: list, loc) -> list:
     return out
 
 
+def _heading_verb(low: list, x: int) -> bool:
+    """Word x of a heading (its words in lower case) is the verb of a clause: a listed form or past, a known verb with
+    its -s, a past in -ed, or a word in -s before a determiner ("Meets the") - each right after its subject, a noun or a
+    name (never after a determiner, a possessive, a preposition, a number, "last" or a modifier: "The Archivist's
+    Sealed Letters" and "The Heretic's Last Unanswered Letter" hold no verb, review 2026-10-13)."""
+    if not 0 < x < len(low):
+        return False
+    w, p, nxt = low[x], low[x - 1], low[x + 1] if x + 1 < len(low) else ""
+    if p not in _RELATIVE and (p in _DETS or p in JOINING or p in _PREPOSITIONS or p in _COORD or p.endswith("'s")
+                               or _adjish(p) or _num(p) is not None or p in ("last", "next", "only", "other")
+                               or len(p) > 4 and p.endswith(("ed", "ing"))):
+        return False
+    if w in _VERB_FORMS or w in _AUX or w in _HEADING_PASTS or len(w) > 4 and w.endswith("ed") and w not in _ED_NOUNS:
+        return True
+    verbs = (_BASE_VERBS | _HEADING_VERBS) - _NOUNS_TOO
+    return w.endswith("s") and (w[:-1] in verbs or w[:-2] in verbs
+                                or not w.endswith(("ss", "'s", "us", "is")) and nxt in _DETS - {"no"})
+
+
+def _whole_start(lt: list, n: int) -> bool:
+    """The first n words of a longer title (its words in lower case) read whole on their own: they stop before a
+    preposition other than "of" (which goes on with its noun: "The Order" of "The Order of Saint Rule") or before a
+    subordinator, or they are a whole noun phrase, the subject of the clause the rest makes or the noun a "who" or a
+    "which" tells of ("The Northern Archive" of "The Northern Archive Remembers Everything"), that opens on no clause
+    word ("Why the Bishop" of "Why the Bishop Kept ..."). A cut before "the" or "and" leaves a verb without its object
+    or one side of a pair: never whole (review 2026-10-13)."""
+    nxt, last = lt[n], lt[n - 1]
+    if nxt in (_PREPOSITIONS - {"of"}) | _SUBORD:
+        return True
+    return (_heading_verb(lt, n) or nxt in ("who", "which", "whose")) and lt[0] not in _CLAUSE_WORDS | _SUBORD \
+        and last not in _END_NEVER and not last.endswith("'s") and not _adjish(last) and not _heading_verb(lt, n - 1)
+
+
 def _title_faults(shown: list, longer=()) -> list:
     """A title or heading cut: it stops on an adjective after a possessive or a determiner (no head noun: "The
-    Translator's Narrow"), or it is a longer string of the plan's cut at a whole word ("The Vatican Apostolic" of
-    the setting's "The Vatican Apostolic Library")."""
+    Translator's Narrow"; _TITLE_ADJ, an adjective that is never a noun as well), or it is a longer string of the plan's
+    cut at a whole word where its start does not read whole (_whole_start: "The Vatican Apostolic" of the setting's
+    "The Vatican Apostolic Library", "How the Monks Hid" of "How the Monks Hid the Ledgers")."""
     out = []
     sl = [_lw(w) for w, _, _ in shown]
-    if len(sl) > 1 and _adjish(sl[-1]) and (sl[-2].endswith("'s") or sl[-2] in _DETS):
+    if len(sl) > 1 and sl[-1] in _TITLE_ADJ and (sl[-2].endswith("'s") or sl[-2] in _DETS):
         out.append(("cut off", f"stops on '{shown[-1][0]}' without its noun", ""))
     for s in longer or ():
         lt = [_lw(w) for w, _, _ in _toks(s)]
-        if len(lt) > len(sl) and lt[:len(sl)] == sl and lt[len(sl)] not in JOINING | _PREPOSITIONS:
+        if sl and len(lt) > len(sl) and lt[:len(sl)] == sl and not _whole_start(lt, len(sl)):
             out.append(("cut off", f"is cut from '{' '.join(str(s).split())}'", str(s)))
             break
     return out
@@ -10412,77 +10459,147 @@ def _setting_parts(dossier: dict) -> list:
     return out
 
 
-def _kicker(dossier: dict, head: str = "", names=None) -> str:
+def _kicker(dossier: dict, head: str = "", names=None, said: str = "") -> str:
     """The opening title's kicker (2026-10-13: _whole_words cut "The Vatican Apostolic Library" to "The Vatican
     Apostolic" in all six test films): a whole part of the dossier's setting, else of its period (_setting_parts) that
     fits P03's kicker, shares no word with the headline and cuts no name - one that opens on a capital or a figure
-    first ("Rome", "4th-5th century"), else any; else a place of the dossier's that fits whole; else "The story"."""
+    first ("Rome", "4th-5th century"), else any; else a place of the dossier's that fits whole; else "The story".
+    `said`: the narration around the first shot (_said_around), read as the gate reads the kicker (review 2026-10-13:
+    the setting's "P" was flagged where the narrator says "the P Q", and every repair kept it): a part it flags takes
+    the words its faults give (the name as said, its capitals) when those pass; a part the narration flags is set only
+    when none passes (the gate's warning)."""
     dossier = dossier or {}
     lim = LIBRARY["P03"][7]["kicker"]
     names = _film_names(dossier) if names is None else names
     hw = set(_content(head))
-    good = lambda c, src: (len(c) <= lim and bool(_content(c)) and not set(_content(c)) & hw
-                           and not _wording(c, src, kind="title", names=names))
     parts = _setting_parts(dossier)
-    for c, src in parts:
-        if (c[:1].isupper() or c[:1].isdigit()) and good(c, src):
-            return c
-    for c, src in parts:
-        if good(c, src):
-            return c[:1].upper() + c[1:]
+    longer = [c for c, _ in parts]
+    good = lambda c, src, strict: (len(c) <= lim and bool(_content(c)) and not set(_content(c)) & hw
+                                   and not _wording(c, src, kind="title", names=names)
+                                   and not (strict and _wording(c, said, "title", names, longer)))
+    cands = [(c, src) for c, src in parts if c[:1].isupper() or c[:1].isdigit()] + \
+        [(c[:1].upper() + c[1:], src) for c, src in parts if not (c[:1].isupper() or c[:1].isdigit())]
     for e in dossier.get("keyEntities") or []:
         n = " ".join(str((e or {}).get("name") or "").split()) if isinstance(e, dict) else ""
-        if n[:1].isupper() and str(e.get("kind") or "").lower() == "place" and good(n, n):
-            return n
+        if n[:1].isupper() and str(e.get("kind") or "").lower() == "place":
+            cands.append((n, n))
+    for strict in (True, False) if said else (False,):
+        for c, src in cands:                         # (as said: the name whole, its capitals)
+            fixed = [h for _, _, h in _wording(c, said, "title", names, longer) if h] if strict else []
+            for c2 in [c] + [h[:1].upper() + h[1:] for h in fixed]:
+                if good(c2, src, strict):
+                    return c2
     return "The story"
 
 
-def _short_heading(head: str, limit: int = 25, titles=(), used=()) -> str:
+def _short_heading(head: str, limit: int = 25, titles=(), used=(), names=()) -> str:
     """A chapter heading within `limit` letters that keeps its head noun (2026-10-13: "The Translator's Narrow Role"
-    was cut to "The Translator's Narrow"): whole; else without its leading article; else the dossier section title
-    (`titles`) closest to it that fits whole and is not on screen yet (`used`, _norm'ed); else with the modifiers
-    before its nouns dropped, nearest the noun first ("The Translator's Role"), then the part before its first
-    preposition. "" when nothing fits."""
+    was cut to "The Translator's Narrow"), its verb and its names, and starts with a capital (review 2026-10-13: "How
+    the Abbot the Ledgers", "How the Monks Hid", "translator's narrow role"): whole; else without its leading article;
+    else the dossier section title (`titles`) closest to it that fits whole and is not on screen yet (`used`, _norm'ed);
+    else with the modifiers before its nouns dropped, nearest the noun first ("The Translator's Role"); else a clause's
+    subject whole ("The Northern Archive" of "... Remembers Everything"); else the part before its first preposition
+    other than "of", shortened the same way (_heading_cuts). Each is read as the gate reads a heading cut from this one
+    (_wording, `names` the film's): "" when none reads whole."""
     h = " ".join(str(head or "").split()).strip().rstrip(".")
+    up = lambda s: s[:1].upper() + s[1:]
     if not h or len(h) <= limit:
-        return h
+        return up(h)
+    return up(next((c for c in _heading_cuts(h, limit, titles, used, names)
+                    if c and len(c) <= limit and not _wording(c, "", "title", names, [h])), ""))
+
+
+def _heading_cuts(h: str, limit: int, titles=(), used=(), names=()):
+    """The shorter forms of heading h that _short_heading tries, best first. Only a modifier goes (an adjective or a
+    participle right before its noun, never a verb, a determiner, a number or a word of a name - `names`, or any
+    capitalised word of a heading in sentence case), and an "a" or "an" before it is set for the word that follows."""
     ws = h.split()
-    if ws[0].lower() in ("the", "a", "an") and len(ws) > 2 and len(" ".join(ws[1:])) <= limit:
-        return " ".join(ws[1:])
+    low = [_lw(w) for w in ws]
+    if low[0] in ("the", "a", "an") and len(ws) > 2:
+        yield " ".join(ws[1:])
     hw = set(_content(h))
     fit = [" ".join(str(t or "").split()).rstrip(".") for t in titles or ()]
     fit = [t for t in fit if t and len(t) <= limit and _norm(t) not in set(used or ()) and _norm(t) != _norm(h)
            and set(_content(t)) & hw]
-    if fit:
-        return max(fit, key=lambda t: len(set(_content(t)) & hw))
-    seg = lambda w: w.lower() in _PREPOSITIONS or w.lower() in ("and", "or")
-    verbs = _BASE_VERBS | _HEADING_VERBS
-    clause = any(x and (_verbish(v) or _lw(v).endswith("s") and not _lw(v).endswith(("ss", "'s"))
-                        and (_lw(v)[:-1] in verbs or _lw(v)[:-2] in verbs)) for x, v in enumerate(ws))
-    w = list(ws) if not clause else []               # a clause ("The Archive Remembers Everything") keeps its
-    while w and len(" ".join(w)) > limit:            # subject whole (below); a noun phrase its head noun
-        ends = [x for x in range(len(w)) if x == len(w) - 1 or seg(w[x + 1])]     # each noun phrase's last word
+    yield from sorted(fit, key=lambda t: -len(set(_content(t)) & hw))
+    keep = set()                                     # a name's words stay
+    for n in names or ():
+        nw = [re.sub(r"'s$", "", _lw(x)) for x in str(n).split()]
+        for a in range(len(low) - len(nw) + 1):
+            if nw and [re.sub(r"'s$", "", x) for x in low[a:a + len(nw)]] == nw:
+                keep.update(range(a, a + len(nw)))
+    if any(ws[x][:1].islower() for x in range(1, len(ws)) if low[x] not in JOINING):
+        keep.update(x for x in range(1, len(ws)) if ws[x][:1].isupper())     # sentence case: a capital is a name's
+    seg = lambda x: low[x] in _PREPOSITIONS or low[x] in ("and", "or")
+    stop = lambda x: seg(x) or low[x] in _DETS or low[x].endswith("'s") or _heading_verb(low, x)
+    mod = lambda x: x not in keep and (_adjish(low[x]) and low[x] not in _ADJ_WORDS - _TITLE_ADJ     # never "Secret"
+                                       or len(low[x]) > 4 and (low[x].endswith(("ed", "ing")) and low[x] not in _ED_NOUNS
+                                                               or low[x].endswith("ly") and low[x] not in _LY_NOUNS))
+
+    def text(w):                                     # the kept words, an article set for its new next word
+        out = []
+        for p, x in enumerate(w):
+            if low[x] in ("a", "an") and p + 1 < len(w) and w[p + 1] != x + 1:     # "An Uncatalogued Ledger": "A
+                a = "an" if ws[w[p + 1]][:1].lower() in "aeiou" else "a"           # Ledger", never "An Ledger"
+                out.append(a.title() if ws[x][:1].isupper() else a)
+            else:
+                out.append(ws[x])
+        return " ".join(out)
+    w = list(range(len(ws)))
+    while len(text(w)) > limit:
+        if low[w[0]] in ("the", "a", "an") and len(w) > 2 and len(text(w[1:])) <= limit:
+            w = w[1:]                                # its article before another modifier
+            break
+        ends = [p for p in range(len(w)) if p == len(w) - 1 or seg(w[p + 1])]     # each noun phrase's last word
         cut = None
-        for e in reversed(ends):                     # the modifier nearest a phrase's noun, the last phrase first
-            x = e - 1
-            while x >= 0 and not seg(w[x]) and (w[x].lower() in _DETS or w[x].lower().endswith(("'s", "’s"))):
-                x -= 1
-            if x >= 0 and not seg(w[x]):
-                cut = x
+        for p in reversed(ends):                     # the modifier nearest a phrase's noun, the last phrase first
+            q = p - 1
+            while cut is None and q >= 0 and not seg(w[p]) and not stop(w[q]):
+                cut = q if mod(w[q]) else None
+                q -= 1
+            if cut is not None:
                 break
         if cut is None:
             break
         del w[cut]
-    if w and len(" ".join(w)) > limit and len(w) > 2 and w[0].lower() in ("the", "a", "an"):
-        w = w[1:]
-    if w and len(" ".join(w)) <= limit:
-        return " ".join(w)
-    for m in range(len(ws) - 1, 0, -1) if clause else ():   # a clause: its longest start that ends on a noun or
-        c, last = " ".join(ws[:m]).rstrip(",:;"), _lw(ws[m - 1].rstrip(",:;"))      # a name (its subject whole)
-        if len(c) <= limit and last not in _END_NEVER and not _adjish(last) and not last.endswith("'s"):
-            return c
-    first = next((x for x in range(1, len(ws)) if ws[x].lower() in _PREPOSITIONS), len(ws))
-    return _short_heading(" ".join(ws[:first]), limit) if first < len(ws) else ""
+    if len(text(w)) <= limit:
+        yield text(w)
+    v = next((x for x in range(1, len(ws)) if _heading_verb(low, x) or low[x] in ("who", "which", "whose")), None)
+    first = next((x for x in range(1, len(ws)) if low[x] in _PREPOSITIONS - {"of"}), None)
+    for m in (v, first):                             # a clause's subject whole ("How the Abbot" is none), then the
+        part = " ".join(ws[:m or 0])                 # part before its first preposition ("of" goes on with its noun),
+        if m and not _title_faults(_toks(part), [h]):     # each shortened the same way when it reads whole itself
+            yield part
+            yield from _heading_cuts(part, limit, (), (), names)
+
+
+def _heading_choices(rows: list, k: int, src: str, ctx: dict) -> list:
+    """Whole headings for the chapter on shot k, best first: `src` (what it was made from, its words now) shortened
+    (_short_heading, a section title that shares its words first), then the dossier's section titles, the one whose
+    section starts nearest the shot first (review 2026-10-13: the repair took the first unused one in the dossier's
+    order, wherever its section was, and nearly the heading the chapter before showed) and none that shares a meaning
+    word with another heading or the opening title - each not on screen yet, no word cut short, and read whole as the
+    gate reads the heading (_wording against the narration around the shot)."""
+    r, d, names = rows[k], ctx.get("dossier") or {}, ctx.get("names") or ()
+    heads = [str(x["device"].get("heading") or "") for x in rows
+             if x is not r and (x.get("device") or {}).get("id") == "chapter-plate"]
+    opening = rows[0].get("device") or {}
+    taken = set(_content(" ".join(heads + [str(opening.get("headline") or "") if opening.get("id") == "P03" else ""])))
+    used = {_norm(t) for t in heads}
+    secs = [s for s in (d.get("sections") or [])[1:] if str(s.get("title") or "").strip()]
+    at = _char_ms(ctx.get("script") or "", ctx.get("cues") or [])
+    near = sorted(secs, key=lambda s: (s.get("startChar") is None,
+                                       abs(at(int(s.get("startChar") or 0)) - r["startMs"])))
+    cands = [(_short_heading(src, 25, [s["title"] for s in secs], used, names), False)] if src else []
+    cands += [(_short_heading(s["title"], 25, names=names), True) for s in near]
+    longer = _wording_longer(r, "chapter-plate", "heading", ctx) + [str((r.get("device") or {}).get("heading") or "")]
+    said, out = _said_around(rows, k, ctx), []
+    for c, other in cands:
+        if c and c not in out and _norm(c) not in used and not (other and set(_content(c)) & taken) \
+                and not _cut_off(c, ctx.get("vocab") or set()) \
+                and not _wording(c, said, "title", names, [y for y in longer if y and _norm(y) != _norm(c)]):
+            out.append(c)
+    return out
 
 
 # the wording rules read every field of every template with words (2026-10-13), but the highlighted page (its own
@@ -11207,7 +11324,8 @@ def _fix_text(rows: list, k: int, viol: dict, ctx: dict, build) -> str:
     dev = r.get("device") or {}
     tid = dev.get("id")
     if fix == "title" or tid == "P03" and fix in ("cut", "drop"):
-        new = _auto_title(ctx["dossier"], ctx["title"])
+        said, names = _said_around(rows, k, ctx), ctx.get("names") or ()     # read as the gate reads it (2026-10-13)
+        new = _auto_title(ctx["dossier"], ctx["title"], said, names)
         if new and new != dev and not [p for p in _field_problems([dict(r, device=new)], 0, ctx) if p[2] != "reword"]:
             r["device"] = new
             return "opening title rebuilt"
@@ -11216,11 +11334,12 @@ def _fix_text(rows: list, k: int, viol: dict, ctx: dict, build) -> str:
             cut = _whole_words(src, (LIBRARY["P03"][7].get(f) or 24))
             if cut and not _cut_off(cut, ctx["vocab"]) and not (set(_content(cut)) & set(_content(
                     str(dev.get("headline" if f == "kicker" else "kicker") or "")))) \
-                    and not _wording(cut, src, "title", ctx.get("names") or (), [src]):     # never a name cut (2026-10-13)
+                    and not _wording(cut, src, "title", names, [src]) \
+                    and not _wording(cut, said, "title", names, _wording_longer(r, tid, f, ctx)):   # never a name cut
                 dev[f] = cut
                 return f"title {f} cut at whole words"
             if f == "kicker":                        # else a whole part of the setting or the period
-                kick = _kicker(ctx["dossier"], str(dev.get("headline") or ""), ctx.get("names"))
+                kick = _kicker(ctx["dossier"], str(dev.get("headline") or ""), names, said)
                 if kick and kick != dev.get(f):
                     dev[f] = kick
                     return f"title kicker taken whole from the setting: '{kick}'"
@@ -11228,16 +11347,10 @@ def _fix_text(rows: list, k: int, viol: dict, ctx: dict, build) -> str:
     if tid == "chapter-plate" and fix in ("cut", "heading", "drop"):
         old = str(dev.get("heading") or "")
         src = r.get("_cut_from") or (re.sub(r"\s*\S+$", "", old) if "cut short" in viol["what"] else old)
-        used = {_norm((x.get("device") or {}).get("heading")) for x in rows if x is not r}
-        titles = [s.get("title") for s in (ctx["dossier"].get("sections") or [])[1:]]
-        cut = _short_heading(src, 25, titles, used) if fix == "cut" else ""     # its head noun kept (2026-10-13)
-        longer = [x for x in [r.get("_cut_from"), old] + titles if x]
-        cands = [cut] + [_short_heading(t, 25) for t in titles]
-        for c in cands:
-            if c and _norm(c) not in used and not _cut_off(c, ctx["vocab"]) \
-                    and not _wording(c, "", "title", ctx.get("names") or (), [y for y in longer if _norm(y) != _norm(c)]):
-                dev["heading"] = c
-                return "chapter heading " + ("made to fit whole" if c == cut else "taken from the dossier's sections")
+        c = next(iter(_heading_choices(rows, k, src if fix == "cut" else "", ctx)), "")
+        if c:                                        # its head noun kept, else its own section's title (2026-10-13)
+            dev["heading"] = c
+            return f"chapter heading made whole: '{c}'"
         if sum(1 for x in rows if (x.get("device") or {}).get("id") == "chapter-plate") > CHAPTERS_MIN:
             _drop_words(rows, k, "device", "its heading is broken")
             return "chapter dropped (more than the minimum remain)"
@@ -11613,38 +11726,33 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
     cur = (cur[n] if isinstance(cur, list) and n is not None and n < len(cur) else cur)
     if dev.get("id") != tid or " ".join(str(cur or "").split()) != text:
         return "", set()
-    d = ctx.get("dossier") or {}
-    if tid == "P03":
+    d, names, said = ctx.get("dossier") or {}, ctx.get("names") or (), _said_around(rows, k, ctx)
+    if tid == "P03":                                 # read against the narration as the gate reads it (2026-10-13)
         if f == "kicker" and k == 0:                 # the opening's kicker: a whole part of the setting
-            c = _kicker(d, str(dev.get("headline") or ""), ctx.get("names"))
+            c = _kicker(d, str(dev.get("headline") or ""), names, said)
             if c and c != text:
                 dev["kicker"] = c
                 return f"kicker taken whole from the setting: '{c}'", {id(r)}
         elif f == "kicker":                          # a title later in the film: its name made whole, if it fits
-            c = next((c for c in _targets(xs, _said_around(rows, k, ctx), _field_limit(tid, f))
+            c = next((c for c in _targets(xs, said, _field_limit(tid, f))
                       if len(c) <= _field_limit(tid, f) and not set(_content(c)) & set(_content(str(dev.get("headline") or "")))
-                      and not _wording(c, _said_around(rows, k, ctx), "title", ctx.get("names") or ())), "")
+                      and not _wording(c, said, "title", names, _wording_longer(r, tid, f, ctx))), "")
             if c:
                 dev["kicker"] = c
                 return f"kicker made whole: '{c}'", {id(r)}
         else:
-            new = _auto_title(d, ctx.get("title", ""))
-            if new and new["headline"] != text and not _wording(new["headline"], "", "title", ctx.get("names") or ()):
+            new = _auto_title(d, ctx.get("title", ""), said, names)
+            if new and new["headline"] != text and not _wording(new["headline"], said, "title", names):
                 r["device"] = new
                 return f"opening title rebuilt: '{new['headline']}'", {id(r)}
         return "no whole title fits: kept", set()
     if tid == "chapter-plate":
-        used = {_norm((x.get("device") or {}).get("heading")) for x in rows if x is not r}
-        titles = [s.get("title") for s in (d.get("sections") or [])[1:]]
-        longer = _wording_longer(r, tid, f, ctx)
-        for c in [_short_heading(r.get("_cut_from") or text, 25, titles, used)] + [_short_heading(t, 25) for t in titles]:
-            if c and c != text and _norm(c) not in used and not _cut_off(c, ctx.get("vocab") or set()) \
-                    and not _wording(c, "", "title", ctx.get("names") or (), [y for y in longer if _norm(y) != _norm(c)]):
-                dev["heading"] = c
-                return f"chapter heading made whole: '{c}'", {id(r)}
+        c = next((c for c in _heading_choices(rows, k, r.get("_cut_from") or text, ctx) if c != text), "")
+        if c:
+            dev["heading"] = c
+            return f"chapter heading made whole: '{c}'", {id(r)}
         return "no whole heading fits: kept", set()
     lim = _field_limit(tid, f)
-    said = _said_around(rows, k, ctx)
     for c in _targets(xs, said, lim):                # 1. targeted, same template and field
         if c != text and _try_text(rows, k, tid, f, n, c, ctx, build, kind):
             return f"{tid} {f} from the narration: '{c}'", {id(r)}
@@ -11853,7 +11961,9 @@ def _name_label(rows: list, k: int, ctx: dict):
     """A name label (P04) for shot k, or None (2026-10-13: the gate set a bare "Restivo" with an empty support line
     110 s after he was introduced, in three of six test films): a name of the shot's own line (its entities), only
     within two shots of where the film first says it; the full name of the dossier's people or key entities when the
-    line says it whole, and their role as the support line when the line says that too."""
+    line says it whole - over the label's limit, the name less its title ("Father", "Fr."), never the surname alone
+    (review 2026-10-13: "Father Emilio Restivo" gave no label at all) - and their role as the support line when the
+    line says that too."""
     r, own = rows[k], str(rows[k].get("text") or "")
     d = ctx.get("dossier") or {}
     people = [(str(p.get("name") or ""), str(p.get("role") or "")) for p in (d.get("visualBrief") or {}).get("people") or []
@@ -11876,6 +11986,11 @@ def _name_label(rows: list, k: int, ctx: dict):
                     full = nm
                 role = rl if rl and len(rl) <= LIBRARY["P04"][7]["kicker"] and _spoken_in(rl, own) else role
         if len(full) > LIBRARY["P04"][7]["headline"]:
+            core = full.split()
+            while core and _lw(core[0]).rstrip(".") in _TITLE_WORDS:
+                core = core[1:]
+            full = " ".join(core) if len(core) >= 2 and " ".join(core).lower() in own.lower() else ""
+        if not full or len(full) > LIBRARY["P04"][7]["headline"]:
             continue
         cand = (len(full.split()) >= 2 or bool(role), len(full.split()), full, role)
         best = max(best, cand) if best else cand
@@ -11889,7 +12004,10 @@ def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
     """A group under its minimum gets one (A3): a text of a group with more than its own minimum re-set in this group's
     template; else, on a free plain shot in the film's longest stretch without words, words of its own line (a running
     title, a spoken line, a P05 headline), the source document full screen on a shot that cites one (P08, not on a
-    stand-in), or a name the line says (P04, checked by the card check). "" when nothing fits."""
+    stand-in), or a name the line says (P04, checked by the card check); else, for a name label, a running title, a
+    spoken line or an editorial card with words to spare re-set as the label of a name its line says where the film
+    first says it (_name_label; review 2026-10-13: a name said once, on a shot that carries a text, left the group
+    empty in films where a bare surname far away had filled it). "" when nothing fits."""
     ts = OVERLAY_GROUPS[g][0]
     count = lambda grp: sum(1 for r in rows if (r.get("device") or {}).get("id") in OVERLAY_GROUPS[grp][0])
     text_t = [t for t in ts if t in ("top-title", "shadow-up", "P02")]
@@ -11941,6 +12059,27 @@ def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
                 if (r.get("device") or {}).get("id") == tid:
                     return f"{tid} added at {r['startMs'] / 1000:.0f}s"
                 r["device"] = None
+    for k, r in enumerate(rows):                     # a name label in place of a text with words to spare
+        dev = r.get("device") or {}
+        og = _group_of(dev.get("id", ""))
+        if "P04" not in ts or dev.get("id") not in ("top-title", "shadow-up", "P02") or (id(r), "P04") in tried \
+                or count(og) <= OVERLAY_GROUPS[og][1] or _by_held(rows, k):     # (never beside a page, map or date)
+            continue
+        o, shade = _name_label(rows, k, ctx), r.get("type_shade")
+        r["device"] = None
+        new = build("P04", o, k) if build and o and _can(rows, k, "P04") else None
+        r["device"] = dev
+        if not new or _words_near(_overlay_words({"device": new}), ctx, r["startMs"]) is None:
+            continue
+        tried.add((id(r), "P04"))
+        r["device"] = new
+        r.pop("type_shade", None)
+        _fit_devices(rows, only={id(r)})
+        if (r.get("device") or {}).get("id") == "P04":
+            return f"{dev['id']} '{_shown(dict(r, device=dev))[:30]}' re-set as P04 '{o['headline']}'"
+        r["device"] = dev
+        if shade is not None:
+            r["type_shade"] = shade
     return ""
 
 
@@ -12043,8 +12182,8 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
 
     def wok(kk, tid, words):                         # a phrase the wording rules pass where it would show
         return _said_ok(rows, kk, words, ctx)
-    for x in by.get("opening", []):
-        new = _auto_title(dossier, ctx["title"])
+    for x in by.get("opening", []):                  # (its kicker read as the wording rules will read it)
+        new = _auto_title(dossier, ctx["title"], _said_around(rows, 0, ctx), ctx.get("names"))
         if not new:
             stuck(x, "no title fits the opening (P03: 26 letters, two lines)")
             continue

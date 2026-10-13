@@ -152,6 +152,15 @@ class OpeningAndGallery(unittest.TestCase):
         self.assertIn("P03×1", summary)
         self.assertNotIn("P12×2", summary)
 
+    def test_the_opening_kicker_is_read_against_the_first_words_said(self):
+        # (review 2026-10-13) the kicker was read against the setting only, the gate reads it against the narration:
+        # 'Morvane' of a setting 'Morvane, Elsewhere' where the narrator says 'the Morvane Tessick' was flagged and kept
+        rows, cues = film_rows()
+        cues[0] = (cues[0][0], cues[0][1], "Near the Morvane Tessick the keepers met.")
+        rows[0]["text"] = cues[0][2]
+        M.assign(Engine(), rows, [], " ".join(c[2] for c in cues), cues, {"setting": "Morvane, Elsewhere"}, "A Test Film")
+        self.assertEqual(rows[0]["device"]["kicker"], "Morvane Tessick")
+
 
 class ChapterHeadings(unittest.TestCase):
     def headings(self, answer, sections):
@@ -173,6 +182,15 @@ class ChapterHeadings(unittest.TestCase):
                              {"title": "Second Movement"}])
         # its head noun kept, a modifier dropped (2026-10-13; a cut at whole words, "Keepers Unwritten", lost it)
         self.assertEqual(got, ["Keepers Unwritten Ledgers", "Second Movement"])  # was 'Keepers Unwritten Norther'
+
+    def test_a_heading_starts_with_a_capital(self):
+        # (review 2026-10-13) a sentence-case section title less its article went on screen as 'glorpwick's narrow
+        # vantle'; a heading Claude writes in lower case starts with a capital too
+        got = self.headings({"chapters": [], "overlays": []},
+                            [{"title": "x"}, {"title": "The glorpwick's narrow vantle"}, {"title": "a zemblar of quorts"}])
+        self.assertEqual(got, ["Glorpwick's narrow vantle", "A zemblar of quorts"])
+        got = self.headings({"chapters": [{"shot": 12, "heading": "the zemblar's long vantle"}], "overlays": []}, [])
+        self.assertEqual(got[0], "The zemblar's long vantle")
 
 
 class Caches(unittest.TestCase):

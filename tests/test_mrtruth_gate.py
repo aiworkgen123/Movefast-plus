@@ -410,6 +410,57 @@ class Titles(unittest.TestCase):
         self.assertEqual(M._short_heading(f"The {A} {B} Narrow Role Within", 25, [f"{A} {B}"]), f"{A} {B}")   # a title
         self.assertEqual(M._short_heading("Quiet", 25), "Quiet")
 
+    def test_the_kicker_is_read_against_the_narration_as_the_gate_reads_it(self):
+        # (review 2026-10-13) the producer read the kicker against the setting, the gate against the narration of the
+        # first shot: 'P' of a setting 'P, far away' where the narrator says 'the P Q' was set, flagged and kept
+        P, Q, w = word(920, 0).title(), word(920, 1).title(), word(920, 2)
+        d = {"setting": f"{P}, far away", "period": f"late {w}", "sections": [{"title": TITLE}]}
+        said = f"Near the {P} {Q} the keepers met. It was in Late {w.title()} that they wrote."
+        names = M._film_names(d, said)
+        self.assertEqual(M._auto_title(d, "", said, names)["kicker"], f"{P} {Q}")    # the name as the narrator says it
+        self.assertEqual(M._kicker(dict(d, setting=""), TITLE, names, said), f"Late {w.title()}")   # and its capitals
+        self.assertEqual(M._kicker(d, TITLE), P)                                  # no narration: the setting's own part
+        longer = [p for p, _ in M._setting_parts(d)]
+        for c in (f"{P} {Q}", f"Late {w.title()}"):
+            self.assertEqual(M._wording(c, said, "title", names, longer), [])      # what the gate reads, it passes
+
+    def test_a_title_ending_on_a_noun_shaped_like_an_adjective_is_whole(self):
+        # (review 2026-10-13) the suffix test read 'Betrayal', 'Heretic', 'Missive' as adjectives, and the gate put an
+        # unrelated section title in place of a good chapter heading
+        A = word(921, 0).title()
+        for h in ("The Betrayal", "The Heretic", "The Fugitive", "The Cardinal", f"{A}'s Missive", f"The {A}'s Secret"):
+            self.assertEqual(M._wording(h, "", "title"), [], h)
+        self.assertTrue(M._wording(f"The {A}'s Narrow", "", "title"))              # a listed adjective needs its noun
+
+    def test_a_long_heading_keeps_its_verb_its_names_and_its_grammar(self):
+        # (review 2026-10-13) the modifier step deleted verbs, subjects and name words ('How the A the Ledgers',
+        # 'K de A the Z'), the clause step ended on a verb ('How the A Hid'), and the gate passed both
+        A, K, Z = (word(922, j).title() for j in range(3))
+        cases = {f"How the {A} Hid the Northern Ledgers": "",
+                 f"How the {A} Hid the Sacred Ledgers": "",
+                 f"Why the {A} Kept the Second Letter": "",
+                 f"The Man Who Carried the {A} Home": "The Man",                   # was 'The Man Who Carried'
+                 f"The {A}'s Sealed Private Letters": f"{A}'s Sealed Letters",     # was "The A's Sealed"
+                 f"{K} de {A} Meets the {Z}": f"{K} de {A}",                       # its subject whole, never 'K de A the Z'
+                 f"Into the {K} {Z} Library": "",                                  # was 'Into the K Library'
+                 f"The Twenty-First {K} {Z} Hall": "",                             # was 'The Twenty-First Hall'
+                 f"An Uncatalogued Ledger of the {A}": f"A Ledger of the {A}"}     # never 'An Ledger'
+        for src, out in cases.items():
+            got = M._short_heading(src, 25)
+            self.assertEqual(got, out, src)
+            if got:
+                self.assertEqual(M._wording(got, "", "title", (), [src]), [], src)    # the gate reads it whole too
+        for cut, src in ((f"How the {A} Hid", f"How the {A} Hid the Northern Ledgers"),     # a verb without its object
+                         (f"Why the {A}", f"Why the {A} Kept the Second Letter")):         # a clause word alone
+            self.assertTrue(M._wording(cut, "", "title", (), [src]), cut)
+        self.assertEqual(M._wording(f"The Northern {A}", "", "title", (), [f"The Northern {A} Remembers Everything"]), [])
+
+    def test_a_shortened_heading_starts_with_a_capital(self):
+        # (review 2026-10-13) the article dropped from a sentence-case section title left 'translator's narrow role'
+        w = word(923, 0)
+        self.assertEqual(M._short_heading(f"The {w}'s narrow vantle", 25), f"{w.title()}'s narrow vantle")
+        self.assertEqual(M._short_heading(f"the {w}'s vantle", 25), f"The {w}'s vantle")
+
 
 class Wording(Base):
     """2026-10-13: every text reads as the narrator meant it - no negation dropped, nothing cut off, names whole, the
@@ -525,6 +576,11 @@ class Wording(Base):
         self.assertEqual(M._name_label(rows, 3, ctx), {"headline": f"{A} {B}", "kicker": "a scribe"})
         self.assertIsNone(M._name_label(rows, 30, ctx))                        # far from where he is first named
         self.assertIsNone(M._name_label(rows, 4, ctx))                         # his surname alone, a shot later
+        # (review 2026-10-13) a full name over the label's 19 letters gave no label at all: the name less its title,
+        # as the line says it - never the surname alone
+        rows[3]["text"], rows[3]["entities"] = f"The keeper was Father {A} {B}, a scribe.", [f"Father {A} {B}"]
+        ctx = {"dossier": dict(DOSSIER, visualBrief={"people": [{"name": f"Father {A} {B}", "role": "a scribe"}]})}
+        self.assertEqual(M._name_label(rows, 3, ctx), {"headline": f"{A} {B}", "kicker": "a scribe"})
 
     def test_a_clean_film_has_no_wording_fault(self):
         for rows in (film(), film(n=96)):
@@ -552,15 +608,17 @@ class WordingFlow(Base):
     def test_what_nothing_whole_can_replace_stays_with_a_warning_never_a_repair(self):
         # a heading cut from a longer one with no other section title to take; an opening kicker that is a whole part
         # of the setting where the narration names it longer: 'kept' was logged as a repair in every round, the film
-        # re-cut each time, and a second gate said REPAIRED on rows it left as they were
+        # re-cut each time, and a second gate said REPAIRED on rows it left as they were. (A heading cut before its
+        # verb's object, from an older plan; a name the narrator goes on with too long for the kicker.)
         A, B, C, P, Q = (word(910, j).title() for j in range(5))
         chapter = film()
-        chapter[14]["_cut_from"] = f"The {A}'s {B} {C} Remembers Everything"
-        chapter[14]["device"]["heading"] = M._short_heading(chapter[14]["_cut_from"], 25)
-        setting = dict(DOSSIER, setting=f"{P}, far away")
+        chapter[14]["_cut_from"] = f"How the {A} Kept the {B} {C} Hidden"
+        chapter[14]["device"]["heading"] = f"How the {A} Kept"
+        self.assertEqual(M._short_heading(chapter[14]["_cut_from"], 25), "")     # nothing whole of it fits
+        setting = dict(DOSSIER, setting=P)
         kicker = film()
         kicker[0]["device"] = M._auto_title(setting, "")
-        kicker[0]["text"] = f"Near the {P} {Q} the keepers met."
+        kicker[0]["text"] = f"Near the {P} {Q} {A} {B} the keepers met."
         for rows, k, rule, d in ((chapter, 14, "cut off", dict(DOSSIER, sections=DOSSIER["sections"][:1])),
                                  (kicker, 0, "names", setting)):
             with self.subTest(rule=rule):
@@ -658,6 +716,95 @@ class WordingFlow(Base):
         self.assertNotEqual(rec["result"], "STOPPED")
         self.assertEqual(rows[6].get("overlay"), {"text": first(6, 1)})
         self.assertFalse([k for k, r in enumerate(rows) if r.get("overlay") and r.get("device")])
+
+
+class TitleFlow(Base):
+    """The titles in the gate (review 2026-10-13): the producer and the gate read the opening kicker against the same
+    narration; a whole heading is never replaced, a broken one takes its own section's title, never a near copy of
+    another heading, and starts with a capital; the name-label group can still be filled where a name is first said.
+    Made-up words."""
+    find_with = Wording.find_with
+
+    def kicker_film(self):
+        P, Q = word(920, 0).title(), word(920, 1).title()
+        rows = film()
+        rows[0]["text"] = f"Near the {P} {Q} the keepers met."
+        return P, Q, dict(DOSSIER, setting=f"{P}, far away"), rows
+
+    def test_the_kicker_the_producer_sets_passes_the_gate_as_it_is(self):
+        P, Q, d, rows = self.kicker_film()
+        said = M._said_around(rows, 0, {"cues": cues_of(rows)})
+        rows[0]["device"] = M._auto_title(d, "", said, M._film_names(d, " ".join(r["text"] for r in rows)))
+        self.assertEqual(rows[0]["device"]["kicker"], f"{P} {Q}")
+        before = copy.deepcopy(rows)
+        rec, _ = self.gate(rows, words_from=copy.deepcopy(rows), dossier=d)
+        self.assertEqual((rec["result"], rec["repairs"], rows == before), ("PASS", [], True), rec["first_look"])
+
+    def test_a_kicker_the_gate_flags_is_made_whole_in_one_round(self):
+        # an older plan's kicker, read against the setting only: 'kept' with a warning in every gate before
+        P, Q, d, rows = self.kicker_film()
+        rows[0]["device"] = M._auto_title(d, "")
+        self.assertEqual(rows[0]["device"]["kicker"], P)
+        heard = copy.deepcopy(rows)
+        rec, _ = self.gate(rows, words_from=heard, dossier=d)
+        self.assertEqual((rec["result"], rec["rounds"]), ("REPAIRED", 1), rec.get("left"))
+        self.assertEqual(rows[0]["device"]["kicker"], f"{P} {Q}")
+        before = copy.deepcopy(rows)
+        again, _ = self.gate(rows, words_from=heard, dossier=d)
+        self.assertEqual((again["result"], again["repairs"], rows == before), ("PASS", [], True))
+
+    def test_a_whole_heading_that_ends_on_a_noun_like_an_adjective_is_left_alone(self):
+        rows = film()
+        rows[33]["device"]["heading"] = "The Heretic"
+        before = copy.deepcopy(rows)
+        rec, _ = self.gate(rows)
+        self.assertEqual((rec["result"], rows == before), ("PASS", True), rec["first_look"])
+
+    def sections(self, rows, at):
+        """Section titles of made-up words, each starting at its shot's first word in the script (startChar)."""
+        start = lambda k: len(" ".join(r["text"] for r in rows[:k])) + (1 if k else 0)
+        return [{"title": t, "startChar": start(k)} for t, k in at]
+
+    def test_a_broken_heading_takes_its_own_sections_title_never_a_near_copy(self):
+        # the repair took the first unused section title in the dossier's order: chapter 2 showed section 1's title,
+        # wrong for its place and nearly the heading chapter 1 already showed
+        A, B, C, D, E, F, G = [word(925, j).title() for j in range(5)] + [word(926, 0).title(), word(926, 1).title()]
+        for ch1, want in ((f"{B} {C}", f"{F} {G}"), (f"{F} {B}", f"{D} {E}")):
+            with self.subTest(chapter1=ch1):
+                rows = film()
+                d = dict(DOSSIER, sections=self.sections(rows, [(TITLE, 0), (f"{A} {B} {C}", 14), (f"{D} {E}", 24),
+                                                                (f"{F} {G}", 33)]))
+                rows[14]["device"]["heading"] = ch1
+                rows[33]["device"]["heading"] = f"The {A}'s Narrow"             # stops on its adjective
+                self.assertTrue([x for x in self.find_with(rows, d) if x["rule"] == "cut off" and x["k"] == 33])
+                rec, _ = self.gate(rows, dossier=d)
+                self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+                self.assertEqual(rows[33]["device"]["heading"], want)
+
+    def test_a_heading_from_a_sentence_case_title_starts_with_a_capital(self):
+        w = word(927, 0)
+        rows = film()
+        d = dict(DOSSIER, sections=[DOSSIER["sections"][0], {"title": f"The {w}'s narrow vantle"}, DOSSIER["sections"][2]])
+        rows[14]["device"]["heading"] = f"The {w.title()}'s Narrow"
+        rec, _ = self.gate(rows, dossier=d)
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        self.assertEqual(rows[14]["device"]["heading"], f"{w.title()}'s narrow vantle")
+
+    def test_the_name_label_group_takes_a_running_title_set_where_the_name_is_first_said(self):
+        # every name label was gone, the name is said once, on a shot that carries a running title: the group stayed
+        # empty with a warning (a bare surname far from where the name was first said is never the answer)
+        A, B = word(928, 0).title(), word(928, 1).title()
+        d = dict(DOSSIER, visualBrief={"people": [{"name": f"Father {A} {B}", "role": "a scribe"}]})
+        rows = film()
+        rows[19]["device"] = None
+        rows[3].update(text=f"The keeper was Father {A} {B}, a scribe.", entities=[f"Father {A} {B}"],
+                       pick=pic("r3", tier=M.EXACT), device={"id": "top-title", "line1": f"{A} {B}", "line2": ""})
+        rec, _ = self.gate(rows, dossier=d)
+        self.assertNotEqual(rec["result"], "STOPPED")
+        self.assertEqual((rows[3]["device"]["id"], rows[3]["device"]["mainLine"]), ("P04", f"{A} {B}"))
+        self.assertTrue(any(x["rule"] == "groups" and "P04" in x["fix"] for x in rec["repairs"]), rec["repairs"])
+        self.assertFalse([w for w in rec["warnings"] if w.startswith("name label not used")])
+        self.assertGreaterEqual(sum(1 for r in rows if (r.get("device") or {}).get("id") == "top-title"), 1)
 
 
 class Frames(Base):
