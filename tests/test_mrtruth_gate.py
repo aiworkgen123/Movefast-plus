@@ -362,7 +362,8 @@ class Phrases(unittest.TestCase):
         w1, w2 = word(62, 0), word(62, 1)
         cases = [(f"A {w1} designed to keep it away from {w2}.", "keep"),
                  (f"It was lighter than {w1} and heavier than {w2}.", "heavier"),
-                 (f"You could act on what this {w1} said.", "act"),
+                 (f"You could open the {w1} at night.", "open"),     # ('You could act [on ...]' is whole: review
+                                                                     # 2026-10-13, a verb may stop before its adjunct)
                  (f"He came from late antique {w2.title()} with it.", "antique")]
         for line_, bad in cases:
             p = M._spoken_phrase(line_, 32)
@@ -490,6 +491,178 @@ class Phrases(unittest.TestCase):
         self.assertFalse(M._phrase_ok("Keep it away", line_))
         self.assertTrue(M._phrase_ok(f"Keep the {w0} away", f"Keep the {w0} away."))          # an order said as one
         self.assertTrue(M._phrase_ok(f"Work in the {w0} hall", f"He went back to work in the {w0} hall."))
+
+    # review 2026-10-13 (round phrases-names): verbs no list holds, starts after a modifier, a subject cut before its
+    # verb, short clauses between commas, four rules that refused good texts, quotations, numbers as nouns,
+    # subordinators inside a text, asides, elisions
+    def cut(self, text, line_):
+        return "cut off" in [r for r, _, _ in M._wording(text, line_)]
+
+    def test_a_verb_no_list_holds_still_stops_before_its_object(self):
+        w0, w1, T = word(86, 0), word(86, 1), word(86, 2).title()
+        for text, line_ in ((f"You cannot {w0}", f"You cannot {w0} the {w1} that sits in the hall."),
+                            (f"{T} {w0}s", f"{T} {w0}s it as the {w1}."),
+                            (f"It {w0}s", f"It {w0}s between the {w1} and the hall."),
+                            (f"{w1.title()}s do not {w0}", f"The {w1}s do not {w0} the date."),
+                            (f"But they never {w0}", f"But they never {w0} the sense that it is near."),
+                            ("It distinguishes", f"It distinguishes between the {w1} and the hall.")):
+            self.assertTrue(self.cut(text, line_), (text, line_))
+        for text, line_ in ((f"{T} {w0}s the {w1}", f"{T} {w0}s the {w1}."),
+                            ("You could act", f"You could act on what this {w1} said."),      # its adjunct follows
+                            (f"He lived in {T}", f"He lived in {T}.")):
+            self.assertEqual(M._wording(text, line_), [], (text, line_))
+
+    def test_no_start_inside_a_noun_phrase_right_after_its_modifier(self):
+        w0, w1 = word(87, 0), word(87, 1)
+        for text, line_ in ((f"{w0.title()} did not fade", f"The glow of the sleeping {w0} did not fade with it."),
+                            (f"{w0.title()} was not moved", f"The brass of the carved {w0} was not moved."),
+                            ("Fifteen are careful", f"His notes on {w1} fifteen are careful."),
+                            (f"{w0.title()} carries", f"A tool the {w0} carries because the task needs it.")):
+            self.assertTrue(self.cut(text, line_), (text, line_))
+        for text, line_ in ((f"{w1.title()} fifteen", f"His notes on {w1} fifteen are careful."),
+                            (f"{w0.title()}s said over the {w1}", f"They mentioned {w0}s said over the {w1}."),
+                            (f"Fifteen {w0}s", f"He counted fifteen {w0}s in the hall.")):
+            self.assertEqual(M._wording(text, line_), [], (text, line_))
+
+    def test_a_subject_cut_before_its_verb_is_no_phrase(self):
+        w0, w1 = word(88, 0), word(88, 1)
+        self.assertTrue(self.cut(f"That {w0}", f"That {w0} did not hold the {w1}."))
+        self.assertNotEqual(M._spoken_phrase(f"That {w0} did not open the {w1}.", 32), f"That {w0}")
+        self.assertNotEqual(M._spoken_phrase(f"But the {w0} doesn't end there.", 21), f"But the {w0}")
+        self.assertEqual(M._wording(f"No second {w0}", f"No second {w0} was given."), [])     # a label still
+
+    def test_a_short_clause_between_commas_is_whole(self):
+        w0, w1 = word(89, 0), word(89, 1)
+        line_ = f"read it, closed the {w0}, and sent a {w1} to the hall below it without a word to anyone."
+        for lim in (25, 32):
+            self.assertEqual(M._spoken_phrase(line_, lim), f"Closed the {w0}")
+        self.assertEqual(M._spoken_phrase(f"It was late, and the {w0} stood in the {w1} hall.", 32), "It was late")
+        for s, lone in ((f"Until he left, the {w0} stood in the {w1} hall for years.", "Until he left"),
+                        (f"Once it ended, the {w0} stood in the {w1} hall for years.", "Once it ended")):
+            self.assertNotEqual(M._spoken_phrase(s, 32), lone)
+
+    def test_good_texts_the_strict_rules_refused_are_whole(self):
+        w0, w1, w2 = word(90, 0), word(90, 1), word(90, 2)
+        for text, line_ in ((f"Needed urgent {w0}", f"It showed which {w1}s were most scuffed and needed urgent {w0}."),
+                            (f"Taken at its {w0}", f"The {w1}, if taken at its {w0}, was never {w2}."),
+                            ("You could act", f"You could act on what the {w0} wrote."),
+                            (f"They were still {w0}", f"The {w1}'s answer was that they were still {w0}."),
+                            (f"She opened the {w0}", f"After the {w1}'s visit she opened the {w0}.")):
+            self.assertEqual(M._wording(text, line_), [], (text, line_))
+        for text, line_ in (("You left", f"If you left, the {w0} ended."),
+                            ("Fifth century", "They dated it to the fourth or fifth century."),
+                            ("He wrote", f"The {w0} he wrote was lost."),
+                            ("Taken in the hall", f"If taken in the hall the {w0} would break.")):
+            self.assertTrue(M._wording(text, line_), (text, line_))
+
+    def test_a_quotation_is_shown_whole_with_its_marks_or_not_at_all(self):
+        w0, w1 = word(91, 0), word(91, 1)
+        line_ = f'The {w0} "not plenty for the {w1} hall" had stood there for years.'
+        for text in (f"The {w0} not plenty", "Not plenty", f"{w0.title()} not plenty"):
+            self.assertTrue(self.cut(text, line_), text)                 # the head of a quoted label reads as a claim
+        picks = [p for lim in (21, 25, 32, 46) for p in M._spoken_phrases(line_, lim)]
+        self.assertFalse([p for p in picks if "plenty" in p and f'{w1} hall"' not in p], picks)
+        said = f'He wrote "never again" on the {w0} and left.'
+        picks = [p for lim in (21, 32, 46) for p in M._spoken_phrases(said, lim)]
+        self.assertIn(f'He wrote "never again" on the {w0}', picks)
+        self.assertFalse([p for p in picks if "never again" in p.lower() and '"' not in p or p == "He wrote"], picks)
+        self.assertEqual(M._wording(f'He wrote "never again" on the {w0}', said), [])
+        self.assertTrue(self.cut("Strictly speaking", f"It was not, strictly speaking, a {w0} at all."))     # an aside
+        self.assertTrue(self.cut(f"Never clear whether the {w0}", f"It was never clear whether the {w0} was real."))
+        self.assertNotIn(f"Never clear whether the {w0}", M._spoken_phrases(f"It was never clear whether the {w0} was "
+                                                                             f"real.", 32))
+
+    def test_decades_and_ordinals_are_numbers_and_a_fronted_time_keeps_its_clause(self):
+        w0, A = word(92, 0), word(92, 1).title()
+        for s, lim in ((f"During the 1920s the keepers sold the {w0}.", 32), (f"In the 1950s the {w0} was moved to {A}.", 21),
+                       (f"In the 1980s the {w0} came back to {A}.", 32)):
+            picks = M._spoken_phrases(s, lim)
+            self.assertFalse([p for p in picks if re.match(r"\d+(?:s|st|nd|rd|th) the ", p)], (s, picks))
+        self.assertEqual(M._spoken_phrase(f"In the 1980s the {w0} came back to {A}.", 32), f"{w0.title()} came back to {A}")
+        self.assertIn(f"{w0.title()} had come back", M._spoken_phrases(f"By the 4th century the {w0} had come back.", 32))
+        for text, line_ in (("The 1980s", f"In the 1980s the {w0} came back."),
+                            ("In the 1980s", f"In the 1980s the {w0} came back."),
+                            ("The 4th", f"On the 4th the {w0} came back.")):
+            self.assertEqual(M._wording(text, line_), [], text)
+        self.assertTrue(self.cut("Hundred five", f"It ran from {w0} ninety-two through one hundred five."))   # inside one
+
+    def test_a_capital_a_colon_a_dash_or_a_quotation_opens_is_no_name(self):
+        w0, A = word(93, 0), word(93, 1).title()
+        names = lambda text, line_: "names" in [r for r, _, _ in M._wording(text, line_)]
+        for text, line_ in (("He would never break it", f"He would keep it, one rule: Never break the {w0}."),
+                            (f"They always feared the {w0}", f"They had one fear — Always the {w0}."),
+                            ("The keeper said stop the war", 'The keeper said, "Stop the war."')):
+            self.assertFalse(names(text, line_), text)
+        self.assertTrue(names(f"After the war, {A.lower()} fell", f"After the war, {A} fell."))   # a comma: a name still
+
+    def test_not_saying_turns_round_what_is_said(self):
+        # the replay's repair of a text the new rules caught dropped the "not" of "I am not saying [it] is ...":
+        # "saying" was no verb of saying
+        w0, w1 = word(103, 0), word(103, 1)
+        self.assertIn("negation", [r for r, _, _ in M._wording(f"Proof of {w0}s",
+                                                               f"I am not saying the {w1} is proof of {w0}s.")])
+
+    def test_an_elided_word_opens_no_quotation(self):
+        w0, C = word(94, 0), word(94, 1).title() + "s"
+        for line_ in (f"In the '90s the {C}' {w0} was lost.", f"He wrote 'tis the end and the {C}' {w0} burned."):
+            self.assertIn(f"{C}'", [w for w, _, _ in M._toks(line_)])
+            self.assertIn(f"{C}' {w0}", " | ".join(M._spoken_phrases(line_, 32)))
+
+
+class Names(unittest.TestCase):
+    """Review 2026-10-13 (round phrases-names): a name is never cut - with its "de", "van der" or "of", one word of it
+    left on either side, a known name around the words - and a month, a title's full stop or a capital after a colon
+    makes no name. Made-up words."""
+
+    def test_the_films_names_keep_their_particles_and_titles(self):
+        A, B, C, D = (word(95, j).title() for j in range(4))
+        names = M._film_names({"keyEntities": [{"name": f"Tower of {A}"}, {"name": f"{B} de {C}"},
+                                                {"name": f"Jan van der {D}"}]},
+                              f"Later Prof. {C} {D} wrote to Dr. {A} {B} about it.")
+        for n in (f"Tower of {A}", f"{B} de {C}", f"Jan van der {D}", f"Prof {C} {D}", f"Dr {A} {B}"):
+            self.assertIn(n, names)
+        self.assertEqual(sorted(M._film_names({}, f"Then {A} {B} of the {C} {D} wrote.")), sorted([f"{A} {B}", f"{C} {D}"]))
+        self.assertEqual(M._film_names({}, f"In March {A} fell to the keepers."), [])
+
+    def test_a_name_cut_on_either_side_is_found(self):
+        A, B, C, D = (word(96, j).title() for j in range(4))
+        known = [f"{B} de {C}", f"Jan van der {D}", f"{A} {B} Library"]
+        names = lambda text, line_: "names" in [r for r, _, _ in M._wording(text, line_, names=known)]
+        for text, line_ in ((f"{C} in {A}", f"Later he met {B} de {C} in {A}."),
+                            (f"Later he met {B}", f"Later he met {B} de {C} in {A}."),
+                            (f"{A} and rested", f"They climbed to Mount {A} and rested."),
+                            (f"{D} permission", f"He worked under {B} {C} {D} permission on a ledger."),
+                            (f"Library in {C} for years", f"They worked in the {A} {B} Library in {C} for years."),
+                            (f"{D} translates", f"Jan van der {D} translates it.")):
+            self.assertTrue(names(text, line_), text)
+        for text, line_ in ((f"{C} {D} wrote", f"Then {A} {B} of the {C} {D} wrote."),        # two names, not one
+                            (f"{A} fell to the keepers", f"In March {A} fell to the keepers."),  # a month is no name
+                            (f"{B} wrote it", f"Father {B} wrote it.")):                       # the name less its title
+            self.assertFalse(names(text, line_), text)
+        picks = [p for lim in (21, 25, 32) for p in M._spoken_phrases(f"The map was drawn by Jan van der {D} in a "
+                                                                       f"single night.", lim, names=known)]
+        self.assertFalse([p for p in picks if p.endswith((" van", " der"))], picks)
+
+    def test_a_month_before_a_name_makes_no_name(self):
+        A, w0 = word(97, 0).title(), word(97, 1)
+        line_ = f"In March {A} fell to the {w0}s."
+        picks = [p for lim in (21, 25, 32) for p in M._spoken_phrases(line_, lim)]
+        self.assertFalse([p for p in picks if p.startswith(f"March {A}")], picks)
+        self.assertTrue(M._wording(f"March {A}", line_))
+        self.assertFalse([r for r, _, _ in M._wording("In March", line_) if r == "names"])
+
+    def test_a_titles_full_stop_ends_no_sentence(self):
+        A, B, w0 = word(98, 0).title(), word(98, 1).title(), word(98, 2)
+        line_ = f"The letter reached Prof. {A} {B} in May."
+        picks = [p for lim in (21, 25, 32) for p in M._spoken_phrases(line_, lim)]
+        self.assertFalse([p for p in picks if p.endswith("Prof")], picks)
+        self.assertTrue(M._wording("Letter reached Prof", line_))
+        self.assertNotEqual(M._spoken_phrase(f"The ship joined the U.S. Navy fleet near {A}.", 32), f"Navy fleet near {A}")
+        ends = lambda s: [w for w, _, se in M._toks(s) if se]
+        self.assertEqual(ends(f"The answer was no. The {w0} met."), ["no", "met"])
+        self.assertEqual(ends(f"He played his last card. The {w0} fell."), ["card", "fell"])
+        self.assertEqual(ends(f"He was crowned king. The {w0} fell."), ["king", "fell"])
+        self.assertEqual(ends(f"They sailed home to the U.S. The {w0} was long."), ["U.S.", "long"])
 
 
 class Titles(unittest.TestCase):
@@ -794,6 +967,58 @@ class Wording(Base):
         question = lambda rows: next(r["device"].get("question") for r in rows if r["text"] == text)
         with mock.patch(f"{__name__}.make_build", build_q):
             self.repaired(rows, 5, "names", question, f"What did {K} hide from the {w1}?")
+
+    # review 2026-10-13 (round phrases-names): through the gate
+    def shown_near(self, rows, k):
+        return [M._shown(r) for r in rows[max(0, k - 2):k + 3] if r.get("device") or r.get("typedCaption")]
+
+    def test_a_quotation_cut_is_repaired_never_into_its_head_as_a_claim(self):
+        w0, w1 = word(99, 0), word(99, 1)
+        text = f'The {w0} "not plenty for the {w1} hall" had stood there for years.'
+        rows = self.spoken(text, "Not plenty")
+        heard = copy.deepcopy(rows)
+        self.assertTrue(any(x["rule"] == "cut off" and x["k"] == 5 for x in self.find_with(rows)))
+        rec, _ = self.gate(rows, words_from=heard)
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        self.assertFalse([t for t in self.shown_near(rows, 5) if "plenty" in t.lower() and f'{w1} hall"' not in t],
+                         self.shown_near(rows, 5))
+        self.assertEqual(self.gate(rows, words_from=heard)[0]["result"], "PASS")
+
+    def test_a_running_title_before_a_name_never_takes_the_month_as_its_name(self):
+        A, w0 = word(100, 0).title(), word(100, 1)
+        text = f"In March {A} fell to the {w0}s."
+        rows = self.spoken(text, "In March", tid="top-title")
+        heard = copy.deepcopy(rows)
+        self.assertFalse([x for x in self.find_with(rows) if x["rule"] == "names" and x["k"] == 5])
+        self.gate(rows, words_from=heard)
+        self.assertFalse([t for t in self.shown_near(rows, 5) if f"March {A}" in t], self.shown_near(rows, 5))
+
+    def test_a_cut_over_its_limit_never_stops_on_would_never_or_not(self):
+        w0 = word(101, 0)
+        text = f"They said the {w0} would hold for ever."
+        rows = film()
+        rows[24]["text"] = text
+        rows[24]["device"]["headline"] = f"The {w0} would never break"         # a summary, over P05's 25 letters
+        heard = copy.deepcopy(rows)
+        rec, _ = self.gate(rows, words_from=heard)
+        self.assertNotEqual(rec["result"], "STOPPED", rec.get("left"))
+        head = next((r["device"] or {}).get("headline", "") for r in rows if r["text"] == text)
+        self.assertLessEqual(len(head), 25)
+        self.assertFalse(head and M._lw(head.split()[-1]) in M._END_NEVER, head)
+        before = copy.deepcopy(rows)
+        self.assertEqual(self.gate(rows, words_from=heard)[0]["result"], "PASS")
+        self.assertEqual(rows, before)
+
+    def test_a_quiet_stretch_filler_cuts_no_name_of_the_film(self):
+        A, B, C = (word(102, j).title() for j in range(3))
+        rows = film(texts=False)
+        for r in rows:
+            r["text"] = f"He worked under {A} {B} {C} permission on a ledger."
+        build = make_build(rows)
+        got = M.fill_gaps_plain(Eng(), rows, build, names=[f"{A} {B} {C}"])
+        shown = [M._shown(r) for r in rows if id(r) in got]
+        self.assertTrue(shown)
+        self.assertFalse([t for t in shown if t.startswith((f"{B} {C} permission", f"{C} permission"))], shown)
 
 
 class WordingFlow(Base):
