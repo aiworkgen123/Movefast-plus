@@ -1118,25 +1118,50 @@ CLAUDE_PRICES = {
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-opus-4-8": (5.0, 25.0),
 }
-CLAUDE_SPEND = {"in": 0, "out": 0, "usd": 0.0, "calls": 0, "models": {}}
+# The prompt cache (Anthropic's prompt-caching page, October 2026): a token written to the 5-minute cache costs 1.25x
+# the input price, a token read back from it a tenth (a twentieth on Sonnet 5.5).
+CLAUDE_CACHE_WRITE = 1.25
+CLAUDE_CACHE_READ = {"claude-sonnet-5-5": 0.05}           # every other model: 0.1
+# The most a model may write in one answer, in tokens: a cut-off answer is asked again with more room, never more
+# than this. A model not listed: 64000.
+CLAUDE_MAX_OUT = {"claude-opus-5": 128000, "claude-sonnet-5": 128000, "claude-sonnet-5-5": 128000,
+                  "claude-haiku-5-5": 128000, "claude-haiku-4-5": 64000, "claude-sonnet-4-6": 128000,
+                  "claude-opus-4-8": 128000}
+CLAUDE_SPEND = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "usd": 0.0, "calls": 0, "models": {}}
 _SPEND_LOCK = threading.Lock()
 
 
-def _count_tokens(model: str, tin: int, tout: int, usd: float = None) -> None:
+def _count_tokens(model: str, tin: int, tout: int, usd: float = None, *, read: int = 0, wrote: int = 0) -> None:
     """`usd`: the provider's own figure (the Claude Code CLI reports one) — used instead of the table.
-    On a subscription it is the API-equivalent value, not money spent."""
+    On a subscription it is the API-equivalent value, not money spent. `tin` is the whole prompt; `read` and `wrote`
+    are the parts of it read from and written to the prompt cache, priced as such (by name only: a count passed fifth
+    is refused, never taken for a cache read)."""
     with _SPEND_LOCK:
         CLAUDE_SPEND["in"] += tin
         CLAUDE_SPEND["out"] += tout
+        CLAUDE_SPEND["cache_read"] += read
+        CLAUDE_SPEND["cache_write"] += wrote
         CLAUDE_SPEND["calls"] += 1
-        m = CLAUDE_SPEND["models"].setdefault(model, {"in": 0, "out": 0})
+        m = CLAUDE_SPEND["models"].setdefault(model, {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0})
         m["in"] += tin
         m["out"] += tout
+        m["cache_read"] += read
+        m["cache_write"] += wrote
         price = CLAUDE_PRICES.get(model)
         if usd is not None:
             CLAUDE_SPEND["usd"] += float(usd)
         elif price:
-            CLAUDE_SPEND["usd"] += tin / 1e6 * price[0] + tout / 1e6 * price[1]
+            billed = tin - read - wrote + wrote * CLAUDE_CACHE_WRITE + read * CLAUDE_CACHE_READ.get(model, 0.1)
+            CLAUDE_SPEND["usd"] += billed / 1e6 * price[0] + tout / 1e6 * price[1]
+
+
+def _count_usage(model: str, u: dict, usd: float = None) -> tuple:
+    """A reply's `usage` into CLAUDE_SPEND: (whole prompt, output) tokens. The prompt is the uncached input plus what
+    was read from and written to the cache."""
+    read, wrote = int(u.get("cache_read_input_tokens") or 0), int(u.get("cache_creation_input_tokens") or 0)
+    tin, tout = int(u.get("input_tokens") or 0) + read + wrote, int(u.get("output_tokens") or 0)
+    _count_tokens(model, tin, tout, usd, read=read, wrote=wrote)
+    return tin, tout
 
 
 def claude_spend_line() -> str:
@@ -1146,7 +1171,10 @@ def claude_spend_line() -> str:
         return ""
     def n(v):
         return f"{v / 1000:.0f}k" if v >= 10000 else f"{v:,}"
-    who = ", ".join(f"{m} {n(v['in'])} in / {n(v['out'])} out"
+    def cache(v):
+        return (f", {n(v['cache_read'])} of the input read from the cache, {n(v['cache_write'])} written to it"
+                if v.get("cache_read") or v.get("cache_write") else "")
+    who = ", ".join(f"{m} {n(v['in'])} in / {n(v['out'])} out{cache(v)}"
                     for m, v in sorted(sp["models"].items()))
     unpriced = [m for m in sp["models"] if m not in CLAUDE_PRICES]
     tail = f" (no price known for {', '.join(unpriced)})" if unpriced else ""
@@ -1154,15 +1182,29 @@ def claude_spend_line() -> str:
             f"= ${sp['usd']:.4f} — {who}{tail}")
 
 
-def _read_sse_text(resp) -> str:
+_CLAUDE_LAST = threading.local()     # how this thread's last streamed answer ended: Anthropic's stop_reason
+
+
+def claude_cut_off() -> bool:
+    """True when this thread's last Claude answer stopped at max_tokens: it was cut off mid-answer."""
+    return getattr(_CLAUDE_LAST, "stop", "") == "max_tokens"
+
+
+def claude_max_out(model: str) -> int:
+    return CLAUDE_MAX_OUT.get(model, 64000)
+
+
+def _read_sse_text(resp, begun: threading.Event = None) -> str:
     """Collect the text deltas from an Anthropic streaming response.
 
     Only `text_delta` is kept — thinking deltas and the bookkeeping events are
-    ignored. A mid-stream `error` event is raised so it is retried like any other
-    failure instead of silently returning a truncated script.
+    ignored. A mid-stream `error` event is raised (_ClaudeStreamError) so it is retried
+    like a network error instead of silently returning a truncated script. `begun` is set on the
+    first content event: the prompt cache this request writes is readable from then on.
     """
     out = []
-    model, tin, tout = "", 0, 0
+    model, usage = "", {}
+    _CLAUDE_LAST.stop = ""
     for raw in resp.iter_lines(decode_unicode=True):
         if not raw or not raw.startswith("data:"):
             continue
@@ -1174,6 +1216,8 @@ def _read_sse_text(resp) -> str:
         except ValueError:
             continue
         t = ev.get("type")
+        if t in ("content_block_start", "content_block_delta") and begun is not None:
+            begun.set()
         if t == "content_block_delta":
             d = ev.get("delta") or {}
             if d.get("type") == "text_delta":
@@ -1181,17 +1225,15 @@ def _read_sse_text(resp) -> str:
         elif t == "message_start":
             msg = ev.get("message") or {}
             model = msg.get("model") or ""
-            u = msg.get("usage") or {}
-            # cache reads are billed at a tenth, cache writes at 1.25x; counted
-            # as plain input, which is close enough and never under-reports
-            tin = (u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0) \
-                + (u.get("cache_read_input_tokens") or 0)
+            usage = dict(msg.get("usage") or {})
         elif t == "message_delta":
-            tout = (ev.get("usage") or {}).get("output_tokens") or tout
+            # the closing counts; the cache counts too, where the API repeats them here
+            usage.update({k: v for k, v in (ev.get("usage") or {}).items() if v is not None})
+            _CLAUDE_LAST.stop = (ev.get("delta") or {}).get("stop_reason") or ""
         elif t == "error":
-            raise _ClaudeError(f"stream error: {str(ev.get('error'))[:150]}")
-    if model or tin or tout:
-        _count_tokens(model or "unknown", tin, tout)
+            raise _ClaudeStreamError(f"stream error: {str(ev.get('error'))[:150]}")
+    if model or usage:
+        _count_usage(model or "unknown", usage)
     return "".join(out).strip()
 
 
@@ -1223,6 +1265,20 @@ def _claude_endpoint(provider: str):
 
 class _ClaudeError(RuntimeError):
     pass
+
+
+class _ClaudeStreamError(_ClaudeError):
+    """An `error` event inside a streamed answer (overloaded part-way through): _claude_try asks again, as after a
+    network error. Every other _ClaudeError (a client error, a missing key) is not asked again."""
+
+
+def claude_caches() -> bool:
+    """True when a call without an explicit provider goes to Anthropic itself, the one provider that is sent a cache
+    breakpoint (claude(head=...)): a caller with several parts that share the head then starts one part alone."""
+    p = CLAUDE_PROVIDER
+    if p in _DEAD_PROVIDERS and CLAUDE_FALLBACK != p:
+        p = CLAUDE_FALLBACK
+    return p == "anthropic" and _claude_endpoint("anthropic") is not None
 
 
 def _codex_selected() -> bool:
@@ -1297,10 +1353,7 @@ def _cc_result(model: str, stdout: str, prompt: str = "") -> tuple:
         d = json.loads(stdout[stdout.find("{"):])
     except ValueError:
         return bool(stdout.strip()), stdout.strip()
-    u = d.get("usage") or {}
-    tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-    tout = int(u.get("output_tokens") or 0)
-    _count_tokens(model, tin, tout, d.get("total_cost_usd"))
+    tin, tout = _count_usage(model, d.get("usage") or {}, d.get("total_cost_usd"))
     label = " ".join(re.sub(r"\s+", " ", re.sub(r"^First read these image files[^\n]*\n(- [^\n]*\n)*\n?", "[vision] ",
                                                    prompt or "")).split()[:7])[:60] or "?"
     with _SPEND_LOCK:
@@ -1417,9 +1470,17 @@ def _wait_for_claude_reset(msg: str) -> None:
         log("▶ Claude limit wait over — continuing")
 
 
-def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_s: int) -> str:
+def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_s: int, head: str = "",
+                begun: threading.Event = None) -> str:
     """One provider, with patient retry on transient errors up to budget_s.
     Raises _ClaudeError on client error or when the budget runs out."""
+    _CLAUDE_LAST.stop = ""
+    # Only Anthropic is sent the head as a block of its own (marked for its prompt
+    # cache, below). Every other provider gets the head and the prompt as one string,
+    # joined here before any provider's branch, so a branch that builds its own
+    # request from `prompt` never loses the head.
+    if head and provider != "anthropic":
+        prompt, head = head + prompt, ""
     if provider == "codex":
         try:
             return codex_cli.run(prompt, model=model)
@@ -1436,8 +1497,16 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
     # script blew past 600s and died with ReadTimeout after the model had already
     # done the work. Streaming resets the clock on every chunk, so length stops
     # mattering; the overall budget below still bounds the whole attempt.
+    content = prompt
+    # The shared head goes to Anthropic as its own block marked for the prompt
+    # cache: the first call writes it (1.25x the input price), every call after it
+    # within 5 minutes reads it back for a tenth. Anthropic only: kie got the same
+    # words as one string above, as before.
+    if head:
+        content = [{"type": "text", "text": head, "cache_control": {"type": "ephemeral"}},
+                   {"type": "text", "text": prompt}]
     payload = {"model": model, "max_tokens": max_tokens, "stream": True,
-               "messages": [{"role": "user", "content": prompt}]}
+               "messages": [{"role": "user", "content": content}]}
     # Sonnet 5 and its siblings think by default, and thinking tokens are spent
     # out of max_tokens. On a mid-sized call the model can think through the
     # whole budget and return a `thinking` block with no text after it — which
@@ -1458,10 +1527,19 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
             resp = requests.post(url, headers=headers, json=payload,
                                  stream=True, timeout=(30, 180))
             if resp.status_code == 200:
-                text = _read_sse_text(resp)
+                text = _read_sse_text(resp, begun)
                 if text:
                     return text
                 last = "no text in stream"
+                # It thought through all of max_tokens and wrote nothing (a model that
+                # will not stop thinking): the same request would only do it again, so
+                # it goes again at once with half as much room again, up to the model's
+                # limit; from there it is retried as any other empty answer.
+                if _CLAUDE_LAST.stop == "max_tokens" and payload["max_tokens"] < claude_max_out(model):
+                    payload["max_tokens"] = min(int(payload["max_tokens"] * 1.5), claude_max_out(model))
+                    log(f"{model} thought through all of max_tokens and wrote nothing — asking again with room "
+                        f"for {payload['max_tokens']}")
+                    continue
             else:
                 body = resp.text[:150]
                 last = f"HTTP {resp.status_code}: {body}"
@@ -1476,6 +1554,8 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
                     raise _ClaudeError(f"{provider} {last}")  # real client error — don't retry
         except requests.exceptions.RequestException as e:
             last = f"network: {e.__class__.__name__}"
+        except _ClaudeStreamError as e:                 # broke off mid-answer: asked again like a 529
+            last = str(e)[:150]
         if time.time() >= deadline:
             raise _ClaudeError(f"{provider} po {int(time.time()-start)}s: {last}")
         wait = min(90, 12 * attempt)
@@ -1483,16 +1563,21 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
         time.sleep(wait)
 
 
-def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = None) -> str:
+def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = None, head: str = "",
+           begun: threading.Event = None) -> str:
     """Call a Claude provider; on failure, fall back to the other one so a single
     outage never kills a job. Default primary is kie (cheap); pass provider=
-    "anthropic" for long generations kie truncates (outline/script)."""
+    "anthropic" for long generations kie truncates (outline/script).
+
+    `head`: a long beginning that several calls share word for word, sent before
+    `prompt` (to Anthropic as a cached block, see _claude_try). `begun` is set once
+    the answer starts streaming."""
     primary = (provider or CLAUDE_PROVIDER).lower()
     if primary == "codex":
         # Codex is subscription-only by design. Do not let the legacy default
         # CLAUDE_FALLBACK send a failed ChatGPT request to Anthropic or kie.
         try:
-            return _claude_try(primary, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS)
+            return _claude_try(primary, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
         except _ClaudeError as e:
             if provider is not None:
                 raise
@@ -1502,23 +1587,23 @@ def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = Non
     if not provider and primary in _DEAD_PROVIDERS:
         fb0 = CLAUDE_FALLBACK
         if fb0 and fb0 != primary and _claude_endpoint(fb0) is not None:
-            return _claude_try(fb0, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS)
+            return _claude_try(fb0, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
     # An EXPLICIT provider means "use only this one, no fallback" — used for scripts,
     # where kie is useless (it truncates long output) so falling back to it would just
     # waste time producing a short script the legit-check rejects anyway.
     if provider:
         if primary != "claudecode":
-            return _claude_try(primary, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS)
+            return _claude_try(primary, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
         # The CLI is the one provider that can fail for a reason retrying cannot
         # fix (not signed in), so it is allowed to hand off even when explicit.
         try:
-            return _claude_try(primary, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS)
+            return _claude_try(primary, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
         except _ClaudeError as e:
             fb1 = CLAUDE_FALLBACK if CLAUDE_FALLBACK != "claudecode" else "anthropic"
             if _claude_endpoint(fb1) is None:
                 sys.exit(f"Claude API error: {e}")
             log(f"⚠ claudecode failed ({str(e)[:110]}) — switching to {fb1}")
-            return _claude_try(fb1, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS)
+            return _claude_try(fb1, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
     # Fallback is whichever provider isn't primary.
     fb = CLAUDE_FALLBACK
     have_fb = fb and fb != primary and _claude_endpoint(fb) is not None
@@ -1526,7 +1611,7 @@ def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = Non
     # be fully patient on the primary.
     primary_budget = CLAUDE_PRIMARY_BUDGET if have_fb else CLAUDE_RETRY_SECONDS
     try:
-        return _claude_try(primary, model, prompt, max_tokens, primary_budget)
+        return _claude_try(primary, model, prompt, max_tokens, primary_budget, head, begun)
     except _ClaudeError as e:
         if not have_fb:
             sys.exit(f"Claude API error: {e}")
@@ -1534,7 +1619,7 @@ def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = Non
         log(f"⚠ {primary} failed ({str(e)[:100]}) — falling back to {fb} "
             f"(skipping {primary} for the rest of this run)")
     try:
-        return _claude_try(fb, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS)
+        return _claude_try(fb, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
     except _ClaudeError as e2:
         sys.exit(f"Claude API error — i fallback {fb} selhal: {e2}")
 
@@ -1586,6 +1671,7 @@ def claude_research(prompt: str, model: str = None) -> str:
                     last = f"HTTP {r.status_code}: {r.text[:120]}"
                     break
                 j = r.json()
+                _count_usage(j.get("model") or payload["model"], j.get("usage") or {})
                 if j.get("stop_reason") == "pause_turn":          # a long search turn: let it carry on
                     payload["messages"] = [payload["messages"][0], {"role": "assistant", "content": j.get("content") or []}]
                     continue
@@ -2011,6 +2097,7 @@ def claude_vision(prompt: str, image_paths: list, model: str = SCRIPT_MODEL, max
     if resp.status_code != 200:
         raise _ClaudeError(f"anthropic vision HTTP {resp.status_code}: {resp.text[:200]}")
     data = resp.json()
+    _count_usage(data.get("model") or model, data.get("usage") or {})
     return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text").strip()
 
 

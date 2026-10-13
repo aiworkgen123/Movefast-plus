@@ -54,6 +54,7 @@ QUICK_SHARE, LONG_SHARE = 0.35, 0.25 # their mix: about a third of shots under 3
 SCENE_MAX_S = 8.0                    # longest planned shot (was the repo's five seconds)
 SHORT_S, SHORT_RUN_MAX = 3.0, 4      # never more than four shots under three seconds in a row
 BATCH_S = 120.0                      # segmentation focus range per call (240 lost two thirds of an 11-min film)
+CACHE_WAIT_S = 20.0                  # the other parts start once the first part's answer streams, or after this long
 GRADE = {"lut": "documentary-neutral", "vignette": 0.18, "grain": 0.06}   # the repo's DEFAULT_GRADE
 # the shadow look (renderer Grade.tsx): tight dark vignette, a dimmer, muted, harder picture. 0 = off, 1 = full.
 TYPED_CAPTION_START_F = 8                       # the reference starts typing ~0.27 s into its shot
@@ -417,16 +418,43 @@ def _guide() -> str:
         return ""
 
 
-def _ask(engine, prompt: str, max_tokens: int, model: str = "") -> dict:
-    """One JSON object from Claude (the repo used forced tool calls; here the object is asked for in words)."""
+def _ask(engine, prompt: str, max_tokens: int, model: str = "", head: str = "", begun: threading.Event = None,
+         step: str = "") -> dict:
+    """One JSON object from Claude (the repo used forced tool calls; here the object is asked for in words).
+    `head`: a long beginning that several calls share word for word, sent before the prompt and kept in Anthropic's
+    prompt cache; `begun` is set once the answer has begun, or the call failed.
+    `step`: the step's name. Only a caller that names its step has a cut-off answer (stopped at max_tokens) logged and
+    asked again once with half as much room again; cut off a second time it is not asked again (2026-10-13: it was
+    asked again as it was, cut off again and paid for again). A caller that names none, the highlighted-page step
+    among them, is answered exactly as before: a cut-off answer is parsed like any other and, if it does not parse,
+    asked again at the same size."""
     strict = prompt + ("\n\nRETURN FORMAT FOR THIS RUN: there is no tool to call. Reply with ONLY the JSON object the "
                        "tool would have received — begin with '{' and end with '}'. No prose, no markdown fences.")
-    last = ""
-    for _ in range(3):
+    model = model or engine.UTILITY_MODEL
+    kw = {"head": head, "begun": begun} if head else {}
+    last, grown = "", False
+    for attempt in range(3):
         try:
-            raw = engine.claude(strict, model or engine.UTILITY_MODEL, max_tokens=max_tokens)
+            raw = engine.claude(strict, model, max_tokens=max_tokens, **kw)
         except Exception as e:                                       # noqa: BLE001 - asked again
             last = str(e)[:160]
+            continue
+        finally:
+            if begun is not None:                   # answering, or failed: the calls waiting on this one go ahead
+                begun.set()
+        if step and getattr(engine, "claude_cut_off", lambda: False)():
+            # more room once: no answer has come near its step's max_tokens (the shot answers run to about a third of
+            # their 24000), so one cut off twice is a runaway that more room would only pay more for. Its tail is
+            # logged to tell a runaway from a long answer
+            more = min(int(max_tokens * 1.5), engine.claude_max_out(model))
+            again = not grown and more > max_tokens and attempt < 2
+            engine.log(f"  ⚠ answer cut off ({step}) at {max_tokens} tokens, {len(raw)} characters ending "
+                       f"\"{' '.join(raw[-80:].split())}\" - "
+                       + (f"asking again with room for {more}" if again else "not asked again"))
+            last = f"answer cut off at {max_tokens} tokens"
+            if not again:
+                break
+            max_tokens, grown = more, True
             continue
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
@@ -457,7 +485,7 @@ def research(engine, script: str, job: Path, force: bool = False) -> dict:
     title = (job / "title.txt").read_text(encoding="utf-8").splitlines()[0] if (job / "title.txt").exists() else ""
     prompt = (_prompts()["research"] + f"\n\nTITLE: {title}\n\n<script>\n{script}\n</script>")
     try:
-        got = _ask(engine, prompt, 12000)
+        got = _ask(engine, prompt, 12000, step="research dossier")
     except RuntimeError as e:
         engine.log(f"  {e} — planning without a dossier")
         got = {}
@@ -563,7 +591,7 @@ def visual_brief(engine, job: Path, script: str, dossier: dict, force: bool = Fa
     brief = {}
     for _ in range(2):
         try:
-            brief = _ask(engine, prompt, 8000)
+            brief = _ask(engine, prompt, 8000, step="visual brief")
         except RuntimeError as e:
             engine.log(f"  {e}")
         if brief.get("tone") and isinstance(brief.get("people"), list):
@@ -657,23 +685,33 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     if not cues:
         sys.exit("Mr Truth: the subtitles are empty — nothing to cut to")
     end_ms = cues[-1][1]
-    system = _pacing(_prompts()["segmentation"].replace("{TARGET_SECONDS}", f"{TARGET_SCENE_S:.1f}"))
+    system = _no_copies(_pacing(_prompts()["segmentation"].replace("{TARGET_SECONDS}", f"{TARGET_SCENE_S:.1f}")))
     batches, t = [], 0
     while t < end_ms:
         batches.append((t, min(end_ms, t + int(BATCH_S * 1000))))
         t += int(BATCH_S * 1000)
+    # what every part says word for word comes first - the brief, the script and the <film> block - and the part's own
+    # transcript after it: with more than one part it is sent as a head that the first part writes to Anthropic's
+    # prompt cache and the others read back at a tenth of the price (2026-10-13: the film block used to come after the
+    # transcript, so only the brief and the script could be shared; the brief already places it above the transcript).
+    # The search rules stay where they were, after the transcript and just above the part's pace: caching them too
+    # would save a cent or two a film, and moving them away from the answer is untested
+    shared = f"{system}\n\n<script>\n{script}\n</script>\n" + _film_block(dossier) + "\n\n"
+    head = shared if len(batches) > 1 else ""
+    begun = threading.Event()
 
     def one(rng):
         f0, f1 = rng
         lines = [f"{'>' if f0 <= a < f1 else ' '} [{a}-{b}] {txt}" for a, b, txt in cues
                  if f0 - 30000 <= a < f1 + 15000]
         user = "\n".join(["TRANSCRIPT (authoritative; lines marked \">\" are the focus range, unmarked lines are context only):",
-                          *lines, _film_block(dossier), QUERY_RULES, "", _range_pace(f0, f1, end_ms),
+                          *lines, QUERY_RULES, "", _range_pace(f0, f1, end_ms),
                           f"FOCUS RANGE: {f0}ms to {f1}ms.",
                           "Return scenes whose startMs falls inside the focus range, covering it completely and contiguously."])
-        prompt = f"{system}\n\n<script>\n{script}\n</script>\n\n{user}\n\nReturn {{\"scenes\": [...]}}."
+        prompt = ("" if head else shared) + f"{user}\n\nReturn {{\"scenes\": [...]}}."
         try:
-            return (_ask(engine, prompt, 24000).get("scenes") or [])
+            return (_ask(engine, prompt, 24000, head=head, begun=begun,
+                         step=f"shots {f0 // 1000}s-{f1 // 1000}s").get("scenes") or [])
         except RuntimeError as e:
             engine.log(f"  beats {f0 // 1000}s-{f1 // 1000}s: {e} — cut on the sentences instead")
             return []
@@ -709,7 +747,19 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     snap = lambda ms: min(starts, key=lambda s: abs(s - int(ms)))
     engine.log(f"Mr Truth: cutting the narration into shots ({len(batches)} part(s), the repo's segmentation brief)...")
     with ThreadPoolExecutor(max_workers=3) as ex:
-        parts = list(ex.map(planned, batches))
+        lead = ex.submit(planned, batches[0])
+        # the cache is written once an answer BEGINS: the first part goes alone until its answer streams (a few
+        # seconds), the others then start and read the head; it never waits for the first part to finish
+        if head and getattr(engine, "claude_caches", lambda: False)():
+            t0 = time.time()
+            if begun.wait(CACHE_WAIT_S):
+                engine.log(f"  the first part began answering after {time.time() - t0:.1f}s - the other parts start "
+                           f"now and read its head from the prompt cache")
+            else:
+                engine.log(f"  the first part has not begun answering after {CACHE_WAIT_S:.0f}s - the other parts "
+                           f"start anyway")
+        rest = [ex.submit(planned, rng) for rng in batches[1:]]
+        parts = [f.result() for f in [lead] + rest]
     fell_back = 0
     rows = []
     for (f0, f1), kept in zip(batches, parts):
@@ -796,6 +846,20 @@ def _pacing(brief: str) -> str:
                           f"A sentence longer than {SCENE_MAX_S:.0f} seconds is split at its clause, here, so each half "
                           f"gets its own picture to look for.")
     return brief.replace("longer than five seconds", f"longer than {SCENE_MAX_S:.0f} seconds")
+
+
+def _no_copies(brief: str) -> str:
+    """The segmentation brief without the two fields beats() writes itself (2026-10-13): a scene's words (joined from
+    the subtitle lines it covers) and its endMs (the next scene's start). Copied back by Claude they were a sixth of the
+    shot answers' characters (13% and 4% on an 11-minute film), written, paid for and thrown away. A scene that still
+    carries them is overwritten as before."""
+    brief = brief.replace("- Every startMs and endMs must be a timestamp that appears in the transcript.",
+                          "- Every startMs must be a timestamp that appears in the transcript.")
+    brief = brief.replace("- Scenes must be contiguous and in order: each scene starts where the previous one ended.",
+                          "- Scenes must be contiguous and in order: each scene lasts until the next one starts. Write "
+                          "only its startMs; its end and its words come from the transcript, so a scene has no endMs "
+                          "and no text field.")
+    return brief.replace("- text: the transcript words spoken during this scene, verbatim.\n", "")
 
 
 def _calm_short_runs(rows: list) -> int:
@@ -1498,7 +1562,7 @@ def opportunities(engine, job: Path, script: str, force: bool = False) -> list:
         return got
     engine.log("Mr Truth: choosing templates and their words (the repo's visual plan brief)...")
     try:
-        got = _ask(engine, prompt, 32000, model=engine.SCRIPT_MODEL).get("opportunities") or []
+        got = _ask(engine, prompt, 32000, model=engine.SCRIPT_MODEL, step="templates").get("opportunities") or []
     except RuntimeError as e:
         engine.log(f"  {e} — the film carries only the templates Mr Truth places by itself (asked again next run)")
         return []
@@ -1857,7 +1921,7 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
     got = None if force else _load(out)
     if not (isinstance(got, dict) and got.get("key") == key):
         try:
-            got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL), key=key)
+            got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL, step="more overlays"), key=key)
         except RuntimeError as e:
             engine.log(f"  overlay fill: {e}")
             return
@@ -3606,6 +3670,8 @@ def archive_names(engine, job: Path, rows: list, dossier: dict, force: bool = Fa
     ask = [b0 for b0 in range(0, len(rows), 60) if not answered(b0)]
     if ask:
         engine.log("Mr Truth: archive names for the picture search (the repo's brief)...")
+        brief = _prompts()["archive_names"] + "\n" + _film_block(dossier) + "\n\n"
+        head = brief if len(ask) > 1 else ""        # the same in every part: read from the prompt cache after the first
         for b0 in ask:
             blocks = []
             for i in range(b0, min(len(rows), b0 + 60)):
@@ -3614,11 +3680,11 @@ def archive_names(engine, job: Path, rows: list, dossier: dict, force: bool = Fa
                               f"before: {rows[i - 1]['text'] if i else ''}\nafter: {rows[i + 1]['text'] if i + 1 < len(rows) else ''}\n"
                               f"entities: {', '.join(map(str, r.get('entities') or [])) or 'none'}\n"
                               f"visual intent: {r.get('visualIntent', '')}\nsearch now: {(r.get('queries') or [''])[0]}\n</shot>")
-            prompt = (_prompts()["archive_names"] + "\n" + _film_block(dossier) + "\n\n" + "\n".join(blocks)
+            prompt = (("" if head else brief) + "\n".join(blocks)
                       + '\n\nReturn {"names": [{"index": 0, "name": "..." or null}, ...]}.')
             try:
                 part = {}
-                for x in _ask(engine, prompt, 8000).get("names") or []:
+                for x in _ask(engine, prompt, 8000, head=head, step=f"archive names from shot {b0}").get("names") or []:
                     i = int(x.get("index"))
                     if b0 <= i < b0 + 60:
                         part[str(i)] = x.get("name")
@@ -4803,6 +4869,8 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
         anchors = {} if force else (_load(cache) or {})
         akey = lambda i: _hash([ANCHORS_V, rows[i]["text"], dossier.get("visualBrief") or {}])
         ask = [i for i in failing if akey(i) not in anchors]
+        brief, rest = ANCHOR_PROMPT.replace("[INSERT FILM HERE]", _film_block(dossier)).split("[INSERT SHOTS HERE]")
+        head = brief if len(ask) > 50 else ""       # the same in every part: read from the prompt cache after the first
         for k0 in range(0, len(ask), 50):
             part = ask[k0:k0 + 50]
             blocks = "\n".join(
@@ -4812,9 +4880,9 @@ def pictures(engine, job: Path, rows: list, dossier: dict, force: bool = False) 
                 f"already searched: {'; '.join(states[i].get('tried') or [])}\n"
                 f"judge said: {' | '.join(c.get('reason', '') for c in states[i]['cands'][:3]) or 'nothing came back'}\n</shot>"
                 for i in part)
-            prompt = ANCHOR_PROMPT.replace("[INSERT FILM HERE]", _film_block(dossier)).replace("[INSERT SHOTS HERE]", blocks)
+            prompt = ("" if head else brief) + blocks + rest
             try:
-                for x in _ask(engine, prompt, 6000).get("anchors") or []:
+                for x in _ask(engine, prompt, 6000, head=head, step="round-3 anchors").get("anchors") or []:
                     i = int(x.get("index"))
                     if i in part:
                         anchors[akey(i)] = {k: str(x.get(k) or "")[:80] for k in ("anchor", "kind", "commons", "web")}
@@ -5929,7 +5997,8 @@ def typed_captions(engine, job: Path, rows: list, script: str, force: bool = Fal
         prompt = TC_PROMPT.format(most=TC_MAX, first=TC_FIRST_S, gap=TC_GAP_S, lead=TC_MIN_START_S, line=TC_LINE_MAX,
                                   total=TC_TOTAL_MAX, shots=shots)
         try:
-            got = {"key": key, "captions": _ask(engine, prompt, 6000, model=engine.SCRIPT_MODEL).get("captions") or []}
+            got = {"key": key, "captions": _ask(engine, prompt, 6000, model=engine.SCRIPT_MODEL,
+                                                step="typed captions").get("captions") or []}
         except RuntimeError as e:
             engine.log(f"  typed captions: {e}")
             return
@@ -8564,7 +8633,7 @@ def fill_gaps(engine, job: Path, rows: list, build, force: bool = False) -> set:
     got = None if force else _load(out)
     if not (isinstance(got, dict) and got.get("key") == key):
         try:
-            got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL), key=key)
+            got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL, step="quiet-stretch fill"), key=key)
         except RuntimeError as e:
             engine.log(f"  gap fill: {e}")
             return set()
@@ -9432,7 +9501,7 @@ def _usage(engine) -> dict:
             "gemini": json.loads(json.dumps(g, default=str)), "brave_requests": _BRAVE["requests"],
             "wikimedia_requests": COMMONS["requests"], "search": dict(SEARCH), "bing_off": _BING.get("why", ""),
             "picture_checks": dict(VSTAT), "frame_rechecks": _crop_stats(dict(VSTAT), _spent(engine, ("frame recheck",))),
-            "claude": {k: c.get(k) for k in ("calls", "in", "out", "usd") if k in c}}
+            "claude": {k: c.get(k) for k in ("calls", "in", "out", "cache_read", "cache_write", "usd") if k in c}}
 
 
 def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, burn_subs: bool) -> Path:

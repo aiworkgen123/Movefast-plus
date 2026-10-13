@@ -17,6 +17,11 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   about $4.70.
 - **Reliability first:** no Gemini Flex tier, and no cheaper model that has not passed our own picture test.
 - **Prices:** plan with this year's prices only; ignore announced price changes for next year.
+- **Claude's bill** (owner 2026-10-13): the planner stays Claude Sonnet. The opening that every shot part shares goes
+  through Anthropic's prompt cache, and the shot answers no longer copy the narration back: about $1.30 instead of
+  $1.80 for a 20-minute film, with no slower planning. An answer that breaks off part-way, or a model that thinks
+  through all its room, is asked again instead of stopping the film; this also covers the highlighted-page step's
+  requests, only where the film used to stop (owner's OK, 2026-10-13). The page itself is unchanged.
 
 ## Picture checks (locked, "option A")
 

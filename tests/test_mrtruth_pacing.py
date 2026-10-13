@@ -196,7 +196,8 @@ def test_beats_caches_claudes_rows_and_paces_them_on_load():
     dossier = {"topic": "synthetic"}
     asked = []
 
-    def fake_ask(engine, prompt, max_tokens, model=""):
+    def fake_ask(engine, prompt, max_tokens, model="", head="", **kw):
+        prompt = head + prompt                     # a shared head is the start of the same prompt
         asked.append(prompt)
         f0, f1 = (int(x) for x in prompt.rsplit("FOCUS RANGE: ", 1)[1].split("ms.", 1)[0].split("ms to "))
         return {"scenes": [dict(r) for r in rows_on(cues, list(range(len(cues))))

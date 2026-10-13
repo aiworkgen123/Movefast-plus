@@ -60,7 +60,8 @@ class Engine:
 
     _parse_srt_full = staticmethod(parse_srt)
 
-    def claude(self, prompt, model, max_tokens=0):
+    def claude(self, prompt, model, max_tokens=0, head="", begun=None):
+        prompt = head + prompt                     # a shared head is the start of the same prompt
         with self._lock:
             self.calls.append(prompt)
         if self.answer is None:

@@ -26,7 +26,7 @@ class Shapes(unittest.TestCase):
         self.assertEqual(M._dossier(None), {})
 
     def test_labelled_searches_reach_the_shot_as_searches(self):
-        def fake_ask(engine, prompt, max_tokens, model=""):
+        def fake_ask(engine, prompt, max_tokens, model="", **kw):
             return {"scenes": [{"startMs": 0, "visualIntent": "x", "entities": [], "mood": "", "sceneType": "imagery",
                                 "era": "today", "queries": {"literal": "Vatican library reading room 1950s",
                                                             "conceptual": "forbidden knowledge", "mood": "hushed"}}]}

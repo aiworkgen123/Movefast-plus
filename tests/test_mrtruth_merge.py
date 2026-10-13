@@ -52,8 +52,8 @@ class Prompt(unittest.TestCase):
         self.assertNotIn("every second shot", M.QUERY_RULES)
         asked = []
 
-        def fake_ask(engine, prompt, max_tokens, model=""):
-            asked.append(prompt)
+        def fake_ask(engine, prompt, max_tokens, model="", head="", **kw):
+            asked.append(head + prompt)
             return {"scenes": [{"startMs": 0, "visualIntent": "x", "queries": ["a", "b", "c"], "entities": [],
                                 "mood": "", "sceneType": "imagery", "era": "today"}]}
         with tempfile.TemporaryDirectory() as d:
