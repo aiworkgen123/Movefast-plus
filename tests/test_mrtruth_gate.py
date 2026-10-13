@@ -887,6 +887,102 @@ class Rules(unittest.TestCase):
         self.assertNotIn(f"Monks but because of the {w0}", self.picks(line_))
 
 
+class Paraphrases(unittest.TestCase):
+    """2026-10-13 (the DeepSeek and Sonnet plans): a writer's summary read against the narration as an in-order
+    selection of its words inside one sentence (R1), a 'that' clause shown without the belief or the report it hangs on
+    (R2), a noun shown without the qualifier said after it (R3), a label that is a subject cut before its verb (R4), and
+    the good texts the rules refused (an -ly adjective, a noun shaped like a verb, a list's row on its predicate, 'one'
+    before a noun). Made-up words."""
+
+    def rules(self, text, line_, **kw):
+        return [r for r, _, _ in M._wording(text, line_, **kw)]
+
+    def test_a_summary_keeps_its_negation_on_what_it_was_said_of(self):
+        w0, w1, w2, w3 = word(970, 0), word(970, 1), word(970, 2), word(970, 3)
+        for text, line_ in ((f"Not {w1}", f"The {w2} had not said the {w0} was {w1}."),              # of the saying
+                            (f"No {w0}", f"The {w1} had no standard outer {w0} when he came."),      # of its modifier
+                            (f"Not {w0} {w1}", f"He was not a {w2} with {w0} {w3} {w1}."),            # of another noun
+                            (f"Not fit for {w0}", f"The {w2} was not fit for general {w1} {w0}.")):  # every qualifier
+            self.assertIn("negation", self.rules(text, line_), text)
+        for text, line_ in ((f"Not {w1} {w2}", f"It was not {w1} in any {w2}."),
+                            (f"Not {w1}", f"That {w2} did not indicate {w1}."),                     # its object kept
+                            (f"Not {w1}", f"They were not {w2}s the abbot recognized as {w1}."),   # what it was named
+                            (f"Never read in a {w0}", f"It was never read in a {w1} {w0}."),
+                            (f"No {w0} came", f"No {w0} ever came."),
+                            (f"Not {w1} or {w2}", f"It was {w1} and {w2}.")):                       # no reading at all
+            self.assertNotIn("negation", self.rules(text, line_), text)
+        # a list's rows under a title that says the 'not' for them
+        self.assertEqual(self.rules(f"Not {w1}", f"That {w2} did not indicate {w1}."), [])
+        line_ = f"The {w2} had not said the {w0} was {w1}."
+        self.assertEqual(self.rules(f"Not {w1}", line_, part="row", head=f"What the {w2} did not say"), [])
+        self.assertIn("negation", self.rules(f"Not {w1}", line_, part="row", head=f"What the {w2} said"))
+        self.assertIn("negation", self.rules(f"Not fit for {w0}", f"The {w2} was not fit for general {w1} {w0}.",
+                                             kind="label"))                                       # a label with a 'not'
+        self.assertEqual(self.rules(f"The {w0} {w1}", f"The {w0} was {w1}.", kind="label"), [])     # without: as before
+
+    def test_a_summary_keeps_its_frame_and_never_glues_two_clauses(self):
+        w0, w1, w2 = word(971, 0), word(971, 1), word(971, 2)
+        line_ = f"It stopped when the last {w0} at the {w1} departed the hall."
+        self.assertIn("cut off", self.rules(f"The last {w0} departed", line_))
+        self.assertNotIn("cut off", self.rules(f"The last {w0} departed", line_, part="caption"))   # a caption sums up
+        self.assertIn("cut off", self.rules("Never to keep", f"The {w2} never asked the {w0}s to keep anything."))
+        line_ = f"The {w2} warns the {w0}s that the {w1}s can sing, and he tells them exactly when that singing stops."
+        self.assertIn("cut off", self.rules(f"The {w1}s can sing, and exactly when that singing stops", line_))
+        self.assertEqual(self.rules(f"The {w0}s fled the {w1}", f"The {w0}s quietly fled the old {w1}."), [])
+
+    def test_a_belief_or_a_report_keeps_its_frame_three_words_back(self):
+        w0, w1 = word(972, 0), word(972, 1)
+        for line_ in (f"The abbot told the monks that the {w0} was gone.",
+                      f"They spoke in the hope that the {w0} was gone.",
+                      f"They worked on the assumption that the {w0} was gone.",
+                      f"He was under the impression that the {w0} was gone.",
+                      f"The {w1} tells the young that the {w0} was gone."):
+            self.assertIn("cut off", self.rules(f"The {w0} was gone", line_), line_)
+            self.assertNotIn(f"The {w0} was gone", M._spoken_phrases(line_, 32), line_)
+        for line_ in (f"The {w1} grew so loud that the {w0} was gone.", f"The {w0} was gone."):
+            self.assertNotIn("cut off", self.rules(f"The {w0} was gone", line_), line_)
+
+    def test_a_noun_keeps_the_qualifier_said_after_it(self):
+        w0, w1, w2 = word(973, 0), word(973, 1), word(973, 2)
+        for text, line_ in ((f"Outside the {w0} of {w1}s", f"It set the {w2} outside the {w0} of {w1}s available for "
+                                                             f"study."),
+                            (f"The {w0} {w1}", f"They called it the {w0} {w1} suitable for prayer."),
+                            (f"A {w0}", f"It stayed a {w0} open to every {w1}.")):
+            self.assertIn("cut off", self.rules(text, line_), text)
+            self.assertNotIn(text, M._spoken_phrases(line_, 46), text)
+        line_ = f"It set the {w2} outside the {w0} of {w1}s available for study."
+        for text in (f"Outside the {w0} of {w1}s available", f"Outside the {w0}", f"The {w2} outside the {w0}"):
+            self.assertIn("cut off", self.rules(text, line_), text)
+        self.assertFalse([w for _, w, _ in M._wording("Remained accessible", f"The {w1} remained accessible to the "
+                                                                             f"{w2}s.") if "words it needs" in w])
+        self.assertEqual(self.rules(f"The {w0} of {w1}s", f"He read the {w0} of {w1}s, available to all."), [])
+
+    def test_a_label_that_is_a_subject_cut_before_its_verb_is_caught(self):
+        w0, w1, w2 = word(974, 0), word(974, 1), word(974, 2)
+        line_ = f"Every {w0} written down in the {w1}, and in the years after the {w2}, was burned."
+        self.assertIn("cut off", self.rules(f"Every {w0} written down", line_, kind="label"))
+        for text, line_ in ((f"Every {w0} written down", f"Every {w0} written down in the {w1} was burned."),
+                            (f"The {w0} was sealed", f"The {w0} was sealed, and in the end it was opened."),
+                            (f"{w0.title()} {w1.title()}", f"{w0.title()} {w1.title()}, the keeper, was gone.")):
+            self.assertEqual(self.rules(text, line_, kind="label"), [], text)
+
+    def test_good_texts_are_no_longer_refused(self):
+        w0, w1, w2 = word(975, 0), word(975, 1), word(975, 2)
+        W1 = w1.title()
+        for text, line_, kw in ((f"Scholarly {w0}", f"It stayed a matter of scholarly {w0}.", {}),
+                                (f"Early {W1} {w0}s", f"Several early {W1} {w0}s held it.", {}),
+                                (f"{w0.title()}ic thought", f"It went against the main line of {w0}ic thought.", {}),
+                                (f"Could not be {w0}ed", f"The {w1} could not be {w0}ed.", {"part": "row"}),
+                                (f"Hear {w0}", f"They could hear {w0}.", {"part": "row"}),
+                                (f"One {w0}", f"The {w1} turned on a {w0}.", {"kind": "label"})):
+            self.assertEqual(self.rules(text, line_, **kw), [], text)
+        # and what they stand beside still is
+        self.assertIn("cut off", self.rules(f"Line of {w0}ic", f"It went against the main line of {w0}ic thought."))
+        self.assertIn("cut off", self.rules(f"Could not be {w0}ed", f"The {w1} could not be {w0}ed."))
+        self.assertIn("cut off", self.rules(f"Remained {w0}", f"The {w1} remained {w0} to the {w2}s.", part="row"))
+        self.assertIn("detail", self.rules(f"Two {w0}s", f"The {w1} turned on a {w0}.", kind="label"))
+
+
 class Names(unittest.TestCase):
     """Review 2026-10-13 (round phrases-names): a name is never cut - with its "de", "van der" or "of", one word of it
     left on either side, a known name around the words - and a month, a title's full stop or a capital after a colon
@@ -1596,6 +1692,47 @@ class Fields(Base):
         self.assertNotEqual(rec["result"], "STOPPED", rec.get("left"))
         dev = rows[10]["device"]
         self.assertEqual((dev["id"], dev["line1"], dev["line2"]), ("top-title", f"A Different {w1.title()}", ""))
+
+    def test_a_repaired_field_shares_no_word_with_the_other_field_in_any_form(self):
+        # 'Not W' / 'Not as W' and 'A W' / 'The Ws were sealed': a repair made the two fields of one template say the
+        # same word twice
+        w0, w2 = word(976, 0), word(976, 2)
+        for tid, f, other in (("top-title", "line2", {"line1": f"The {w0.title()}s Were Sealed"}),
+                              ("P02", "label", {"headline": f"The {w0}s were sealed"}),
+                              ("P05", "eyebrow", {"headline": f"The {w0}s were sealed"}),
+                              ("two-photo-zoom", "right", {"left": f"The {w0}s were sealed"})):
+            rows = film()
+            rows[10].update(text=f"The {w0}s were sealed. A {w0} sat. The {w2} stood.",
+                            device=dict({"id": tid, "line1": "", "line2": "", "headline": "", "label": "",
+                                         "eyebrow": "", "supportLine": "", "imageLabel": ""}, **other))
+            _, ctx = self.find(rows)
+            self.assertFalse(M._try_text(rows, 10, tid, f, None, f"A {w0} sat", ctx, None, "statement"), tid)
+            self.assertTrue(M._try_text(rows, 10, tid, f, None, f"The {w2} stood", ctx, None, "statement"), tid)
+
+    def test_a_summary_that_drops_its_negation_is_repaired_never_stopped(self):
+        w0, w1, w2 = word(977, 0), word(977, 1), word(977, 2)
+        text = f"The {w2} had not said the {w0} was {w1}."
+        rows = Wording.spoken(self, text, f"Not {w0} {w1}")
+        self.assertIn("negation", [r for r, _ in self.wording_at(rows, 5)])
+        rec, _ = self.gate(rows, words_from=copy.deepcopy(rows))
+        self.assertNotEqual(rec["result"], "STOPPED", rec.get("left"))
+        self.assertFalse([r for r in rows if (r.get("device") or {}).get("line") == f"Not {w0} {w1}"])
+        self.assertFalse([x for x in self.find(rows)[0] if x["rule"] in M._W_RULES])
+
+    def test_a_list_whose_rows_drop_their_negation_keeps_its_title_as_a_line(self):
+        # 'A smaller W' / 'Not W1' / 'Not W3' of 'had not said ... was W1. It had not said it was W3.': the rows were
+        # dropped with the list, and the lines set in the stretch it left took the room of other repairs
+        w0, w1, w2, w3, w4 = (word(978, j) for j in range(5))
+        rows = film()
+        rows[10].update(text=f"The {w2} had not said the {w0} was {w1}. It had not said it was {w3}. That is a "
+                             f"smaller {w4}.", device={"id": "bullet-checklist", "title": f"A smaller {w4}",
+                                                       "rows": [f"Not {w1}", f"Not {w3}"]})
+        self.assertIn("negation", [r for r, _ in self.wording_at(rows, 10)])
+        rec, _ = self.gate(rows, words_from=copy.deepcopy(rows))
+        self.assertNotEqual(rec["result"], "STOPPED", rec.get("left"))
+        self.assertTrue([r for r in rows if M._dev_text(r.get("device") or {}) == f"A smaller {w4}"])
+        self.assertFalse([r for r in rows if (r.get("device") or {}).get("id") == "bullet-checklist"])
+        self.assertFalse([x for x in self.find(rows)[0] if x["rule"] in M._W_RULES])
 
     def test_a_whole_chapter_heading_is_read_only_against_what_it_was_made_from(self):
         # the chapter shows section 1's whole title, which another section's title goes on from: it was read as cut
