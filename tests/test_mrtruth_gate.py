@@ -337,6 +337,199 @@ class Phrases(unittest.TestCase):
         p = M._spoken_phrase("promptly at the hour of sunrise and walked", 32, "They said the herd left")
         self.assertTrue(M._phrase_ok(p, "promptly at the hour of sunrise and walked", "They said the herd left"), p)
 
+    # 2026-10-13: the picker kept dropping a negation, one side of "X or Y", the condition of an "if", and ended on a
+    # verb, an adjective or a comparison whose rest followed (made-up words, real function words)
+    def test_a_negator_opens_a_phrase_and_none_starts_right_after_one(self):
+        w0, w1 = word(60, 0), word(60, 1)
+        line_ = f"The {w0} was not {w1} in origin."
+        self.assertEqual(M._spoken_phrase(line_, 21), f"Not {w1} in origin")          # was '{W1} in origin'
+        self.assertTrue(M._phrase_ok(f"Not {w1} in origin", line_))
+        self.assertFalse(M._phrase_ok(f"{w1.title()} in origin", line_))
+        line2 = f"The {w0} was therefore not about {w1} or {word(60, 2)}."
+        self.assertTrue(M._phrase_ok(f"Not about {w1} or {word(60, 2)}", line2))
+        self.assertFalse(M._phrase_ok(f"{w1.title()} or {word(60, 2)}", line2))
+
+    def test_never_one_side_of_an_alternative_nor_the_tail_of_a_condition(self):
+        w1, w2 = word(61, 0), word(61, 1)
+        line_ = f"They dated it to a fourth or fifth century {w1}."
+        self.assertEqual(M._spoken_phrase(line_, 32), f"Fourth or fifth century {w1}")
+        self.assertFalse(M._spoken_phrase(line_, 21).lower().startswith("fifth"))
+        self.assertEqual(M._spoken_phrase(f"If you left, the {w1} ended.", 32), f"If you left, the {w1} ended")  # whole
+        self.assertNotIn(M._spoken_phrase(f"If you left, the {w1} ended.", 21), ("You left", "If you left"))
+        self.assertEqual(M._spoken_phrase(f"But one {w1}, he said. He read the {w2} twice.", 32), f"He read the {w2} twice")
+
+    def test_never_ends_on_a_verb_an_adjective_or_a_comparison_whose_rest_follows(self):
+        w1, w2 = word(62, 0), word(62, 1)
+        cases = [(f"A {w1} designed to keep it away from {w2}.", "keep"),
+                 (f"It was lighter than {w1} and heavier than {w2}.", "heavier"),
+                 (f"You could act on what this {w1} said.", "act"),
+                 (f"He came from late antique {w2.title()} with it.", "antique")]
+        for line_, bad in cases:
+            p = M._spoken_phrase(line_, 32)
+            self.assertFalse(p.lower().endswith(bad), (line_, p))
+            self.assertTrue(not p or M._phrase_ok(p, line_), (line_, p))
+
+    def test_a_phrase_that_starts_inside_a_noun_phrase_stays_one(self):
+        w0, w1, w2 = word(63, 0), word(63, 1), word(63, 2)
+        self.assertFalse(M._phrase_ok(f"{w1.title()} and keep its {w2}", f"Several {w0} date to this {w1} and keep its {w2}."))
+        self.assertFalse(M._phrase_ok(f"{w1.title()} once in a letter", f"He mentioned the {w1} once in a letter."))
+        self.assertFalse(M._phrase_ok(f"{w1.title()} formal", f"The {w0} used the {w1} formal almost in passing."))
+        self.assertTrue(M._phrase_ok(f"{w1.title()} of the {w2}", f"He read the {w1} of the {w2}."))
+
+    def test_the_gate_reads_good_lines_the_way_the_picker_does(self):
+        w0, w1, w2, C = word(64, 0), word(64, 1), word(64, 2), word(64, 3).title()
+        self.assertTrue(M._phrase_ok(f"Neither {w1} nor openly {w2}", f"Cargo that was neither {w1} nor openly {w2} sat in a hold."))
+        self.assertTrue(M._phrase_ok(f"A {C} {w1}", f"He read a {C} {w1} that predated the {w2}."))   # before its 'that'
+        self.assertTrue(M._phrase_ok(w2.title(), f"The {w0} used the word {w2} almost in passing."))   # one word
+
+    def test_a_plural_possessive_keeps_its_mark(self):
+        w0, w1, C = word(65, 0), word(65, 1), word(65, 2).title() + "s"
+        line = f"They came with the {C}' full {w1} intact and left."
+        self.assertEqual(M._spoken_phrase(line, 30, "", ""), f"{C}' full {w1} intact")
+        self.assertEqual([w for w, _, _ in M._toks(f"he said '{w0}s' and the {C}' {w1}")],
+                         ["he", "said", f"{w0}s", "and", "the", f"{C}'", w1])   # a closing quote is no possessive
+
+
+class Titles(unittest.TestCase):
+    """2026-10-13: the opening's kicker and a chapter heading are never cut inside a name or before their noun."""
+
+    def test_the_kicker_is_a_whole_part_of_the_setting_that_cuts_no_name(self):
+        A, B, C, P = (word(906, j).title() for j in range(4))
+        d = {"setting": f"The {A} {B} {C}, {P}; far away", "period": "",
+             "keyEntities": [{"name": f"The {A} {B} {C}", "kind": "organisation"}], "sections": [{"title": TITLE}]}
+        self.assertEqual(M._kicker(d, TITLE), P)                       # 'The A B C' is 27 letters: never 'The A B'
+        self.assertEqual(M._auto_title(d, "")["kicker"], P)
+        self.assertEqual(M._auto_title(DOSSIER, "")["kicker"], M._whole_words(DOSSIER["setting"].split(",")[0], 24))
+        self.assertEqual(M._kicker({"setting": "", "period": ""}, TITLE), "The story")
+
+    def test_a_long_heading_keeps_its_head_noun(self):
+        A, B = word(907, 0).title(), word(907, 1).title()
+        self.assertEqual(M._short_heading(f"The {A}'s Narrower Role", 25), f"{A}'s Narrower Role")  # the article first
+        self.assertEqual(M._short_heading(f"The {A}'s Narrow Hidden Role", 25), f"The {A}'s Narrow Role")  # a modifier
+        self.assertEqual(M._short_heading(f"The {A}'s Narrow Hidden Role", 20), f"The {A}'s Role")
+        self.assertEqual(M._short_heading(f"The {A} {B} Narrow Role Within", 25, [f"{A} {B}"]), f"{A} {B}")   # a title
+        self.assertEqual(M._short_heading("Quiet", 25), "Quiet")
+
+
+class Wording(Base):
+    """2026-10-13: every text reads as the narrator meant it - no negation dropped, nothing cut off, names whole, the
+    numbers and alternatives said - found, repaired from the words said there, and a second gate passes unchanged.
+    Made-up words with real function words, on the clean film's own text shots (the spoken line on shot 5, the typed
+    caption on shot 29, the opening title)."""
+
+    def find_with(self, rows, dossier=DOSSIER):
+        write_job(self.job, rows)
+        ctx = M._gate_ctx(self.job, rows, dossier, cues_of(rows), "", (self.job / "script.txt").read_text(), mode="report")
+        return M._gate_find(rows, ctx)
+
+    def spoken(self, text, words, k=5, tid="shadow-up"):
+        rows = film()
+        rows[k]["text"] = text
+        rows[k]["device"] = {"id": tid, FIELD[tid]: words}
+        rows[k]["filler"] = True
+        return rows
+
+    def repaired(self, rows, k, rule, shown, expected, dossier=DOSSIER):
+        heard = copy.deepcopy(rows)                                   # the voice: as the film was planned
+        found = self.find_with(rows, dossier)
+        self.assertTrue(any(x["rule"] == rule and x["k"] == k for x in found),
+                        [(x["rule"], x["k"], x["what"]) for x in found])
+        rec, _ = self.gate(rows, words_from=heard, dossier=dossier)
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        self.assertTrue(any(x["rule"] == rule for x in rec["repairs"]), rec["repairs"])
+        self.assertEqual(shown(rows), expected)
+        before = copy.deepcopy(rows)
+        again, _ = self.gate(rows, words_from=heard, dossier=dossier)
+        self.assertEqual(again["result"], "PASS", again["first_look"])
+        self.assertEqual(rows, before)
+
+    def line_on(self, text):
+        return lambda rows: next((r.get("device") or {}).get("line") for r in rows if r["text"] == text)
+
+    def test_a_dropped_negation_is_restored(self):
+        w0, w1 = word(70, 0), word(70, 1)
+        text = f"The {w0} was not {w1} in origin."
+        self.repaired(self.spoken(text, f"{w1.title()} in origin"), 5, "negation", self.line_on(text), f"Not {w1} in origin")
+
+    def test_a_verb_before_its_object_is_completed(self):
+        w1 = word(71, 0)
+        text = f"We keep the {w1}."
+        self.repaired(self.spoken(text, "We keep"), 5, "cut off", self.line_on(text), f"We keep the {w1}")
+
+    def test_a_condition_stopped_at_its_comma_gets_its_clause(self):
+        w1 = word(72, 0)
+        text = f"If you left, the {w1} ended."
+        self.repaired(self.spoken(text, "If you left"), 5, "cut off", self.line_on(text), f"If you left, the {w1} ended")
+
+    def test_a_comparison_without_its_than_keeps_its_whole_part(self):
+        w0, w1, w2 = word(73, 0), word(73, 1), word(73, 2)
+        text = f"The {w0} was lighter than {w1} and heavier than {w2}."
+        self.repaired(self.spoken(text, f"Lighter than {w1} and heavier"), 5, "cut off", self.line_on(text),
+                      f"Lighter than {w1}")
+
+    def test_a_phrase_that_starts_inside_a_noun_phrase_is_made_whole(self):
+        w1 = word(74, 0)
+        text = f"He mentioned the {w1} once in a letter."
+        self.repaired(self.spoken(text, f"{w1.title()} once in a letter"), 5, "cut off", self.line_on(text),
+                      f"He mentioned the {w1} once")
+
+    def test_a_dropped_alternative_is_restored(self):
+        w1 = word(75, 0)
+        text = f"They dated the {w1} to the fourth or fifth century."
+        self.repaired(self.spoken(text, "Fifth century"), 5, "detail", self.line_on(text), "Fourth or fifth century")
+
+    def test_a_lost_capital_is_given_back(self):
+        w0, C = word(76, 0), word(76, 1).title()
+        text = f"The {w0} was deliberate {C}."
+        self.repaired(self.spoken(text, f"Deliberate {C.lower()}"), 5, "names", self.line_on(text), f"Deliberate {C}")
+
+    def named(self):
+        A, B, C, P = (word(906, j).title() for j in range(4))
+        return A, B, C, dict(DOSSIER, setting=f"The {A} {B} {C}, {P}",
+                             keyEntities=[{"name": f"The {A} {B} {C}", "kind": "organisation"}])
+
+    def test_a_name_cut_in_the_opening_kicker_is_made_whole(self):
+        A, B, C, d = self.named()
+        rows = film()
+        rows[0]["device"] = dict(M._auto_title(d, ""), kicker=f"The {A} {B}")       # 'The A B C' cut at whole words
+        self.repaired(rows, 0, "names", lambda rows: rows[0]["device"]["kicker"], d["setting"].split(", ")[1], dossier=d)
+
+    def test_a_name_cut_in_a_typed_caption_is_made_whole(self):
+        A, B, C, d = self.named()
+        rows = film()
+        rows[0]["device"] = M._auto_title(d, "")
+        text = f"The keeper ruled under the {A} {B} {C} for years."
+        rows[29]["text"] = text
+        rows[29]["typedCaption"] = {"lines": ["The Keeper Under", f"{B} {C} Rule"], "startFrame": M.TYPED_CAPTION_START_F}
+        cap = lambda rows: " ".join(next(r["typedCaption"]["lines"] for r in rows if r["text"] == text))
+        self.repaired(rows, 29, "names", cap, f"The Keeper Under {A} {B} {C} Rule", dossier=d)
+        lines = next(r["typedCaption"]["lines"] for r in rows if r["text"] == text)
+        self.assertTrue(all(len(x) <= M.TC_LINE_MAX for x in lines), lines)
+
+    def test_a_one_row_list_is_never_kept(self):
+        rows = film()
+        rows[24]["device"] = {"id": "bullet-checklist", "title": first(24, 2), "rows": [first(24, 2)]}
+        found = self.find_with(rows)
+        self.assertTrue(any(x["rule"] == "text" and "one row" in x["what"] and x["k"] == 24 for x in found), found)
+
+    def test_a_name_label_only_where_the_name_is_first_said_and_whole(self):
+        A, B = word(908, 0).title(), word(908, 1).title()
+        rows = film()
+        rows[3]["text"] = f"The keeper was {A} {B}, a scribe."
+        rows[30]["text"] = f"Later {B} left the hall."
+        for k in (3, 4, 30):
+            rows[k]["entities"] = [B]
+        rows[4]["text"] = f"{B} kept the books."
+        d = dict(DOSSIER, visualBrief={"people": [{"name": f"{A} {B}", "role": "a scribe"}]})
+        ctx = {"dossier": d}
+        self.assertEqual(M._name_label(rows, 3, ctx), {"headline": f"{A} {B}", "kicker": "a scribe"})
+        self.assertIsNone(M._name_label(rows, 30, ctx))                        # far from where he is first named
+        self.assertIsNone(M._name_label(rows, 4, ctx))                         # his surname alone, a shot later
+
+    def test_a_clean_film_has_no_wording_fault(self):
+        for rows in (film(), film(n=96)):
+            self.assertFalse([x for x in self.find_with(rows) if x["rule"] in M._W_RULES])
+
 
 class Frames(Base):
     def test_double_text_clears_the_beat_overlay(self):
@@ -476,7 +669,8 @@ class Words(Base):
             for k, r in enumerate(rows_):
                 if only and id(r) in only and r.get("filler") and (not bad or bad[0] is r):
                     bad[:1] = [r]
-                    said_no.append((id(r), r["device"]["id"]))
+                    said_no.append((id(r), r["device"]["id"], M._shown(r)))   # (a filler sync moves onto it
+                                                                              # keeps its flag now: a line of its own)
                     M._fall_back(rows_, k, r["device"]["id"], "names a person over a picture with no person in it")
             return real_fit(rows_, only=only, **kw)
         with mock.patch.object(M, "_fit_devices", fit):
@@ -754,6 +948,14 @@ class ReadBack(Base):
         (self.job / "mrtruth" / "gate.json").unlink()                 # no gate record: the label is a LOOK line
         lines = M.check(self.job)
         self.assertTrue(any(l.startswith("LOOK  shot 19: P04") for l in lines), lines)
+        sc[5]["device"] = {"id": "shadow-up", "line": f"{word(77, 1).title()} in origin"}      # a dropped negation
+        (self.job / "mrtruth" / "plan.json").write_text(json.dumps(sc))
+        shots = json.loads((self.job / "mrtruth" / "shots.json").read_text())
+        shots[5]["text"] = f"The {word(77, 0)} was not {word(77, 1)} in origin."
+        (self.job / "mrtruth" / "shots.json").write_text(json.dumps(shots))
+        (self.job / "subs.srt").unlink()                              # a pod film's read-back: the shots' own lines
+        lines = M.check(self.job)
+        self.assertTrue(any(l.startswith("FAIL  negation shot 5") for l in lines), lines)
 
 
 class Wiring(unittest.TestCase):
@@ -768,6 +970,12 @@ class Wiring(unittest.TestCase):
         self.assertLess(plan.index("_reuse_guard(engine, job, rows, dossier)"), plan.index("gate(engine, job, rows"))
         self.assertLess(plan.index("sc_list = scenes("), plan.index("_gate_scenes(engine, job, rows, sc_list)"))
         self.assertLess(plan.index("_gate_scenes(engine, job, rows, sc_list)"), plan.index('_dump(work / "plan.json"'))
+
+    def test_the_wording_rules_come_right_after_text(self):
+        k = M.GATE_RULES.index("text")
+        self.assertEqual(M.GATE_RULES[k + 1:k + 5], ("cut off", "negation", "names", "detail"))
+        self.assertTrue(all(r in M._GATE_HINT for r in ("cut off", "negation", "names", "detail")))
+        self.assertTrue(all(r in M._W_RULES for r in ("cut off", "negation", "names", "detail")))
 
     def test_cut_off_words(self):
         vocab = {"the", "kalomin", "lisotuvan", "ripesov", "tasks", "tarsinist"}

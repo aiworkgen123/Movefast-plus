@@ -1562,17 +1562,16 @@ def _fall_back(rows: list, i: int, tid: str, why: str = "") -> None:
 
 def _auto_title(dossier: dict, title: str = ""):
     """The opening title when the planner's did not fit (T-11): the first section's title, else the film's own, two
-    lines of P03 that share no word; the kicker is the setting's first part, else the period, cut at whole words (the
-    pod film opened on "The Vatican Apostolic Li", 2026-10-10). None when no title fits."""
+    lines of P03 that share no word; the kicker is a whole part of the setting, else of the period, that cuts no name
+    (_kicker; the pod film opened on "The Vatican Apostolic Li", 2026-10-10, and the cut at whole words that followed
+    still opened all six test films on "The Vatican Apostolic", 2026-10-13). None when no title fits."""
     dossier = dossier or {}
     sections = dossier.get("sections") or []
     cand = [str(s.get("title") or "") for s in sections[:1]] + [re.sub(r"\s*[—:|(-].*$", "", str(title or ""))]
     head = next((h for h in cand if h and len(h) <= 26 and p03_fits(h)), "")
     if not head:
         return None
-    kick = _whole_words(str(dossier.get("setting") or dossier.get("period") or "").split(",")[0], 24) or "The story"
-    if set(_content(kick)) & set(_content(head)):
-        kick = _whole_words(str(dossier.get("period") or ""), 24) or "The story"
+    kick = _kicker(dossier, head)
     hw = next((w for w in head.split() if w.lower() not in JOINING), head.split()[0])
     return {"id": "P03", "kicker": kick, "headline": head, "highlightWords": [re.sub(r"[^\w'-]", "", hw) or hw]}
 
@@ -1652,9 +1651,9 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
             if not (ok(head, "headline") and ok(right, "lines")) or head.lower() == right.lower():
                 return None
             return {"id": tid, "left": head, "right": right}
-        if tid == "bullet-checklist":
-            good = [x for x in lines if ok(x, "lines")][:3]
-            if not ok(head, "headline") or not good:
+        if tid == "bullet-checklist":           # never a one-row list (2026-10-13: "A narrow role / Not a theologian"
+            good = [x for x in lines if ok(x, "lines")][:3]     # kept when its other row was not said): down its chain
+            if not ok(head, "headline") or len(good) < 2:
                 return None
             return {"id": tid, "title": head, "rows": good}
         if tid == "P17":
@@ -1877,12 +1876,14 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
         if k < 0 or not head or chapters >= CHAPTERS_MAX:
             continue
-        if len(head) > 25:                       # cut at a whole word (owner 2026-10-10), never inside one
-            cut = _whole_words(" ".join(head.split()[:4]), 25)
-            if not cut:
-                engine.log(f"      chapter '{head}' skipped (its first word is longer than a heading)")
+        src = ""
+        if len(head) > 25:                       # never cut inside a word (owner 2026-10-10) nor before its head noun
+            used = {_norm((x.get("device") or {}).get("heading")) for x in rows if (x.get("device") or {}).get("id") == "chapter-plate"}
+            cut = _short_heading(head, 25, [s_.get("title") for s_ in (dossier.get("sections") or [])[1:]], used)
+            if not cut:                          # (2026-10-13: "The Translator's Narrow Role" was "The Translator's
+                engine.log(f"      chapter '{head}' skipped (no whole heading of it fits)")      # Narrow")
                 continue
-            head = cut
+            src, head = head, cut
         head = " ".join(w.lower() if j and w.lower() in ("of", "the", "a", "an", "and", "in", "on", "to", "for", "at", "by")
                         else w for j, w in enumerate(head.split()))
         r = rows[k]
@@ -1892,6 +1893,8 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         if r.get("device"):
             engine.log(f"      template {r['device']['id']} at {r['startMs'] / 1000:.0f}s gives way to chapter '{head}'")
         r["device"], r["section_turn"] = {"id": "chapter-plate", "heading": head}, True
+        if src:
+            r["_cut_from"] = src                 # what it was made from: the gate reads a heading cut from it
         _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
         chapters, last = chapters + 1, r["startMs"]
         engine.log(f"      chapter '{head}' at {r['startMs'] / 1000:.0f}s")
@@ -1902,7 +1905,7 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
                     key=lambda k: abs(rows[k]["startMs"] - f * total_s * 1000), default=None)
             if k is None:
                 break
-            head = _whole_words(" ".join(titles[min(chapters, len(titles) - 1)].split()[:4]), 25) or "The Turn"
+            head = _short_heading(titles[min(chapters, len(titles) - 1)], 25) or "The Turn"   # whole (2026-10-13)
             rows[k]["device"], rows[k]["section_turn"] = {"id": "chapter-plate", "heading": head}, True
             _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
             chapters += 1
@@ -5894,8 +5897,9 @@ THE RULES (the channel owner's; follow them exactly)
 - What deserves one, in this order: (1) a person introduced - name and role; (2) a place or institution with a date;
   (3) a key event or decision; (4) a key document or object; (5) a striking fact or number. Never filler, a question,
   or a dramatic line without a fact in it.
-- SUMMARISE, do not transcribe: the narrator says "He was a translator working under Vatican Apostolic Library
-  authorization" -> the caption is "A Translator Under" / "Apostolic Library Authority".
+- SUMMARISE, do not transcribe: the narrator says "She was hired in 1921 as a copyist at the Port Records Office in
+  Valletta" -> the caption is "Copyist, Port Records Office" / "Valletta, 1921". Keep every name whole, every "not",
+  "never" or "no", and both sides of an "X or Y" the line states.
 - 1 or 2 lines, 2-8 words a line, at most {line} characters a line, at most {total} characters in all. Title Case,
   no full stop. "Thing - Place, Date" with a spaced hyphen when it fits ("Removed from the Bible -" /
   "Council of Laodicea, 364 CE"). Dates as "364 CE", "1980s", "c. 1100".
@@ -7752,6 +7756,8 @@ def _chapter_to(rows: list, k: int, j: int) -> None:
     y["device"], y["section_turn"], y["_seated"] = x["device"], True, True
     x["device"] = None
     x.pop("section_turn", None)
+    if x.get("_cut_from"):                          # what its heading was made from goes with it
+        y["_cut_from"] = x.pop("_cut_from")
 
 
 def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
@@ -7763,8 +7769,8 @@ def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
     template only where it passes the same checks there (_can, _fit_devices), else nothing moves. Once per overlay:
     the first sync that sees it (row["_seated"])."""
     moved = 0
-    keys = ("device", "companions", "type_shade")
-    for k, r in enumerate(rows):
+    keys = ("device", "companions", "type_shade", "filler")   # a filler stays one where it moves (2026-10-13: the
+    for k, r in enumerate(rows):                              # flag stayed on the shot it left)
         t = tid(r)
         if not t or k == 0 or r.get("_seated") or r.get("section_turn") or t in ("P03", "chapter-plate"):
             continue
@@ -7795,6 +7801,8 @@ def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
             r["device"], n0 = None, len(DEV_DROPS)
             if _can(rows, j, dev["id"], ignore_len=True):
                 x["device"] = dict(dev)
+                if had.get("filler"):
+                    x["filler"] = True
                 _fit_devices(rows, only={id(x)})
             if (x.get("device") or {}).get("id") != dev["id"]:       # refused there: everything stays where it was
                 del DEV_DROPS[n0:]
@@ -8610,9 +8618,10 @@ _CLAUSE_MARK = re.compile(r"[.,;:!?…—–][\"'”’)\]]*$")
 _PREPOSITIONS = {"of", "in", "at", "on", "for", "to", "from", "by", "with", "into", "onto", "about", "after", "before",
                  "through", "without", "within", "between", "against", "toward", "towards", "during", "upon", "under",
                  "over", "beyond", "across", "along", "among", "around", "behind", "near", "since", "until", "like"}
+# (2026-10-13) never right after a negator ("Christian in origin" of "was not Christian in origin": _wording's negation
+# rule) or a subordinator ("You left" of "If you left": the condition is its clause's), so neither is here any more
 _START_AFTER = {"the", "a", "an", "this", "these", "those", "that", "his", "her", "its", "their", "our", "my", "your",
-                "and", "but", "or", "so", "then", "yet", "nor", "not", "which", "who", "when", "where", "while",
-                "because", "if", "although", "though", "whether", "as"} | _PREPOSITIONS
+                "and", "but", "or", "so", "then", "yet", "which", "who", "where", "as"} | (_PREPOSITIONS - {"since", "without"})
 # a phrase ending on a noun must not hold the start of another clause it then leaves unfinished ("Maps the navy" of
 # "maps the navy trusted", "what this letter" of "what this letter said"); a phrase may open on the words of a noun
 # phrase whatever comes before it ("read the first pages" -> "The first pages"), or right after a verb
@@ -8671,65 +8680,609 @@ def _nounish(word: str, mid: bool = True) -> bool:
     return True
 
 
-def _phrase_ok(phrase: str, line: str, before: str = "", after: str = "") -> bool:
-    """A phrase taken from the narration reads whole (A2): it ends where a clause ends, or on a noun (_nounish) whose
-    own words end there (the next word - in `after`, the line after, when the phrase closes the line - opens something
-    else); and it starts where a clause starts (`before`: the line before, when the phrase opens the line) or right
-    after a word that leaves nothing unfinished (_START_AFTER). Words that are not the line's own (a writer's
-    paraphrase): True."""
-    ws, p = _words_of(line), [w.lower() for w, _ in _words_of(phrase)]
-    low = [w.lower() for w, _ in ws]
-    for i in range(len(ws) - len(p) + 1) if p else ():
-        if low[i:i + len(p)] != p:
+# ── the words on screen read as the narrator meant them (2026-10-13). One checker, _wording, for every text the film
+# shows: the phrase picker's own windows (_spoken_phrases), the gate's check (_gate_find) and the gate's repair
+# (_fix_wording) all ask it, so none sets what another takes back. The six test films (census 2026-10-13) showed 55
+# broken texts of 169, 39 of them made by code: a negation dropped ("Christian in origin" of "was not Christian in
+# origin"), an alternative dropped ("Fifth century" of "a fourth or fifth century Latin text"), a name cut ("The
+# Vatican Apostolic"), a phrase cut before its object, its noun or its "than" ("Notation designed to keep", "Late
+# antique", "Lighter than breath and heavier"), a sentence's tail that starts inside a noun phrase ("Period and
+# preserve content") and a condition alone ("If you left"). Four rules, each its own name in the gate (GATE_RULES):
+#   negation - a not / never / no / nor / neither / without (or an outside / except / instead / rather) earlier in the
+#              text's clause, no verb between, none in the text: the text says the opposite of the narration
+#   cut off  - the text starts or stops where its clause goes on (_start_fault, _end_fault), a lone condition, a
+#              "neither" without its "nor"; a title or heading that stops on an adjective or is cut from a longer one
+#   names    - a name of the film cut ("The Vatican Apostolic", "Apostolic Library Authority"), a name the narration
+#              goes on with, a word the narration capitalises shown in lower case ("Deliberate latin")
+#   detail   - a number the narration does not say near it (digits and words both ways), one side of "X or Y" kept
+_NEGATORS = {"not", "never", "no", "nor", "neither", "without", "cannot", "none", "nobody", "nothing", "nowhere"}
+_POLAR = {"outside", "except", "excluding", "instead", "rather"}      # they turn what follows round, as "not" does
+_SUBORD = {"if", "when", "because", "although", "though", "unless", "while", "since", "whether", "whereas"}
+_COORD = {"and", "or", "but", "nor", "yet", "so"}
+_MODALS = {"to", "can", "could", "would", "should", "will", "shall", "may", "might", "must", "cannot"}
+_AUX = {"is", "was", "were", "are", "be", "been", "being", "am", "has", "had", "have", "do", "does", "did"}
+_SUBJ = {"i", "he", "she", "it", "we", "they", "you"}
+_OBJ = {"it", "them", "him", "her", "us", "me", "itself", "themselves", "himself", "herself"}
+_DETS = _NP_OPEN | {"that", "any"}
+_RELATIVE = {"that", "which", "who", "whom", "whose", "where", "when", "what", "how", "why"}
+_ADVERBS = {"once", "twice", "immediately", "never", "not", "also", "still", "only", "even", "just", "already", "almost",
+            "often", "soon", "then", "there", "here", "now", "again", "ever", "therefore", "however", "thus", "rather",
+            "quite", "perhaps", "instead", "together", "away", "back", "too", "very"}
+_SAY_VERBS = {"say", "says", "said", "claim", "claims", "claimed", "state", "states", "stated", "mean", "means", "meant",
+        "think", "thinks", "thought", "believe", "believes", "believed", "know", "knows", "knew", "decide", "decides",
+        "decided", "show", "shows", "showed", "suggest", "suggests", "suggested", "find", "finds", "found", "write",
+        "writes", "wrote", "note", "notes", "noted", "argue", "argues", "argued", "conclude", "concluded", "insisted"}
+_TITLE_WORDS = {"father", "fr", "pope", "saint", "st", "sister", "brother", "dr", "mr", "mrs", "sir", "king", "queen",
+                "bishop", "cardinal", "rev", "reverend", "lord", "lady"}
+_OF_NOUNS = {"kind", "sort", "type", "part", "number", "group", "lot", "piece", "series", "couple", "pair", "bit", "rest",
+             "variety", "range", "amount", "handful", "majority", "minority", "member", "members"}
+_COMPARATIVES = {"more", "less", "fewer", "better", "worse", "other", "rather", "greater"}
+_PP_OPEN = (_PREPOSITIONS | {"outside", "inside", "beside", "beneath", "throughout"}) - {"of", "to", "than", "like", "since"}
+_SAYS = {"says", "describes", "writes", "means", "thinks", "believes", "knows", "decides", "suggests", "argues", "insists",
+         "explains", "mentions", "reads", "tells"}      # a verb, right after a noun ("the text says [about")
+_BASE_VERBS = set("""act add allow appear ask assess assist become begin believe bring call carry change choose close come
+concern consider consult continue copy decide deny describe die distinguish do echo end engage enter establish explain
+feel find follow give go hear help hold identify imply include indicate keep know lead leave let live look make manage
+matter mean mention move name need occupy open persist perceive place preserve produce publish read reach receive recall
+reconstruct remain represent request require respond restrict return review run say see seem sit speak specify start
+state stay submit suggest take teach tell think transfer transform turn understand use want work write""".split())
+_NOUNS_TOO = {"act", "change", "close", "concern", "copy", "echo", "end", "help", "hold", "lead", "look", "matter", "move",
+              "name", "need", "place", "request", "return", "review", "run", "start", "state", "turn", "use", "want",
+              "work", "call", "record", "end", "rest"}
+_ADJ_WORDS = {"antique", "late", "early", "ancient", "old", "older", "new", "newer", "certain", "particular", "specific",
+              "general", "several", "different", "separate", "same", "whole", "entire", "hard", "narrow", "broad",
+              "standard", "direct", "immediate", "deliberate", "literal", "formal", "final", "true", "false", "real",
+              "prior", "previous", "recent", "private", "public", "internal", "external", "heavier", "lighter", "wider",
+              "eastern", "western", "northern", "southern", "strange", "secret", "hidden"}
+_ADJ_SUFFIX = ("ic", "ical", "al", "ous", "ive", "ful", "less", "able", "ible", "ary")
+_NOT_ADJ = {"interval", "ritual", "material", "manual", "journal", "signal", "animal", "festival", "capital", "hospital",
+            "approval", "arrival", "survival", "proposal", "denial", "trial", "official", "terminal", "original",
+            "editorial", "tribunal", "cathedral", "mineral", "funeral", "principal", "individual", "rival", "renewal",
+            "removal", "refusal", "burial", "scandal", "portal", "metal", "medal", "detail", "library", "dictionary",
+            "secretary", "sanctuary", "commentary", "glossary", "summary", "boundary", "anniversary", "adversary",
+            "missionary", "itinerary", "obituary", "mortuary", "cemetery", "testimonial", "periodical", "chemical",
+            "relative", "detective", "narrative", "archive", "native", "executive", "representative", "objective",
+            "motive", "initiative", "alternative", "perspective", "directive", "cable", "table", "fable", "bible",
+            "parable", "vegetable", "variable", "constable", "syllable", "disciple", "seminary", "reliquary",
+            "apothecary", "rosary", "notary", "visionary", "dignitary", "silversmith", "colonial"}
+_NUM_WORDS = {w: n for n, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                         "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+_NUM_WORDS.update({"thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+                   "hundred": 100, "thousand": 1000})
+_ORD_WORDS = {w: n + 1 for n, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth eleventh "
+                                              "twelfth thirteenth fourteenth fifteenth sixteenth seventeenth eighteenth "
+                                              "nineteenth twentieth".split())}
+_ORD_WORDS.update({"thirtieth": 30, "fortieth": 40, "fiftieth": 50, "hundredth": 100})
+_HEADING_VERBS = {"remember", "forget", "open", "turn", "end", "return", "begin", "speak", "hide", "reveal", "fall", "rise",
+                  "wait", "close", "survive", "vanish", "appear", "remain", "change", "wake", "sleep", "die", "live",
+                  "burn", "break", "keep", "hold", "find", "lose", "know", "see", "hear", "tell", "say", "read",
+                  "write", "matter", "count", "last", "stay", "go", "come", "leave", "watch", "listen", "answer",
+                  "follow", "wake", "grow", "fade", "move", "arrive", "decide", "refuse", "deny", "explain"}
+# a verb or a particle a clause may end on before its adjunct (a preposition other than "to" or "of", a subordinator)
+_DONE_WORDS = {"says", "said", "made", "done", "became", "become", "began", "seemed", "away", "back", "out", "up", "down",
+               "off", "together", "once", "twice", "again"}
+_W_RULES = ("names", "negation", "detail", "cut off")        # the wording rules, in the order their repairs are tried
+_END_NEVER = JOINING | _PREPOSITIONS | _COORD | _SUBORD | _MODALS | _AUX | _DETS | _SUBJ | _PHRASE_NO_END | {
+    "than", "as", "not", "never", "no", "very", "whose", "which", "who", "whom"}
+
+
+def _lw(w) -> str:
+    return str(w or "").lower().replace("’", "'").replace("‘", "'").strip("'\"“”")
+
+
+def _toks(line: str) -> list:
+    """[(word, a clause ends after it, a sentence ends after it)] for narration or a text on screen: _words_of with the
+    sentence ends; a spaced hyphen or a slash marks a clause ("Undated Latin Text - / 4th-5th Century CE"); "Fr." does
+    not end a sentence."""
+    out, quoted = [], False
+    for tok in re.sub(r"\s*([—–])\s*", r" \1 ", str(line or "")).split():
+        w = tok.strip(".,;:!?…—–-\"'“”‘’()[]/")
+        closes = bool(w) and bool(re.search(r"['’][.,;:!?…\"”)\]]*$", tok))
+        if re.match(r"[\"“(\[]*['‘]", tok):
+            quoted = not closes                      # a single quote opened: its closing mark is no possessive
+        elif closes and quoted:
+            quoted = False
+        elif closes and re.search(r"[sS]['’][.,;:!?…\"”)\]]*$", tok):    # a plural's possessive keeps its mark
+            w += tok.rstrip(".,;:!?…\"”)]")[-1]     # ("the Watchers' full nature", never "the Watchers full nature")
+        if not w:
+            if out and re.search(r"[.,;:!?…—–/-]", tok):
+                out[-1] = (out[-1][0], True, out[-1][2] or bool(re.search(r"[.!?…]", tok)))
             continue
-        return _whole_at(ws, i, i + len(p), _words_of(before), _words_of(after))
-    return True
+        ce, se = bool(_CLAUSE_MARK.search(tok)), bool(re.search(r"[.!?…][\"'”’)\]]*$", tok))
+        if se and _lw(w) in _TITLE_WORDS | {"jr", "sr", "vol"} and tok.endswith("."):
+            ce = se = False
+        out.append((w, ce, se))
+    return out
 
 
-def _whole_at(ws: list, i: int, j: int, b: list, a: list) -> bool:
-    """Words ws[i:j] of a line read whole (see _phrase_ok); b, a: the words of the lines before and after."""
-    low = [w.lower() for w, _ in ws]
-    inner = any(low[x] in _CLAUSE_WORDS for x in range(i + 1, j)) or any(
-        (low[x] in _NP_OPEN or low[x] in ("he", "she", "they", "we", "i", "you", "it")) and _nounish(ws[x - 1][0], x - 1 > 0)
-        and low[x - 1] not in _START_AFTER for x in range(i + 1, j))
-    nxt = ws[j][0] if j < len(ws) else (a[0][0] if a else "")
-    cont = nxt.lower() in _CLAUSE_WORDS or bool(nxt) and _nounish(nxt, True) and not nxt[:1].isupper() \
-        and nxt.lower() not in _VERB_FORMS                                                              # "a painted
-    end = ws[j - 1][1] or _nounish(ws[j - 1][0], j - 1 > 0) and not inner and not cont                  # [wall]"
-    pw, pend = (ws[i - 1][0], ws[i - 1][1]) if i else ((b[-1][0], b[-1][1]) if b else ("", True))
-    p = pw.lower()
-    lead = low[i] in _NOT_NOUN or low[i].endswith("ly") and low[i] not in _LY_NOUNS    # "Therefore...", "Immediately..."
-    start = pend or not lead and (p in _START_AFTER or p in _VERBISH or p.endswith("ed") and p not in _ED_NOUNS
-                                  or low[i] in _NP_OPEN or (ws[i][0][:1].isupper() and i > 0) or ws[i][0].isdigit())
-    return bool(end and start)
+def _negator(w) -> bool:
+    w = _lw(w)
+    return w in _NEGATORS or w.endswith("n't")
 
 
-def _spoken_phrase(text: str, limit: int, before: str = "", after: str = "") -> str:
-    """The strongest run of words the narrator says in this line, at most `limit` characters, that reads whole
-    (_whole_at): a whole short clause first; else the window with the most meaning words, one that ends where its
-    clause ends before one that ends on a noun. Its words are, by construction, the narration's own. "" when no
-    window of this line reads whole."""
-    meaning = lambda w: (lambda c: bool(c) and c[0] not in _SYNC_STOP and len(c[0]) >= 3)(_content(w))
-    ws, b, a = _words_of(text), _words_of(before), _words_of(after)
-    opens = lambda i: (ws[i - 1][1] if i else (not b or b[-1][1]))      # a clause starts at word i
-    best, key = "", None
-    for i in range(len(ws)):
-        for j in range(i + 2, len(ws) + 1):
-            if any(ws[x][1] for x in range(i, j - 1)):              # never across a clause's end
+def _num(w):
+    """The value of a number or an ordinal ("4th", "fourth", "30", "thirty", "1980s"), else None."""
+    w = _lw(w).strip(".,;:")
+    m = re.fullmatch(r"(\d+)(?:st|nd|rd|th|s|'s)?", w)
+    if m:
+        return int(m.group(1))
+    return _NUM_WORDS.get(w, _ORD_WORDS.get(w))
+
+
+def _nums(text: str) -> list:
+    """[(value, word)] for every number and ordinal of a text ("4th-5th" is two)."""
+    return [(v, t) for t in re.findall(r"[A-Za-z]+|\d+(?:st|nd|rd|th|s)?", str(text or "")) for v in [_num(t)]
+            if v is not None]
+
+
+def _said_numbers(text: str) -> set:
+    """Every number the narration says, compounds too ("twenty-one" 21, "three hundred" 300)."""
+    seq = _nums(text)
+    out = {v for v, _ in seq}
+    for (a, wa), (b, wb) in zip(seq, seq[1:]):
+        if a >= 20 and a % 10 == 0 and 0 < b < 10 and wa.isalpha():
+            out.add(a + b)
+        if _lw(wb) in ("hundred", "thousand"):
+            out.add(a * b)
+    return out
+
+
+def _adjish(w) -> bool:
+    w = _lw(w)
+    return w in _ADJ_WORDS or len(w) > 5 and w.endswith(_ADJ_SUFFIX) and w not in _NOT_ADJ
+
+
+def _verbish(w, prev: str = "") -> bool:
+    """A word that is a verb where it stands: a listed form, a past in -ed, a base verb after "to", a modal or its
+    subject."""
+    w, prev = _lw(w), _lw(prev)
+    if w in _VERB_FORMS or w in _AUX:
+        return True
+    if len(w) > 4 and w.endswith("ed") and w not in _ED_NOUNS:
+        return True
+    return (prev in _MODALS or prev in _SUBJ) and (w in _BASE_VERBS or w.endswith("s") and w[:-1] in _BASE_VERBS)
+
+
+def _kind(ws: list, x: int) -> str:
+    """What sort of word ws[x] is, so the two sides of an "or" or an "and" can be seen as the same kind: num, cmp (a
+    comparison before "than"), func (a joining or function word), name, adv, verb, adj or noun."""
+    w, lw = ws[x][0], _lw(ws[x][0])
+    if _num(lw) is not None:
+        return "num"
+    if x + 1 < len(ws) and _lw(ws[x + 1][0]) == "than":
+        return "cmp"
+    if lw in _DETS or lw in _SUBJ or lw in _OBJ or lw in JOINING or lw in _PREPOSITIONS or lw in _COORD or lw in _AUX:
+        return "func"
+    if w[:1].isupper() and x and not ws[x - 1][2]:
+        return "name"
+    if lw.endswith("ly") and lw not in _LY_NOUNS or lw in _ADVERBS:
+        return "adv"
+    if _verbish(lw, ws[x - 1][0] if x else ""):
+        return "verb"
+    return "adj" if _adjish(lw) else "noun"
+
+
+def _takes(nl: str, nxt: str) -> bool:
+    """The word after a verb goes on with it (its object or complement): anything but a joining word, a preposition
+    other than "to", a subordinator, a clause word or an adverb."""
+    if nl in ("to", "that") or nl in _DETS or nl in _OBJ or nxt[:1].isupper() or _num(nl) is not None:
+        return True
+    return not (nl in JOINING or nl in _PREPOSITIONS or nl in _COORD or nl in _SUBORD or nl in _RELATIVE
+                or nl in _ADVERBS or nl in ("as", "than") or nl in _AUX or nl in _MODALS
+                or nl.endswith("ly") and nl not in _LY_NOUNS)
+
+
+def _noun_next(nl: str, ing: bool = False) -> bool:
+    """The word after an adjective (or an -ing word) is the noun it belongs to (for an -ing word, also its object)."""
+    if nl in _DETS or nl in _OBJ:
+        return ing
+    if nl in JOINING or nl in _PREPOSITIONS or nl in _COORD or nl in _SUBORD or nl in _RELATIVE or nl in _MODALS \
+            or nl in _AUX or nl in _ADVERBS or nl in ("as", "than") or nl in _VERB_FORMS:
+        return False
+    return not (nl.endswith("ly") and nl not in _LY_NOUNS or len(nl) > 4 and nl.endswith("ed") and nl not in _ED_NOUNS)
+
+
+def _clause_end(ws: list, x: int) -> int:
+    """The index just after the clause that word x is in."""
+    return next((y + 1 for y in range(x, len(ws)) if ws[y][1]), len(ws))
+
+
+def _span(ws: list, a: int, b: int, tail: bool = False) -> str:
+    """Words ws[a:b] as a text, a clause mark inside them kept as a comma (a full stop where a sentence ends); with
+    `tail` the last word's mark too."""
+    return " ".join(w + ("." if se else "," if ce else "") if x < b - 1 or tail else w
+                    for x, (w, ce, se) in enumerate(ws[a:b], a))
+
+
+def _np_break(ws: list, i: int, j: int) -> str:
+    """The word where words ws[i:j], which start inside a noun phrase (right after a determiner, a possessive or a
+    preposition), run out of it: a verb, "and" + a verb, an adverb or "by" as their second word, a clause word, a name
+    straight after a common noun that opens the next clause ("Closest parallel Restivo [identified]"), an adjective
+    after its noun at the end ("Word pastoral"); "" when they stay a noun phrase."""
+    low = [_lw(w) for w, _, _ in ws]
+    for x in range(i + 1, j):
+        w, lw, pl = ws[x][0], low[x], low[x - 1]
+        if lw in _RELATIVE or lw in _VERB_FORMS or lw in _AUX or lw in _SAYS:
+            return w
+        if pl == "and" and (lw in _BASE_VERBS - _NOUNS_TOO or _verbish(lw)):
+            return w
+        if x == i + 1 and (lw in _ADVERBS or lw == "by" or _negator(lw) or lw.endswith("ly") and lw not in _LY_NOUNS):
+            return w
+        if len(lw) > 4 and lw.endswith("ed") and lw not in _ED_NOUNS and _kind(ws, x - 1) == "noun":
+            return w
+        if w[:1].isupper() and ws[x - 1][0][:1].islower() and _kind(ws, x - 1) == "noun" and x + 1 < len(ws) \
+                and _verbish(ws[x + 1][0], lw):
+            return w
+    if j - i >= 2 and _adjish(low[j - 1]) and _kind(ws, j - 2) == "noun":
+        return ws[j - 1][0]
+    return ""
+
+
+def _start_fault(ws: list, i: int, j: int):
+    """(rule, what, hint) when words ws[i:j] start where no phrase may: right after a subordinator, a "that" a verb
+    takes or a relative word whose verb they open with, right after the "or" of an alternative of the same kind,
+    inside a noun phrase they then run out of, or mid-clause after a word that leaves something unfinished; None when
+    they start well. (A negator right before them is the negation rule's.)"""
+    if not i or ws[i - 1][1]:
+        return None
+    low = lambda x: _lw(ws[x][0]) if 0 <= x < len(ws) else ""
+    span = lambda a, b: _span(ws, a, b)
+    pw, first = low(i - 1), low(i)
+    cstart = max([y + 1 for y in range(i) if ws[y][1]] or [0])
+    if _negator(pw):
+        return None
+    if first == "not" and (pw in ("do", "does", "did") or pw in _MODALS):     # "Not say the cycle" of "does not say":
+        return "cut off", f"opens on the 'not' of '{ws[i - 1][0]} not'", span(cstart, j)    # its verb needs them both
+    if pw in _SUBORD:
+        return "cut off", f"drops the '{ws[i - 1][0]}' it depends on", span(i - 1, _clause_end(ws, j - 1))
+    if pw in ("that", "which", "who") and (first in _VERB_FORMS or first in _AUX or _verbish(first)):
+        return "cut off", f"starts inside a '{pw}' clause, on its verb", span(cstart, j)
+    if pw == "that" and i >= 2 and (_verbish(low(i - 2), low(i - 3)) or low(i - 2) in _SAY_VERBS):
+        return "cut off", f"drops the '{ws[i - 2][0]} that' it depends on", span(cstart, j)
+    if pw in ("or", "nor", "and", "to") and i >= 2 and _kind(ws, i - 2) == _kind(ws, i) != "func" \
+            and (pw != "to" or _kind(ws, i) == "num"):
+        return ("detail" if _kind(ws, i) == "num" else "cut off"), \
+            f"drops '{ws[i - 2][0]} {ws[i - 1][0]}' before it", span(i - 2, j)
+    if (pw in _DETS or pw in _PREPOSITIONS or pw.endswith("'s")) and first not in _NP_OPEN \
+            and not (pw in ("the", "a", "an") and (i == 1 or ws[i - 2][1]) and ws[j - 1][1]):
+        bad = _np_break(ws, i, j)                    # (a whole clause less only its article is a phrase too)
+        if bad:
+            return "cut off", f"starts inside '{ws[i - 1][0]} {ws[i][0]}' and runs on to '{bad}'", span(cstart, j)
+    if first in _NP_OPEN and j - i > 2 and not ws[j - 1][1]:     # its own determiner, stopped mid-clause: a noun
+        bad = _np_break(ws, i + 1, j)                            # phrase still ("The phrase not suitable [for")
+        if bad:
+            return "cut off", f"runs out of its noun phrase at '{bad}' and stops mid-clause", span(cstart, j)
+    lead = first in _NOT_NOUN and not _negator(first) and first not in _PP_OPEN \
+        or first.endswith("ly") and first not in _LY_NOUNS
+    ok = not lead and (pw in _START_AFTER or pw in _VERBISH or pw.endswith("ed") and pw not in _ED_NOUNS
+                       or pw in _DETS or pw.endswith("'s") or pw.endswith("ing") and len(pw) > 4    # a noun phrase,
+                       or first in _NP_OPEN or ws[i][0][:1].isupper() or _num(first) is not None   # a verb's object,
+                       or first in _PP_OPEN)                                                         # a phrase of place
+    if _negator(first) and (pw in _VERB_FORMS or pw in _AUX or pw in _MODALS or pw in _ADVERBS
+                            or pw.endswith("ly") and pw not in _LY_NOUNS):
+        ok = True                                    # "was therefore [not about color]"
+    return None if ok else ("cut off", f"starts mid-clause, after '{ws[i - 1][0]}'", span(cstart, j))
+
+
+def _end_fault(ws: list, i: int, j: int):
+    """(what, hint) when words ws[i:j] stop before their clause is done: on a joining word, on a verb before what it
+    acts on, on a comparison before its "than", on an adjective or an -ing word before its noun, on a name that opens
+    the next clause, before the "of" its noun needs, inside "X or Y" of one kind, or on a word the next one goes on
+    with; None when they stop well. (A name the narration goes on with is the names rule's.)"""
+    low = lambda x: _lw(ws[x][0]) if 0 <= x < len(ws) else ""
+    w, ce, _ = ws[j - 1]
+    lw, prev = low(j - 1), low(j - 2)
+    hint = _span(ws, i, _clause_end(ws, j - 1))
+    if ce:
+        return None
+    if lw in _END_NEVER:
+        return f"stops on '{w}'", hint
+    mid = j - 1 > 0 and not ws[j - 2][2]
+    nxt = ws[j][0] if j < len(ws) else ""
+    nl = _lw(nxt)
+    if not _nounish(w, mid) and not (nl in (_PREPOSITIONS - {"to", "of"}) | _SUBORD and (    # "What Enoch says [about",
+            lw in _VERB_FORMS or lw in _DONE_WORDS)):                                          # "to keep it away [from"
+        return f"stops mid-phrase on '{w}'", hint                     # (never a participle: "prayer received [at")
+    if j >= len(ws):
+        return None
+    if nl == "than" and (lw.endswith("er") or lw in _COMPARATIVES):
+        return f"a comparison without its 'than' ('{w} than ...')", hint
+    if _verbish(lw, prev):
+        if (prev in _MODALS or prev in _SUBJ and lw in _BASE_VERBS) and nl not in _COORD | _SUBORD:
+            return f"stops on the verb '{w}' before what follows it ('{nxt}')", hint
+        if _takes(nl, nxt):
+            return f"stops on the verb '{w}' before its object ('{nxt}')", hint
+    if lw.endswith("s") and not lw.endswith(("ss", "'s", "us", "is")) and nl in _DETS - {"no"} and j - 2 >= i \
+            and _kind(ws, j - 2) == "noun" and not ws[j - 2][0][:1].isupper():
+        return f"stops on the verb '{w}' before its object ('{nxt}')", hint      # "First sign marks [the"
+    after_next = ws[j + 1][0] if j + 1 < len(ws) else ""
+    if _kind(ws, j - 1) in ("noun", "name") and (nl in _NP_OPEN or nl in _SUBJ or nxt[:1].isupper()) \
+            and (_verbish(after_next, nl) or j + 2 < len(ws) and not ws[j][1] and _verbish(ws[j + 2][0], after_next)
+                 and _lw(after_next) not in JOINING):
+        return f"the clause about it goes on ('{w} {nxt} ...')", hint            # "sources [the Church recognized]"
+    if w[:1].isupper() and j - 1 > i and ws[j - 2][0][:1].islower() and _kind(ws, j - 2) == "noun" and _verbish(nl, lw):
+        return f"'{w}' opens the next clause ('{w} {nxt}')", _span(ws, i, j - 1)
+    if (_adjish(lw) or lw.endswith("ing") and len(lw) > 4) and _noun_next(nl, lw.endswith("ing")):
+        return f"stops on '{w}' before the word it belongs to ('{nxt}')", hint
+    if nl == "of" and (lw in _OF_NOUNS or low(i) in _PREPOSITIONS
+                       or _negator(low(i)) and i + 1 < j and low(i + 1) in _PREPOSITIONS):
+        return f"stops before its 'of' ('{w} of ...')", hint
+    if nl in ("or", "and", "nor") and j + 1 < len(ws) and _kind(ws, j - 1) == _kind(ws, j + 1) != "func":
+        return f"stops inside '{w} {nxt} {ws[j + 1][0]}'", hint
+    plural_subject = len(lw) > 3 and lw.endswith("s") and not lw.endswith(("ss", "'s", "us", "is")) and not nl.endswith("s") \
+        and nl.isalpha()                             # "holdings date [to]": a plural noun and its verb
+    if nl in _CLAUSE_WORDS and not (nl in ("that", "which", "who", "whom", "whose", "where") and _kind(ws, j - 1) == "noun"
+                                    and not lw.endswith("ing")):      # a noun before its relative ends a phrase
+        return f"the phrase goes on ('{w} {nxt}')", hint
+    if not (w[:1].isupper() and mid) and not plural_subject and _nounish(nxt, True) and not nxt[:1].isupper() \
+            and nl not in _VERB_FORMS and nl not in _AUX:
+        return f"the phrase goes on ('{w} {nxt}')", hint
+    if any(low(x) in _CLAUSE_WORDS for x in range(i + 1, j)) or any(
+            (low(x) in _NP_OPEN or low(x) in _SUBJ) and _nounish(ws[x - 1][0], x - 1 > 0 and not ws[x - 2][2])
+            and low(x - 1) not in _START_AFTER and not _verbish(ws[x - 1][0], low(x - 2)) for x in range(i + 1, j)):
+        return "holds the start of another clause it leaves unfinished", hint
+    return None
+
+
+def _located_faults(ws: list, i: int, j: int) -> list:
+    """The negation and cut-off faults of a statement shown as words ws[i:j] of the narration ws."""
+    out = []
+    low = [_lw(w) for w, _, _ in ws[i:j]]
+    span = lambda a, b: _span(ws, a, b)
+    if i and _negator(ws[i - 1][0]) and not ws[i - 1][1]:
+        out.append(("negation", f"drops the '{ws[i - 1][0]}' said right before it", span(i - 1, j)))
+    elif not any(_negator(w) or w in _POLAR for w in low):
+        for q in range(i - 1, -1, -1):
+            if ws[q][1]:
+                break                                # the clause before: not this one's
+            if _negator(ws[q][0]) or _lw(ws[q][0]) in _POLAR:
+                if not any(_verbish(ws[x][0], ws[x - 1][0]) for x in range(q + 1, i)):
+                    out.append(("negation", f"drops '{ws[q][0]}' (said: '{span(q, j)}')", span(q, j)))
                 break
-            phrase = " ".join(w for w, _ in ws[i:j])
+    if "neither" in low and "nor" not in low:
+        out.append(("cut off", "has 'neither' without its 'nor'", span(i, _clause_end(ws, j - 1))))
+    if j - i < 2:
+        return out                                   # one word: a label, read on its own
+    s = _start_fault(ws, i, j)
+    if s:
+        out.append(s)
+    e = _end_fault(ws, i, j)
+    if e:
+        out.append(("cut off",) + tuple(e))
+    send = next((y + 1 for y in range(j - 1, len(ws)) if ws[y][2]), len(ws))
+    if low[0] in _SUBORD and not ws[j - 1][2]:
+        out.append(("cut off", f"'{ws[i][0]} ...' alone: the clause it depends on is not shown", span(i, send)))
+    elif low[0] in _COORD and ws[j - 1][1] and not ws[j - 1][2] and (j - i <= 3 or not any(
+            _verbish(ws[x][0], ws[x - 1][0]) for x in range(i + 1, j))):
+        out.append(("cut off", "stops at a comma with no clause of its own", span(i, send)))
+    return out
+
+
+def _name_faults(shown: list, ws: list, loc, names) -> list:
+    """The names faults of a text (shown: its own words), in the narration ws (loc: where it is said, or None)."""
+    out = []
+    sw = [w for w, _, _ in shown]
+    sl = [_lw(w) for w in sw]
+    nls = []
+    for n in names or ():
+        nw = [x for x in str(n).split() if x]
+        if nw and nw[0].lower() == "the":
+            nw = nw[1:]
+        if len(nw) >= 2:
+            nls.append(nw)
+    whole = set()
+    for nw in nls:
+        lw_ = [_lw(x) for x in nw]
+        for a in range(len(sl) - len(lw_) + 1):
+            if sl[a:a + len(lw_)] == lw_:
+                whole.update(range(a, a + len(lw_)))
+    for nw in nls:                                   # a part of a known name, two words or more, without the rest
+        lw_ = [_lw(x) for x in nw]
+        core = next((x for x, w in enumerate(lw_) if w not in _TITLE_WORDS), 0)
+        best = None
+        for a in range(len(lw_)):
+            for b in range(len(lw_), a + 1, -1):
+                if (a, b) in ((0, len(lw_)), (core, len(lw_))) or all(w in _TITLE_WORDS for w in lw_[a:b]):
+                    continue                         # the whole name, or the name less its title
+                part = lw_[a:b]
+                p = next((p for p in range(len(sl) - len(part) + 1) if sl[p:p + len(part)] == part
+                          and not set(range(p, p + len(part))) <= whole), None)
+                if p is not None and (best is None or b - a > best[1] - best[0]):
+                    best = (a, b, p)
+        if best:
+            a, b, p = best
+            out.append(("names", f"'{' '.join(sw[p:p + b - a])}' is part of the name '{' '.join(nw)}'",
+                        " ".join(sw[:p] + nw + sw[p + b - a:])))
+    cap_mid = lambda x: ws[x][0][:1].isupper() and x > 0 and not ws[x - 1][2]
+    if loc:
+        i, j = loc
+        if j < len(ws) and not ws[j - 1][1] and ws[j - 1][0][:1].isupper() and ws[j][0][:1].isupper() \
+                and _lw(ws[j - 1][0]) not in _DETS | JOINING and not any("names" == f[0] for f in out):
+            e = j
+            while e < len(ws) and ws[e][0][:1].isupper() and not ws[e - 1][1]:
+                e += 1
+            out.append(("names", f"the name goes on ('{' '.join(w for w, _, _ in ws[j - 1:e])}')",
+                        " ".join(sw + [w for w, _, _ in ws[j:e]])))
+        if i and j - i >= 2 and not ws[i - 1][1] and cap_mid(i - 1) and ws[i][0][:1].isupper() \
+                and ws[i + 1][0][:1].isupper() and _lw(ws[i - 1][0]) not in _TITLE_WORDS and not any("names" == f[0] for f in out):
+            s = i - 1
+            while s > 0 and not ws[s - 1][1] and ws[s - 1][0][:1].isupper() and _lw(ws[s - 1][0]) not in _DETS:
+                s -= 1
+            out.append(("names", f"the name starts before it ('{' '.join(w for w, _, _ in ws[s:i + 1])}')",
+                        " ".join([w for w, _, _ in ws[s:i]] + sw)))
+    caps = {_lw(w) for x, (w, _, _) in enumerate(ws) if cap_mid(x)}
+    lows = {_lw(w) for w, _, _ in ws if w[:1].islower()}
+    named = {_lw(x) for nw in nls for x in nw if x[:1].isupper()} - JOINING - _TITLE_WORDS
+    fixed, lost = list(sw), []
+    for x, w in enumerate(sw):
+        if not x or not w[:1].islower() or not w.replace("'", "").replace("’", "").replace("-", "").isalpha():
+            continue
+        lw = _lw(w)
+        said_cap = loc is not None and loc[0] + x < len(ws) and cap_mid(loc[0] + x)
+        if said_cap or lw not in lows and (lw in caps or lw in named):
+            fixed[x] = w[:1].upper() + w[1:]
+            lost.append(w)
+    if lost:
+        out.append(("names", f"{', '.join(repr(w) for w in lost)} lost its capital", " ".join(fixed)))
+    return out
+
+
+def _detail_faults(shown: list, ws: list, loc) -> list:
+    """The detail faults of a text: a number (under 1000: years have their own overlay) the narration does not say
+    there, and one side of a said "X or Y" (numbers) kept without the other."""
+    out = []
+    span = lambda a, b: _span(ws, a, b)
+    sw = [w for w, _, _ in shown]
+    named = {x for x, w in enumerate(sw[:-1]) if w.isdigit() and sw[x + 1][:1].isupper()
+             and _lw(sw[x + 1]) not in ("ce", "bce", "ad", "bc")}             # "1 Enoch 15": a number in a name
+    tn = _nums(" ".join(w for x, w in enumerate(sw) if x not in named))
+    if not tn:
+        return out
+    have = _said_numbers(" ".join(w for w, _, _ in ws))
+    for v, w in tn:
+        if v < 1000 and v not in have:
+            out.append(("detail", f"'{w}' is not a number said here", ""))
+    tv = {v for v, _ in tn}
+    for x in range(1, len(ws) - 1):
+        if _lw(ws[x][0]) not in ("or", "to", "nor") or ws[x - 1][1]:
+            continue
+        a, b = _num(ws[x - 1][0]), _num(ws[x + 1][0])
+        if a is None or b is None or a == b or (a in tv) == (b in tv):
+            continue
+        hint = span(x - 1, loc[1]) if loc and loc[0] == x + 1 else span(loc[0], x + 2) if loc and loc[1] == x else ""
+        out.append(("detail", f"keeps one side of '{ws[x - 1][0]} {ws[x][0]} {ws[x + 1][0]}'", hint))
+    return out
+
+
+def _title_faults(shown: list, longer=()) -> list:
+    """A title or heading cut: it stops on an adjective after a possessive or a determiner (no head noun: "The
+    Translator's Narrow"), or it is a longer string of the plan's cut at a whole word ("The Vatican Apostolic" of
+    the setting's "The Vatican Apostolic Library")."""
+    out = []
+    sl = [_lw(w) for w, _, _ in shown]
+    if len(sl) > 1 and _adjish(sl[-1]) and (sl[-2].endswith("'s") or sl[-2] in _DETS):
+        out.append(("cut off", f"stops on '{shown[-1][0]}' without its noun", ""))
+    for s in longer or ():
+        lt = [_lw(w) for w, _, _ in _toks(s)]
+        if len(lt) > len(sl) and lt[:len(sl)] == sl and lt[len(sl)] not in JOINING | _PREPOSITIONS:
+            out.append(("cut off", f"is cut from '{' '.join(str(s).split())}'", str(s)))
+            break
+    return out
+
+
+def _faults(shown: list, ws: list, loc, kind: str = "statement", names=(), longer=()) -> list:
+    out = []
+    if kind == "statement" and loc:
+        out += _located_faults(ws, *loc)
+    out += _name_faults(shown, ws, loc, names)
+    if kind in ("statement", "label"):
+        out += _detail_faults(shown, ws, loc)
+    if kind == "title":
+        out += _title_faults(shown, longer)
+    seen, uniq = set(), []
+    for f in out:
+        if (f[0], f[1]) not in seen:
+            seen.add((f[0], f[1]))
+            uniq.append(f)
+    return uniq
+
+
+def _wording(text: str, said: str, kind: str = "statement", names=(), longer=()) -> list:
+    """[(rule, what, hint)] for a text on screen against the narration said around it (with its punctuation and
+    capitals): rule one of _W_RULES; hint the words as said that would make it whole ("" when there are none). kind:
+    statement (a line of the narration: shadow-up, top-title, P02, P05, P09, bullet rows, two-photo-zoom, a typed
+    caption's lines joined), label (a name or a caption of the picture: P04, corner-label, framed-card, P05's picture
+    label, a beat overlay) or title (P03, a chapter heading). The text is looked for in the narration, word for word;
+    where it is said more than once the place it reads best counts, and a text that is not said word for word (a
+    writer's summary) is judged on its names and numbers only. names: the film's names of two words or more
+    (_film_names); longer: the plan's longer strings a title may be cut from. [] when it reads as the narrator meant."""
+    shown = _toks(text)
+    if not shown:
+        return []
+    ws = _toks(said)
+    p = [_lw(w) for w, _, _ in shown]
+    low = [_lw(w) for w, _, _ in ws]
+    runs = [_faults(shown, ws, (i, i + len(p)), kind, names, longer)
+            for i in range(len(ws) - len(p) + 1) if low[i:i + len(p)] == p]
+    return min(runs or [_faults(shown, ws, None, kind, names, longer)], key=len)
+
+
+def _phrase_ok(phrase: str, line: str, before: str = "", after: str = "") -> bool:
+    """A phrase taken from the narration reads whole (A2), as _wording reads a statement (2026-10-13: the same rules as
+    the picker's, so the gate never refuses the picker's own phrase - nor good ones: "Neither clearly doctrinal nor
+    openly heretical", "A Latin manuscript" before its "that", "Pastoral"): it starts where its clause or a noun phrase
+    starts (a negator may open it; never right after a negator, a subordinator or one side of "X or Y"), it ends where
+    its clause ends or on a noun the next word does not go on with, it keeps the negation and the names the narration
+    has around it. before / after: the lines before and after. Words that are not the line's own (a writer's
+    paraphrase): True."""
+    b, ln = _toks(before), _toks(line)
+    ws = b + ln + _toks(after)
+    shown = _toks(phrase)
+    p = [_lw(w) for w, _, _ in shown]
+    low = [_lw(w) for w, _, _ in ws]
+    hits = [i for i in range(len(b), len(b) + len(ln) - len(p) + 1) if p and low[i:i + len(p)] == p]
+    return not hits or any(not _faults(shown, ws, (i, i + len(p))) for i in hits)
+
+
+def _whole_at(ws: list, i: int, j: int, names=()) -> bool:
+    """Words ws[i:j] of the narration ws (_toks) read whole where they are said, as a statement (see _phrase_ok)."""
+    return not _faults(ws[i:j], ws, (i, j), "statement", names)
+
+
+def _spoken_phrases(text: str, limit: int, before: str = "", after: str = "", names=()) -> list:
+    """The runs of words the narrator says in this line, at most `limit` characters, that read whole (_wording, with
+    the lines before and after as their narration), best first: a whole clause (never a comma after one to three
+    words: "But one section,", "If you left,"), then the most meaning words, one that ends where its clause ends
+    before one that ends on a noun, the longer. A negator may open one ("Not about color"). Their words are, by
+    construction, the narration's own."""
+    meaning = lambda w: (lambda c: bool(c) and c[0] not in _SYNC_STOP and len(c[0]) >= 3)(_content(w))
+    b, ln = _toks(before), _toks(text)
+    ws, off = b + ln + _toks(after), len(b)
+    out = []
+    for i in range(off, off + len(ln)):
+        neg = _negator(ws[i][0])
+        sentence = not i or ws[i - 1][2]
+        for j in range(i + 2, off + len(ln) + 1):
+            marks = [x for x in range(i, j - 1) if ws[x][1]]
+            if any(ws[x][2] for x in marks) or marks and not sentence:      # never across a clause's end - a whole
+                break                                                       # short sentence across its comma only
+            phrase = _span(ws, i, j)
             if len(phrase) > limit:
                 break
+            if marks and not ws[j - 1][2]:
+                continue
+            if j < len(ws) and ws[j - 1][0][:1].isupper() and j - 1 > 0 and not ws[j - 2][2] and not ws[j - 1][1] \
+                    and ws[j][0][:1].islower() and _nounish(ws[j][0], True) and _lw(ws[j][0]) not in _VERB_FORMS:
+                continue                                                    # never "Then the Christian [doctrine]"
             first, last = _content(ws[i][0]), _content(ws[j - 1][0])
-            if not first or not last or first[0] in _PHRASE_NO_END or last[0] in _PHRASE_NO_END \
-                    or not meaning(ws[i][0]) and not ws[i][0][:1].isupper() or not meaning(ws[j - 1][0]):
+            if not first or not last or first[0] in _PHRASE_NO_END and not neg or last[0] in _PHRASE_NO_END \
+                    or not meaning(ws[i][0]) and not ws[i][0][:1].isupper() and not neg or not meaning(ws[j - 1][0]):
                 continue
-            if not _whole_at(ws, i, j, b, a):
+            if not _whole_at(ws, i, j, names):
                 continue
-            k = (opens(i) and ws[j - 1][1], sum(1 for w, _ in ws[i:j] if meaning(w)), ws[j - 1][1], len(phrase))
-            if key is None or k > key:
-                best, key = phrase, k
-    return best[:1].upper() + best[1:] if best else ""
+            whole = (not i or ws[i - 1][1]) and ws[j - 1][1] and (ws[j - 1][2] or j - i > 3)
+            out.append(((whole, sum(1 for w, _, _ in ws[i:j] if meaning(w)), ws[j - 1][1], len(phrase)), phrase))
+    out.sort(key=lambda x: x[0], reverse=True)       # (stable: the earliest of equals first, as before)
+    return list(dict.fromkeys(p[:1].upper() + p[1:] for _, p in out))
+
+
+def _spoken_phrase(text: str, limit: int, before: str = "", after: str = "", ok=None, names=()) -> str:
+    """The best of _spoken_phrases that `ok` (the gate's own reading of the shot, when given) also passes; "" when no
+    window of this line reads whole."""
+    return next((p for p in _spoken_phrases(text, limit, before, after, names) if ok is None or ok(p)), "")
+
+
+def _context(rows: list, k: int) -> tuple:
+    """(before, after): the lines of the two shots before shot k and the two after it, a line said twice at a re-cut's
+    edge once - the narration a phrase of shot k's own line is read in."""
+    def join(xs):
+        out = []
+        for x in xs:
+            t = str(x.get("text") or "")
+            if t and (not out or t != out[-1]) and t != rows[k].get("text"):
+                out.append(t)
+        return " ".join(out)
+    return join(rows[max(0, k - 2):k]), join(rows[k + 1:k + 3])
 
 
 # the words a filler may be set in (A3, owner 2026-10-08: every group used, none over its share - the pod film had 19
@@ -8786,13 +9339,15 @@ def _repeats_words(rows: list, text: str, at: int) -> bool:
     return False
 
 
-def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = None) -> set:
+def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = None, ok=None) -> set:
     """The guarantee under fill_gaps: any stretch still longer than OVERLAY_MAX_GAP_S gets a line of the narration
     of a free shot in its middle - words that are said there by definition, a phrase that reads whole (_spoken_phrase),
     in the text template whose group has the most room (spoken line, running title, editorial card; never one over its
     cap). Such a shot is marked row["filler"]: the first to go when the gate finds too much text. `skip`: (id(row),
     template) pairs the fit step took back before (the gate's quiet repair), never tried again; `gaps`: only these
-    stretches (default: every one)."""
+    stretches (default: every one); `ok(k, template, phrase)`: the gate's own reading of the shot (_wording against
+    its subtitles), when given. The phrase is read with the two lines before and after it (_context), the best of
+    them that repeats no words on screen is set (2026-10-13)."""
     added, skip = set(), skip or set()
     for a, b in (_gaps(rows) if gaps is None else gaps):
         need = max(1, int((b - a) / 1000 // GAP_SPACING_S))
@@ -8805,12 +9360,11 @@ def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = No
                 if r.get("device") or any(id(x) in added and abs(x["startMs"] - r["startMs"]) < 8000 for x in rows):
                     continue
                 for tid, lim in _filler_order(rows):
-                    if (id(r), tid) in skip:
+                    if (id(r), tid) in skip or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid):
                         continue
-                    phrase = _spoken_phrase(r["text"], lim, rows[k - 1]["text"] if k else "",
-                                            rows[k + 1]["text"] if k + 1 < len(rows) else "")
-                    if not phrase or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid) \
-                            or _repeats_words(rows, phrase, r["startMs"]):
+                    phrase = next((p for p in _spoken_phrases(r["text"], lim, *_context(rows, k))
+                                   if (ok is None or ok(k, tid, p)) and not _repeats_words(rows, p, r["startMs"])), "")
+                    if not phrase:
                         continue
                     dev = build(tid, {"headline": phrase, "lines": []}, k)
                     if dev:
@@ -9581,7 +10135,8 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
                                  "anchor_switched": r.get("step") in ("anchor", "neighbour", "reused", "split-reused"),
                                  "hold": bool(r.get("hold")), "filler": bool(r.get("filler")),
                                  "cropped": bool((r.get("pick") or {}).get("crop_of")),
-                                 **({"md_moved": r["_md_moved"]} if r.get("_md_moved") is not None else {})} for r in rows])
+                                 **({"md_moved": r["_md_moved"]} if r.get("_md_moved") is not None else {}),
+                                 **({"cut_from": r["_cut_from"]} if r.get("_cut_from") else {})} for r in rows])
     _credits(job, rows)                          # with the plan, so a finish from it needs nothing else
     return sc_list
 
@@ -9659,7 +10214,8 @@ CARD_CHECK = (os.environ.get("MRTRUTH_CARD_CHECK") or "on").strip().lower() != "
 CARD_BATCH = int(os.environ.get("MRTRUTH_CARD_BATCH", "12"))   # labelled pictures one call looks at
 CARD_MAX = int(os.environ.get("MRTRUTH_CARD_MAX", "60"))       # pictures a film's card check may send (11 min: ~6-12)
 CARD_MEDIA = "HIGH"                     # a label is read against a sharp picture (1280 px), like a drawn stand-in
-GATE_RULES = ("opening", "text", "double text", "same words", "label", "groups", "words", "page", "map", "date",
+GATE_RULES = ("opening", "text", "cut off", "negation", "names", "detail", "double text", "same words", "label", "groups",
+              "words", "page", "map", "date",
               "too short", "quiet", "long", "quick run", "average", "pace", "era", "ai", "reuse", "no picture")
 GATE = {}                               # this film's gate: counts for gate.json and the log (reset by gate())
 # what a stop asks to change (C9: everything before the gate is saved, so a re-run stops in the same place)
@@ -9671,7 +10227,11 @@ _GATE_HINT = {"opening": "the film's title or the dossier's first section must f
               "era": "a picture of the shot's own time (the stored answers found something later)",
               "text": "the template's words in the overlay plan", "no picture": "more pictures for the film",
               "page": "the highlighted page's words (mrtruth/highlights.json), or MRTRUTH_HIGHLIGHT_PER_10MIN=0",
-              "map": "nothing: a map is repaired or dropped, never a stop", "date": "nothing: a date is repaired or dropped"}
+              "map": "nothing: a map is repaired or dropped, never a stop", "date": "nothing: a date is repaired or dropped",
+              "cut off": "nothing: a text cut off is completed from the narration, re-set, moved or dropped, never a stop",
+              "negation": "nothing: a text that drops its 'not' gets it back, is re-set, moved or dropped, never a stop",
+              "names": "nothing: a cut name is made whole (or a lost capital given back), never a stop",
+              "detail": "nothing: a number or an 'X or Y' the narration does not say is put right or the text goes"}
 CARD_RULES = """You check the LABELS of a documentary before it is drawn. Each numbered picture is one shot with a label
 set over it that tells the viewer what the picture shows. Answer ONE question about EACH picture on its own: does the
 picture show what its label names? Never compare the pictures.
@@ -9776,7 +10336,9 @@ def _words_near(words: list, ctx: dict, on: int, span: int = 12000):
 def _gate_ctx(job: Path, rows: list, dossier: dict, cues: list, title: str = "", script: str = "",
               mode: str = "gate") -> dict:
     """What the rules read: the words heard (with their times), the film's vocabulary (for words cut short), its caps
-    (the film's BUDGET while planning; computed from its length for a read-back), the card answers so far."""
+    (the film's BUDGET while planning; computed from its length for a read-back), the card answers so far; for the
+    wording rules (2026-10-13) the subtitles by time (their punctuation and capitals: _said_around) and the film's
+    names of two words or more (_film_names)."""
     heard = sorted(_heard(job, cues))
     vocab = set(re.findall(r"[a-z0-9']+", " ".join([script, json.dumps(dossier or {}, default=str), title]
                                                    + [str(r.get("text") or "") for r in rows]).lower().replace("-", " ")))
@@ -9786,6 +10348,7 @@ def _gate_ctx(job: Path, rows: list, dossier: dict, cues: list, title: str = "",
     return {"heard": heard, "heard_ms": [m for m, _ in heard], "vocab": vocab, "dossier": dossier or {}, "md_years": md_years,
             "sentences": _sentence_starts(cues) if cues else [],
             "title": title, "mode": mode, "cards": {}, "resynced": set(), "ask": mode == "gate",
+            "cues": sorted(cues or []), "names": _film_names(dossier, script), "script": script,
             "cap": BUDGET.get("cap", 0) if planning else round(AI_PER_MIN * minutes),
             "reuse_cap": BUDGET.get("reuse_cap", 0) if planning else round(REUSE_PER_MIN * minutes)}
 
@@ -9803,6 +10366,213 @@ def _hold_ok(rows: list, r: dict) -> bool:
     if holds.index(r) >= n:
         return False
     return not (r in early and early.index(r) >= max(1, n // 2))
+
+
+def _film_names(dossier: dict, script: str = "") -> list:
+    """The film's names of two words or more, as _wording's names rule reads them: the runs of capitalised words of the
+    dossier's key entities and of the visual brief's people ("Father Emilio Restivo", "Vatican Apostolic Library"; a
+    leading "The" and a possessive off), and every run of two or more capitalised words inside a sentence of the
+    script. Longest first."""
+    out = []
+
+    def runs(text, first_ok):
+        for sent in re.split(r"(?<=[.!?…])\s+", str(text or "")):
+            run, toks = [], sent.split()
+            for x, t in enumerate(toks + [""]):
+                w = re.sub(r"['’]s$", "", t.strip(".,;:!?\"'“”‘’()[]…"))
+                cap = bool(w) and w[:1].isupper() and (x > 0 or first_ok) and w.lower() != "i" \
+                    and w.replace("-", "").replace("'", "").isalpha()
+                if cap:
+                    run.append(w)
+                if not cap or re.search(r"[.,;:!?…)\]]$", t.rstrip("\"'”’")) or re.search(r"['’]s$", t.strip(".,;:!?\"'”’")):
+                    if run and run[0].lower() == "the":
+                        run = run[1:]
+                    if len(run) >= 2 and " ".join(run) not in out:
+                        out.append(" ".join(run))
+                    run = []
+    dossier = dossier or {}
+    for e in list(dossier.get("keyEntities") or []) + list((dossier.get("visualBrief") or {}).get("people") or []):
+        n = re.sub(r"['’]s\b", "", " ".join(str((e.get("name") if isinstance(e, dict) else e) or "").split()))
+        if all(w[:1].isupper() or w.lower() in JOINING for w in n.split()):     # a name: every word capitalised
+            runs(n, True)
+    runs(script, False)
+    return sorted(out, key=lambda n: -len(n.split()))
+
+
+def _setting_parts(dossier: dict) -> list:
+    """[(part, source)] of the dossier's setting, then its period, split at , ; ( ) and " in " - each part whole."""
+    out = []
+    for src in (str((dossier or {}).get("setting") or ""), str((dossier or {}).get("period") or "")):
+        for c in re.split(r"[,;()]|\s+in\s+", src):
+            c = " ".join(c.split()).strip(" -—–:.")
+            if c:
+                out.append((c, src))
+    return out
+
+
+def _kicker(dossier: dict, head: str = "", names=None) -> str:
+    """The opening title's kicker (2026-10-13: _whole_words cut "The Vatican Apostolic Library" to "The Vatican
+    Apostolic" in all six test films): a whole part of the dossier's setting, else of its period (_setting_parts) that
+    fits P03's kicker, shares no word with the headline and cuts no name - one that opens on a capital or a figure
+    first ("Rome", "4th-5th century"), else any; else a place of the dossier's that fits whole; else "The story"."""
+    dossier = dossier or {}
+    lim = LIBRARY["P03"][7]["kicker"]
+    names = _film_names(dossier) if names is None else names
+    hw = set(_content(head))
+    good = lambda c, src: (len(c) <= lim and bool(_content(c)) and not set(_content(c)) & hw
+                           and not _wording(c, src, kind="title", names=names))
+    parts = _setting_parts(dossier)
+    for c, src in parts:
+        if (c[:1].isupper() or c[:1].isdigit()) and good(c, src):
+            return c
+    for c, src in parts:
+        if good(c, src):
+            return c[:1].upper() + c[1:]
+    for e in dossier.get("keyEntities") or []:
+        n = " ".join(str((e or {}).get("name") or "").split()) if isinstance(e, dict) else ""
+        if n[:1].isupper() and str(e.get("kind") or "").lower() == "place" and good(n, n):
+            return n
+    return "The story"
+
+
+def _short_heading(head: str, limit: int = 25, titles=(), used=()) -> str:
+    """A chapter heading within `limit` letters that keeps its head noun (2026-10-13: "The Translator's Narrow Role"
+    was cut to "The Translator's Narrow"): whole; else without its leading article; else the dossier section title
+    (`titles`) closest to it that fits whole and is not on screen yet (`used`, _norm'ed); else with the modifiers
+    before its nouns dropped, nearest the noun first ("The Translator's Role"), then the part before its first
+    preposition. "" when nothing fits."""
+    h = " ".join(str(head or "").split()).strip().rstrip(".")
+    if not h or len(h) <= limit:
+        return h
+    ws = h.split()
+    if ws[0].lower() in ("the", "a", "an") and len(ws) > 2 and len(" ".join(ws[1:])) <= limit:
+        return " ".join(ws[1:])
+    hw = set(_content(h))
+    fit = [" ".join(str(t or "").split()).rstrip(".") for t in titles or ()]
+    fit = [t for t in fit if t and len(t) <= limit and _norm(t) not in set(used or ()) and _norm(t) != _norm(h)
+           and set(_content(t)) & hw]
+    if fit:
+        return max(fit, key=lambda t: len(set(_content(t)) & hw))
+    seg = lambda w: w.lower() in _PREPOSITIONS or w.lower() in ("and", "or")
+    verbs = _BASE_VERBS | _HEADING_VERBS
+    clause = any(x and (_verbish(v) or _lw(v).endswith("s") and not _lw(v).endswith(("ss", "'s"))
+                        and (_lw(v)[:-1] in verbs or _lw(v)[:-2] in verbs)) for x, v in enumerate(ws))
+    w = list(ws) if not clause else []               # a clause ("The Archive Remembers Everything") keeps its
+    while w and len(" ".join(w)) > limit:            # subject whole (below); a noun phrase its head noun
+        ends = [x for x in range(len(w)) if x == len(w) - 1 or seg(w[x + 1])]     # each noun phrase's last word
+        cut = None
+        for e in reversed(ends):                     # the modifier nearest a phrase's noun, the last phrase first
+            x = e - 1
+            while x >= 0 and not seg(w[x]) and (w[x].lower() in _DETS or w[x].lower().endswith(("'s", "’s"))):
+                x -= 1
+            if x >= 0 and not seg(w[x]):
+                cut = x
+                break
+        if cut is None:
+            break
+        del w[cut]
+    if w and len(" ".join(w)) > limit and len(w) > 2 and w[0].lower() in ("the", "a", "an"):
+        w = w[1:]
+    if w and len(" ".join(w)) <= limit:
+        return " ".join(w)
+    for m in range(len(ws) - 1, 0, -1) if clause else ():   # a clause: its longest start that ends on a noun or
+        c, last = " ".join(ws[:m]).rstrip(",:;"), _lw(ws[m - 1].rstrip(",:;"))      # a name (its subject whole)
+        if len(c) <= limit and last not in _END_NEVER and not _adjish(last) and not last.endswith("'s"):
+            return c
+    first = next((x for x in range(1, len(ws)) if ws[x].lower() in _PREPOSITIONS), len(ws))
+    return _short_heading(" ".join(ws[:first]), limit) if first < len(ws) else ""
+
+
+# the wording rules read every field of every template with words (2026-10-13), but the highlighted page (its own
+# "page" rule, out of this fix), the map and the date (their own rules) and the year cards and plates (P12, P14, P17)
+_WORDING = {"shadow-up": {"line": "statement"}, "top-title": {"line1": "statement", "line2": "statement"},
+            "P02": {"headline": "statement", "label": "statement"},
+            "P05": {"headline": "statement", "eyebrow": "statement", "supportLine": "statement", "imageLabel": "label"},
+            "P09": {"question": "statement", "sectionLabel": "statement"},
+            "bullet-checklist": {"title": "statement", "rows": "statement"},
+            "two-photo-zoom": {"left": "statement", "right": "statement"},
+            "P04": {"mainLine": "label", "supportLine": "label"}, "corner-label": {"label": "label", "kicker": "label"},
+            "framed-card": {"caption": "label"}, "P03": {"kicker": "title", "headline": "title"},
+            "chapter-plate": {"heading": "title"}}
+# the field that carries a template's words (the planner's "headline"), and the planner's key for each field (build())
+_MAIN = {"shadow-up": "line", "top-title": "line1", "P02": "headline", "P05": "headline", "P04": "mainLine",
+         "corner-label": "label", "framed-card": "caption", "P09": "question", "bullet-checklist": "title",
+         "two-photo-zoom": "left"}
+_PLAN_KEY = {"P04": {"mainLine": "headline", "supportLine": "kicker"}, "P02": {"headline": "headline", "label": "kicker"},
+             "P09": {"question": "headline", "sectionLabel": "kicker"},
+             "P05": {"headline": "headline", "eyebrow": "kicker", "supportLine": ("lines", 0), "imageLabel": ("lines", 1)},
+             "top-title": {"line1": "headline", "line2": ("lines", 0)}, "corner-label": {"label": "headline", "kicker": "kicker"},
+             "shadow-up": {"line": "headline"}, "framed-card": {"caption": "headline"},
+             "two-photo-zoom": {"left": "headline", "right": ("lines", 0)},
+             "bullet-checklist": {"title": "headline", "rows": "lines"}}
+# the owner's gap fillers (MR_TRUTH_RULES "Text on screen": "those were good text overlays, video can be busy")
+GAP_FILLER_TEMPLATES = ("shadow-up", "P02", "P04", "P05", "P09", "top-title", "corner-label", "bullet-checklist",
+                        "two-photo-zoom")
+
+
+def _wording_items(r: dict) -> list:
+    """[(kind, template, field, index, text)] - every block of words on a shot the wording rules read: each field of
+    its template (_WORDING), its typed caption with the lines joined (read line by line, "Not Suitable For" would
+    stop on "For"), its beat overlay when that is drawn (a picture and no template)."""
+    out = []
+    dev = r.get("device") or {}
+    for f, kind in _WORDING.get(dev.get("id"), {}).items():
+        v = dev.get(f)
+        for n, x in (enumerate(v) if isinstance(v, list) else [(None, v)]):
+            if str(x or "").strip():
+                out.append((kind, dev["id"], f, n, " ".join(str(x).split())))
+    lines = [str(x or "").strip() for x in (r.get("typedCaption") or {}).get("lines") or []]
+    if [x for x in lines if x]:
+        out.append(("statement", "typed caption", "lines", None, " ".join(x for x in lines if x)))
+    if r.get("overlay") and not dev and r.get("pick") and str(r["overlay"].get("text") or "").strip():
+        out.append(("label", "beat overlay", "text", None, " ".join(str(r["overlay"]["text"]).split())))
+    return out
+
+
+def _wording_longer(r: dict, tid: str, f: str, ctx: dict) -> list:
+    """The plan's longer strings a title may be cut from: for a chapter heading what it was cut from (row["_cut_from"])
+    and the dossier's section titles; for the opening's kicker the parts of the setting and the period."""
+    d = ctx.get("dossier") or {}
+    if tid == "chapter-plate":
+        return [x for x in [r.get("_cut_from")] + [s.get("title") for s in d.get("sections") or []] if x]
+    if tid == "P03" and f == "kicker":
+        return [c for c, _ in _setting_parts(d)]
+    return []
+
+
+def _said_around(rows: list, k: int, ctx: dict) -> str:
+    """The narration around the words on shot k as the subtitles carry it (their punctuation and capitals, each word
+    once - a shot's own line can repeat its neighbour's at a re-cut): from the start of the sentence before the shot's
+    first words to the end of the sentence after its last. Without subtitles (a pod film read back) the lines of
+    shots k-2..k+2, a line said twice once."""
+    r, cues = rows[k], ctx.get("cues") or []
+    if not cues:
+        out = []
+        for x in rows[max(0, k - 2):k + 3]:
+            t = str(x.get("text") or "")
+            if t and (not out or t != out[-1]):
+                out.append(t)
+        return " ".join(out)
+    memo = ctx.setdefault("said", {})
+    key = (r["startMs"], r["endMs"])
+    if key not in memo:
+        a, b = r["startMs"], r["endMs"]
+        idx = [n for n, c in enumerate(cues) if c[1] > a + 100 and c[0] < b - 100] or \
+            [min(range(len(cues)), key=lambda n: abs(cues[n][0] - a))]
+        ends = lambda n: bool(re.search(r"[.!?…][\"'”’)\]]*\s*$", str(cues[n][2])))
+        lo, hi = idx[0], idx[-1]
+        for step in range(2):                        # back to its sentence's start, then over the sentence before
+            if step and lo > 0:
+                lo -= 1
+            while lo > 0 and not ends(lo - 1) and idx[0] - lo < 12:
+                lo -= 1
+        for step in range(2):                        # on to its sentence's end, then over the sentence after
+            if step and hi < len(cues) - 1:
+                hi += 1
+            while hi < len(cues) - 1 and not ends(hi) and hi - idx[-1] < 12:
+                hi += 1
+        memo[key] = " ".join(str(c[2]) for c in cues[lo:hi + 1])
+    return memo[key]
 
 
 def _field_problems(rows: list, k: int, ctx: dict) -> list:
@@ -9837,10 +10607,11 @@ def _field_problems(rows: list, k: int, ctx: dict) -> list:
             out.append(("headline", "does not fit the title's two lines", "title"))
         if set(_content(str(dev.get("kicker") or ""))) & set(_content(str(dev.get("headline") or ""))):
             out.append(("kicker", "shares a word with the headline", "title"))
-    f = {"shadow-up": "line", "top-title": "line1", "P02": "headline"}.get(tid)
-    if f and dev.get(f) and not _phrase_ok(str(dev[f]), r.get("text", ""), rows[k - 1].get("text", "") if k else "",
-                                           rows[k + 1].get("text", "") if k + 1 < len(rows) else ""):
+    f = {"shadow-up": "line", "top-title": "line1", "P02": "headline", "P05": "headline"}.get(tid)   # the fillers' words
+    if f and dev.get(f) and not _phrase_ok(str(dev[f]), r.get("text", ""), *_context(rows, k)):
         out.append((f, f"'{dev[f]}' does not read whole (it stops mid-phrase)", "reword"))
+    if tid == "bullet-checklist" and len([x for x in dev.get("rows") or [] if str(x or "").strip()]) == 1:
+        out.append(("rows", "has one row (a list needs two: 2026-10-13)", "drop"))
     return out
 
 
@@ -9904,6 +10675,18 @@ def _gate_find(rows: list, ctx: dict) -> list:
             for f, why, fix in _caption_problems(r, ctx):
                 add("text", k, f"typed caption line {f} {why}" if f != "lines" else f"typed caption {why}",
                     field=f, fix=fix, caption=True)
+    # the words read as the narrator meant them (2026-10-13): no negation dropped, nothing cut off, names whole, the
+    # numbers and the alternatives said - every text but the highlighted page, the maps, the dates and the year plates,
+    # read against the subtitles around it (_said_around); a repair, a move or a warning, never a stop (_GATE_HINT)
+    for k, r in enumerate(rows):
+        its = _wording_items(r)
+        said = _said_around(rows, k, ctx) if its else ""
+        for kind, tid, f, n, text in its:
+            for rule, what, hint in _wording(text, said, kind=kind, names=ctx.get("names") or (),
+                                             longer=_wording_longer(r, tid, f, ctx)):
+                add(rule, k, f"{tid} {f}{'' if n is None else f'[{n}]'} '{text[:48]}' {what}", field=f, n=n, tid=tid,
+                    wkind=kind, text=text, hint=hint, caption=tid == "typed caption",
+                    kind="caption" if tid == "typed caption" else "overlay" if tid == "beat overlay" else "device")
     # one block of words a frame; the same words twice within a minute
     texts = _texts(rows)
     for k in sorted({t[0] for t in texts}):
@@ -10358,19 +11141,22 @@ def _drop_words(rows: list, k: int, kind: str, why: str) -> None:
         _fall_back(rows, k, tid, why)
 
 
-def _retemplate(rows: list, k: int, words: str, build, avoid: str = "") -> str:
+def _retemplate(rows: list, k: int, words: str, build, avoid: str = "", ok=None) -> str:
     """The words on shot k re-set in a text template that names no picture and whose group has room (running title,
     spoken line, editorial card, P05), long enough for its animation: "<template> '<words>'", or "" when none takes
-    them."""
+    them. ok(k, template, words): the gate's own reading of the shot (_wording), when given."""
     if not build or not words:
         return ""
     r = rows[k]
     old = {key: r.get(key) for key in ("device", "companions", "type_shade")}
-    before, after = rows[k - 1]["text"] if k else "", rows[k + 1]["text"] if k + 1 < len(rows) else ""
+    before, after = _context(rows, k)
     for tid, lim in _filler_order(rows):
-        # the same words when they read whole as a line of their own, else a whole phrase of the same line (A2)
-        w = words if len(words) <= lim and _phrase_ok(words, r.get("text", ""), before, after) else \
-            _spoken_phrase(r.get("text", ""), lim, before, after)
+        # the same words when they read whole as a line of their own - two words or more: a name alone is a label,
+        # not a spoken line (2026-10-13: a refused P04 "Restivo" came back as a shadow-up "Restivo") - else a whole
+        # phrase of the same line (A2)
+        good = lambda p: ok is None or ok(k, tid, p)
+        w = words if len(words) <= lim and len(words.split()) >= 2 and _phrase_ok(words, r.get("text", ""), before, after) \
+            and good(words) else _spoken_phrase(r.get("text", ""), lim, before, after, ok=good)
         if tid == avoid or not w:
             continue
         r["device"] = None
@@ -10417,23 +11203,32 @@ def _fix_text(rows: list, k: int, viol: dict, ctx: dict, build) -> str:
             r["device"] = new
             return "opening title rebuilt"
         if fix == "cut" and f in dev:
-            cut = _whole_words(re.sub(r"\s*\S+$", "", str(dev[f])) if "cut short" in viol["what"] else str(dev[f]),
-                               (LIBRARY["P03"][7].get(f) or 24))
+            src = re.sub(r"\s*\S+$", "", str(dev[f])) if "cut short" in viol["what"] else str(dev[f])
+            cut = _whole_words(src, (LIBRARY["P03"][7].get(f) or 24))
             if cut and not _cut_off(cut, ctx["vocab"]) and not (set(_content(cut)) & set(_content(
-                    str(dev.get("headline" if f == "kicker" else "kicker") or "")))):
+                    str(dev.get("headline" if f == "kicker" else "kicker") or "")))) \
+                    and not _wording(cut, src, "title", ctx.get("names") or (), [src]):     # never a name cut (2026-10-13)
                 dev[f] = cut
                 return f"title {f} cut at whole words"
+            if f == "kicker":                        # else a whole part of the setting or the period
+                kick = _kicker(ctx["dossier"], str(dev.get("headline") or ""), ctx.get("names"))
+                if kick and kick != dev.get(f):
+                    dev[f] = kick
+                    return f"title kicker taken whole from the setting: '{kick}'"
         return ""
     if tid == "chapter-plate" and fix in ("cut", "heading", "drop"):
         old = str(dev.get("heading") or "")
-        cut = _whole_words(re.sub(r"\s*\S+$", "", old) if "cut short" in viol["what"] else old, 25) if fix == "cut" else ""
+        src = r.get("_cut_from") or (re.sub(r"\s*\S+$", "", old) if "cut short" in viol["what"] else old)
         used = {_norm((x.get("device") or {}).get("heading")) for x in rows if x is not r}
-        cands = [cut] + [_whole_words(" ".join(str(s.get("title") or "").split()[:4]), 25)
-                         for s in (ctx["dossier"].get("sections") or [])[1:]]
+        titles = [s.get("title") for s in (ctx["dossier"].get("sections") or [])[1:]]
+        cut = _short_heading(src, 25, titles, used) if fix == "cut" else ""     # its head noun kept (2026-10-13)
+        longer = [x for x in [r.get("_cut_from"), old] + titles if x]
+        cands = [cut] + [_short_heading(t, 25) for t in titles]
         for c in cands:
-            if c and _norm(c) not in used and not _cut_off(c, ctx["vocab"]):
+            if c and _norm(c) not in used and not _cut_off(c, ctx["vocab"]) \
+                    and not _wording(c, "", "title", ctx.get("names") or (), [y for y in longer if _norm(y) != _norm(c)]):
                 dev["heading"] = c
-                return "chapter heading " + ("cut at whole words" if c == cut else "taken from the dossier's sections")
+                return "chapter heading " + ("made to fit whole" if c == cut else "taken from the dossier's sections")
         if sum(1 for x in rows if (x.get("device") or {}).get("id") == "chapter-plate") > CHAPTERS_MIN:
             _drop_words(rows, k, "device", "its heading is broken")
             return "chapter dropped (more than the minimum remain)"
@@ -10449,18 +11244,299 @@ def _fix_text(rows: list, k: int, viol: dict, ctx: dict, build) -> str:
         if all(new):
             dev[f] = new if isinstance(dev[f], list) else new[0]
             return f"{tid} {f} cut at whole words"
-    if fix == "reword":
-        lim = {"shadow-up": 32, "top-title": 21, "P02": 46}[tid]
-        before, after = rows[k - 1]["text"] if k else "", rows[k + 1]["text"] if k + 1 < len(rows) else ""
-        phrase = _spoken_phrase(r["text"], lim, before, after)
-        if phrase and build:
-            r["device"] = None
-            new = build(tid, {"headline": phrase, "lines": []}, k)
-            r["device"] = new or dev
-            if new:
-                return f"{tid} re-worded '{phrase}'"
+    if fix == "reword":                              # (P05 is a filler too: its limit was missing, a KeyError)
+        lim = dict(_FILLERS).get(tid) or _field_limit(tid, f)
+        old = str(dev.get(f) or "")
+        for phrase in _spoken_phrases(r["text"], lim, *_context(rows, k), ctx.get("names") or ()):
+            if phrase != old and _try_text(rows, k, tid, f, None, phrase, ctx, build, "statement"):
+                return f"{tid} re-worded '{phrase}'"         # only words that read as well as the narration (_wording)
+        win = " ".join(str(x.get("text") or "") for x in rows[max(0, k - 2):k + 3])
+        if old and _spoken_in(old, win):
+            return ""                                # its words are said there: kept (a warning if it stays), never
+                                                     # emptied for want of a better phrase (2026-10-13)
     _drop_words(rows, k, "device", viol["what"])
     return f"{tid} dropped"
+
+
+def _field_limit(tid: str, f: str) -> int:
+    lk = (_FIELDS.get(tid) or {}).get(f, (999,))[0]
+    return lk if isinstance(lk, int) else LIBRARY[tid][7].get(lk, 999)
+
+
+def _plan_of(dev: dict) -> dict:
+    """The planner's row (headline, kicker, lines) a template's fields come from: what build() reads."""
+    o = {"headline": "", "kicker": "", "lines": []}
+    for f, key in (_PLAN_KEY.get(dev.get("id")) or {}).items():
+        v = dev.get(f)
+        if isinstance(key, tuple):
+            while len(o["lines"]) <= key[1]:
+                o["lines"].append("")
+            o["lines"][key[1]] = str(v or "")
+        elif key == "lines":
+            o["lines"] = [str(x) for x in v or []]
+        else:
+            o[key] = str(v or "")
+    return o
+
+
+def _set_device(rows: list, k: int, new: dict) -> bool:
+    """Template `new` on shot k, through the pictures' checks (_fit_devices); refused there, the shot keeps what it had."""
+    r = rows[k]
+    keep = {key: r.get(key) for key in ("device", "companions", "type_shade")}
+    r["device"] = new
+    r.pop("companions", None)
+    r.pop("type_shade", None)
+    n = len(DEV_DROPS)
+    _fit_devices(rows, only={id(r)})
+    del DEV_DROPS[n:]
+    if (r.get("device") or {}).get("id") == new["id"]:
+        return True
+    for key, v in keep.items():
+        if v is None:
+            r.pop(key, None)
+        else:
+            r[key] = v
+    r.setdefault("device", None)
+    return False
+
+
+def _said_ok(rows: list, k: int, text: str, ctx: dict, kind: str = "statement") -> bool:
+    """`text` on shot k reads as the narrator meant it there (_wording against the narration around the shot)."""
+    return not _wording(text, _said_around(rows, k, ctx), kind=kind, names=ctx.get("names") or ())
+
+
+def _try_text(rows: list, k: int, tid: str, f: str, n, c: str, ctx: dict, build, kind: str) -> bool:
+    """New words `c` in field f (index n) of the template on shot k, set only when they pass every check: the field's
+    limit, _wording and A2 (_phrase_ok), the template's own build (words said nearby; a secondary field: said on the
+    shot or the two around it, a name's or a picture label's support on its own line), heard near the shot (_words_near:
+    sync keeps them), no repeat of words on screen (_repeats_words, the shot's own cleared) and the pictures' checks."""
+    r = rows[k]
+    dev = r.get("device") or {}
+    if not c or len(c) > _field_limit(tid, f) or dev.get("id") != tid:
+        return False
+    if tid in ("shadow-up", "top-title", "P02", "corner-label") and _year_in(c):
+        return False
+    if not _said_ok(rows, k, c, ctx, kind):
+        return False
+    if kind == "statement" and (len(c.split()) < 2 or not _phrase_ok(c, r.get("text", ""), *_context(rows, k))):
+        return False
+    new = dict(dev)
+    if isinstance(dev.get(f), list):
+        vals = list(dev[f])
+        if n is None or n >= len(vals):
+            return False
+        vals[n] = c
+        new[f] = vals
+    else:
+        new[f] = c
+    if f == _MAIN.get(tid) and build is not None:
+        got = build(tid, _plan_of(new), k)
+        if not got or str(got.get(f) or "") != c:
+            return False
+    else:
+        own = (tid, f) in (("P04", "supportLine"), ("P05", "imageLabel"))
+        win = r.get("text", "") if own else " ".join(str(x.get("text") or "") for x in rows[max(0, k - 2):k + 3])
+        if not _spoken_in(c, win):
+            return False
+    words = _overlay_words({"device": new})
+    if words and _words_near(words, ctx, r["startMs"]) is None:
+        return False
+    r["device"] = None
+    again = _repeats_words(rows, c, r["startMs"])
+    r["device"] = dev
+    return not again and _set_device(rows, k, new)
+
+
+def _try_template(rows: list, k: int, tid: str, c: str, ctx: dict, build) -> bool:
+    """Words `c` set in filler template `tid` on shot k (free, or freed by the caller), through the same checks."""
+    r = rows[k]
+    if not build or not c or len(c) > dict(_FILLERS).get(tid, 0) or len(c.split()) < 2 or r.get("device"):
+        return False
+    if not _can(rows, k, tid) or not _open_room(r, tid) or not _said_ok(rows, k, c, ctx) \
+            or not _phrase_ok(c, r.get("text", ""), *_context(rows, k)):
+        return False
+    new = build(tid, {"headline": c, "lines": []}, k)
+    if not new:
+        return False
+    words = _overlay_words({"device": new})
+    if words and _words_near(words, ctx, r["startMs"]) is None or _repeats_words(rows, c, r["startMs"]):
+        return False
+    return _set_device(rows, k, new)
+
+
+def _targets(xs: list, said: str, lim: int = 99) -> list:
+    """The targeted edits of a broken text, best first: each rule's words as said (the name made whole and the
+    capitals back, the negator back, the dropped alternative back, the clause completed at its end or its start), then
+    the longest whole parts of those words - the picker's own best windows inside them (_spoken_phrases, `lim`
+    letters), those that keep most of the words shown first - never a bare cut that would stop mid-phrase again."""
+    ws = _toks(said)
+    low = [_lw(w) for w, _, _ in ws]
+    full, parts = [], []
+    for rule in _W_RULES:
+        for x in xs:
+            h = " ".join(str(x.get("hint") or "").split()).strip(" ,;:-—–")
+            if x["rule"] != rule or not h:
+                continue
+            full.append(h[:1].upper() + h[1:])
+            hw = [_lw(w) for w, _, _ in _toks(h)]
+            a = next((p for p in range(len(low) - len(hw) + 1) if hw and low[p:p + len(hw)] == hw), None)
+            if a is not None:
+                parts += _spoken_phrases(_span(ws, a, a + len(hw)), lim, _span(ws, 0, a, True),
+                                         _span(ws, a + len(hw), len(ws), True))
+    shown = {_lw(w) for x in xs[:1] for w, _, _ in _toks(x.get("text") or "")}
+    parts = sorted(dict.fromkeys(parts), key=lambda c: -len(shown & {_lw(w) for w, _, _ in _toks(c)}))
+    return [c for c in dict.fromkeys(full + parts) if c]
+
+
+def _title_case(s: str) -> str:
+    return " ".join(w if w[:1].isupper() or (j and w.lower() in JOINING) else w[:1].upper() + w[1:]
+                    for j, w in enumerate(str(s).split()))
+
+
+def _tc_lines(text: str) -> list:
+    """A typed caption's words as one or two lines within TC_LINE_MAX each and TC_TOTAL_MAX in all, the two as even as
+    they can be; [] when they do not fit."""
+    ws = str(text).split()
+    if len(text) <= TC_LINE_MAX:
+        return [text]
+    splits = [(" ".join(ws[:m]), " ".join(ws[m:])) for m in range(1, len(ws))]
+    fit = [s for s in splits if max(map(len, s)) <= TC_LINE_MAX and sum(map(len, s)) <= TC_TOTAL_MAX]
+    return list(min(fit, key=lambda s: abs(len(s[0]) - len(s[1])))) if fit else []
+
+
+def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
+    """A text the wording rules flag (xs: its faults, one field), repaired from the spoken words (2026-10-13), the
+    first candidate that passes every check winning:
+      1. a targeted edit in the same template and shot (_targets: capitals back, the name whole, the negator back, the
+         alternative back, the clause completed, else its longest whole part);
+      2. a fresh phrase of the shot's own line that reads whole, same template (_spoken_phrases);
+      3. another of the owner's gap fillers with room on the same shot (_filler_order: group caps, _can);
+      4. the nearest free shot within two (a shot seat() and _reseat would take) with a phrase of its own line;
+      5. else the block goes, with a warning, so the quiet rule refills the stretch in the next round.
+    The opening title takes another kicker or title (_kicker, _auto_title), a chapter heading another whole one
+    (_short_heading, the dossier's section titles), a typed caption its edited words or it goes, a template's optional
+    field is cleared. Returns (what was done, the rows whose words changed); ("", ...) when the text changed already."""
+    r, x0 = rows[k], xs[0]
+    tid, f, n, kind, text = x0["tid"], x0["field"], x0.get("n"), x0["wkind"], x0["text"]
+    what = "; ".join(x["what"] for x in xs)
+    if tid == "typed caption":
+        lines = [str(y or "").strip() for y in (r.get("typedCaption") or {}).get("lines") or []]
+        if " ".join(y for y in lines if y) != text:
+            return "", set()
+        for c in _targets(xs, _said_around(rows, k, ctx), TC_TOTAL_MAX):
+            new = _tc_lines(_title_case(c))
+            if not new or not _said_ok(rows, k, " ".join(new), ctx):
+                continue
+            words = _overlay_words({"typedCaption": {"lines": new}})
+            if words and _words_near(words, ctx, _on_screen_ms(r)) is None:
+                continue
+            r["typedCaption"] = dict(r["typedCaption"], lines=new)
+            return f"caption re-worded from the narration: '{' / '.join(new)}'", {id(r)}
+        r.pop("typedCaption", None)
+        ctx.setdefault("warnings", []).append(f"typed caption '{text[:50]}' at {r['startMs'] / 1000:.1f}s dropped: {what}")
+        return "caption dropped (no wording from the narration fits it)", {id(r)}
+    if tid == "beat overlay":
+        if str((r.get("overlay") or {}).get("text") or "").strip() != text:
+            return "", set()
+        c = next((c for c in _targets(xs, _said_around(rows, k, ctx), len(text) + 12)
+                  if len(c) <= len(text) + 12 and _said_ok(rows, k, c, ctx, "label")), "")
+        if c:
+            r["overlay"] = dict(r["overlay"], text=c)
+            return f"beat overlay re-worded: '{c}'", {id(r)}
+        r.pop("overlay", None)
+        return "beat overlay cleared", {id(r)}
+    dev = r.get("device") or {}
+    cur = dev.get(f)
+    cur = (cur[n] if isinstance(cur, list) and n is not None and n < len(cur) else cur)
+    if dev.get("id") != tid or " ".join(str(cur or "").split()) != text:
+        return "", set()
+    d = ctx.get("dossier") or {}
+    if tid == "P03":
+        if f == "kicker" and k == 0:                 # the opening's kicker: a whole part of the setting
+            c = _kicker(d, str(dev.get("headline") or ""), ctx.get("names"))
+            if c and c != text:
+                dev["kicker"] = c
+                return f"kicker taken whole from the setting: '{c}'", {id(r)}
+        elif f == "kicker":                          # a title later in the film: its name made whole, if it fits
+            c = next((c for c in _targets(xs, _said_around(rows, k, ctx), _field_limit(tid, f))
+                      if len(c) <= _field_limit(tid, f) and not set(_content(c)) & set(_content(str(dev.get("headline") or "")))
+                      and not _wording(c, _said_around(rows, k, ctx), "title", ctx.get("names") or ())), "")
+            if c:
+                dev["kicker"] = c
+                return f"kicker made whole: '{c}'", {id(r)}
+        else:
+            new = _auto_title(d, ctx.get("title", ""))
+            if new and new["headline"] != text and not _wording(new["headline"], "", "title", ctx.get("names") or ()):
+                r["device"] = new
+                return f"opening title rebuilt: '{new['headline']}'", {id(r)}
+        ctx.setdefault("warnings", []).append(f"P03 {f} '{text}': {what} - kept, no whole one fits")
+        return "kept (no whole title fits): a warning", set()
+    if tid == "chapter-plate":
+        used = {_norm((x.get("device") or {}).get("heading")) for x in rows if x is not r}
+        titles = [s.get("title") for s in (d.get("sections") or [])[1:]]
+        longer = _wording_longer(r, tid, f, ctx)
+        for c in [_short_heading(r.get("_cut_from") or text, 25, titles, used)] + [_short_heading(t, 25) for t in titles]:
+            if c and c != text and _norm(c) not in used and not _cut_off(c, ctx.get("vocab") or set()) \
+                    and not _wording(c, "", "title", ctx.get("names") or (), [y for y in longer if _norm(y) != _norm(c)]):
+                dev["heading"] = c
+                return f"chapter heading made whole: '{c}'", {id(r)}
+        ctx.setdefault("warnings", []).append(f"chapter '{text}': {what} - kept, no whole heading fits")
+        return "kept (no whole heading fits): a warning", set()
+    lim = _field_limit(tid, f)
+    said = _said_around(rows, k, ctx)
+    for c in _targets(xs, said, lim):                # 1. targeted, same template and field
+        if c != text and _try_text(rows, k, tid, f, n, c, ctx, build, kind):
+            return f"{tid} {f} from the narration: '{c}'", {id(r)}
+    main = f == _MAIN.get(tid)
+    before, after = _context(rows, k)
+    if main and tid in dict(_FILLERS):                # 2. a fresh phrase, same template
+        for c in _spoken_phrases(r.get("text", ""), lim, before, after, ctx.get("names") or ()):
+            if c != text and _try_text(rows, k, tid, f, n, c, ctx, build, kind):
+                return f"{tid} re-worded from its own line: '{c}'", {id(r)}
+    if not main:                                     # a secondary field: cleared, or its row taken out
+        vals = dev.get(f)
+        if isinstance(vals, list) and n is not None and len([y for y in vals if str(y).strip()]) > 2:
+            dev[f] = [y for m, y in enumerate(vals) if m != n]
+            return f"{tid} {f} '{text}' taken out", {id(r)}
+        if not (_FIELDS.get(tid) or {}).get(f, (0, True))[1]:
+            dev[f] = [] if isinstance(vals, list) else ""
+            return f"{tid} {f} cleared", {id(r)}
+    keep = {key: r.get(key) for key in ("device", "companions", "type_shade", "filler")}
+    r["device"] = None
+    r.pop("companions", None)
+    r.pop("type_shade", None)
+    cands = _targets(xs, said, 46) + _spoken_phrases(r.get("text", ""), 46, before, after, ctx.get("names") or ())
+    for tid2, lim2 in _filler_order(rows):           # 3. another gap filler with room, same shot
+        if tid2 == tid or tid2 not in GAP_FILLER_TEMPLATES:
+            continue
+        for c in [c for c in cands if len(c) <= lim2] + _spoken_phrases(r.get("text", ""), lim2, before, after):
+            if _try_template(rows, k, tid2, c, ctx, build):
+                return f"re-set as {tid2} '{c}'", {id(r)}
+    near = sorted((j for j in range(max(1, k - 2), min(len(rows), k + 3)) if j != k), key=lambda j: (abs(j - k), j))
+    for j in near:                                   # 4. the nearest free shot within two
+        y = rows[j]
+        if y.get("device") or y.get("typedCaption") or y.get("section_turn") or y.get("hold") or _covered(y) \
+                or not y.get("pick"):
+            continue
+        b2, a2 = _context(rows, j)
+        for tid2, lim2 in ([(tid, dict(_FILLERS)[tid])] if tid in dict(_FILLERS) else []) + \
+                [t for t in _filler_order(rows) if t[0] != tid]:
+            if tid2 not in GAP_FILLER_TEMPLATES:
+                continue
+            for c in _spoken_phrases(y.get("text", ""), lim2, b2, a2, ctx.get("names") or ()):
+                if _try_template(rows, j, tid2, c, ctx, build):
+                    if keep.get("filler"):
+                        y["filler"] = True
+                    r.pop("filler", None)
+                    return f"moved to the shot at {y['startMs'] / 1000:.1f}s as {tid2} '{c}'", {id(r), id(y)}
+    for key, v in keep.items():
+        if v is not None:
+            r[key] = v
+    r.setdefault("device", None)
+    _drop_words(rows, k, "device", what)             # 5. the block goes; the quiet rule refills its stretch
+    ctx.setdefault("warnings", []).append(f"{tid} '{text[:40]}' at {r['startMs'] / 1000:.1f}s dropped: {what} "
+                                          f"(no wording that reads whole fits there or on a shot beside it)")
+    return f"{tid} dropped (no wording from the narration reads whole there)", {id(r)}
 
 
 def _absorb(rows: list, k: int) -> bool:
@@ -10633,6 +11709,42 @@ def _pace_fix(engine, job: Path, rows: list, cues: list, dossier: dict, name: st
                                  f"{cuts} cut on the narration" if cuts else "") if p)
 
 
+def _name_label(rows: list, k: int, ctx: dict):
+    """A name label (P04) for shot k, or None (2026-10-13: the gate set a bare "Restivo" with an empty support line
+    110 s after he was introduced, in three of six test films): a name of the shot's own line (its entities), only
+    within two shots of where the film first says it; the full name of the dossier's people or key entities when the
+    line says it whole, and their role as the support line when the line says that too."""
+    r, own = rows[k], str(rows[k].get("text") or "")
+    d = ctx.get("dossier") or {}
+    people = [(str(p.get("name") or ""), str(p.get("role") or "")) for p in (d.get("visualBrief") or {}).get("people") or []
+              if isinstance(p, dict)]
+    people += [(str(e.get("name") or ""), "") for e in d.get("keyEntities") or []
+               if isinstance(e, dict) and str(e.get("kind") or "").lower() in ("person", "place", "organisation", "organization")]
+    best = None
+    for e in r.get("entities") or []:
+        e = " ".join(str(e).split())
+        if not e or _DATE_ENTITY.search(e) or e.lower() not in own.lower():
+            continue
+        first = next((j for j, x in enumerate(rows) if e.lower() in str(x.get("text") or "").lower()), k)
+        if abs(k - first) > 2:                       # far from where it is first said: no label there
+            continue
+        full, role = e, ""
+        for nm, rl in people:
+            words = nm.lower().split()
+            if nm and (e.lower() == nm.lower() or e.lower() in words or nm.lower().endswith(" " + e.lower())):
+                if nm.lower() in own.lower() and len(nm) <= LIBRARY["P04"][7]["headline"]:
+                    full = nm
+                role = rl if rl and len(rl) <= LIBRARY["P04"][7]["kicker"] and _spoken_in(rl, own) else role
+        if len(full) > LIBRARY["P04"][7]["headline"]:
+            continue
+        cand = (len(full.split()) >= 2 or bool(role), len(full.split()), full, role)
+        best = max(best, cand) if best else cand
+    if best is None or not best[0] and not best[3] and len(best[2].split()) < 2 and \
+            next((j for j, x in enumerate(rows) if best[2].lower() in str(x.get("text") or "").lower()), k) != k:
+        return None                                  # a bare surname only on the very shot that first says it
+    return {"headline": best[2], "kicker": best[3]}
+
+
 def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
     """A group under its minimum gets one (A3): a text of a group with more than its own minimum re-set in this group's
     template; else, on a free plain shot in the film's longest stretch without words, words of its own line (a running
@@ -10665,20 +11777,19 @@ def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
     tried = ctx.setdefault("tried", set())
     for k in free:
         r = rows[k]
-        before, after = rows[k - 1]["text"], rows[k + 1]["text"] if k + 1 < len(rows) else ""
+        before, after = _context(rows, k)
         for tid in ts:
             if not LIBRARY[tid][0] or not _can(rows, k, tid):
                 continue
             o = None
             if tid in ("top-title", "shadow-up", "P02", "P05"):
-                phrase = _spoken_phrase(r["text"], {"top-title": 21, "shadow-up": 32, "P02": 46, "P05": 25}[tid], before, after)
+                phrase = _spoken_phrase(r["text"], dict(_FILLERS)[tid], before, after,
+                                        ok=lambda p: _said_ok(rows, k, p, ctx), names=ctx.get("names") or ())
                 o = {"headline": phrase, "lines": []} if phrase else None
             elif tid == "P08":
                 o = {} if _CITES.search(r["text"]) and not r["pick"].get("ai") else None
             elif tid == "P04":
-                name = next((e for e in r.get("entities") or [] if str(e).strip() and not _DATE_ENTITY.search(str(e))
-                             and len(str(e)) <= 19 and str(e).lower() in r["text"].lower()), "")
-                o = {"headline": name, "kicker": ""} if name else None
+                o = _name_label(rows, k, ctx)
             dev = build(tid, o, k) if build and o is not None and (id(r), tid) not in tried else None
             words = _overlay_words({"device": dev}) if dev else []
             if dev and words and _words_near(words, ctx, r["startMs"]) is None:
@@ -10693,7 +11804,7 @@ def _group_add(engine, rows: list, g: str, build, ctx: dict) -> str:
     return ""
 
 
-def _gap_room(rows: list, build, refused: set) -> list:
+def _gap_room(rows: list, build, refused: set, ok=None) -> list:
     """A quiet stretch no filler can take because every filler template is at its cap (impl-z, 2026-10-11: on the -long
     film the merged cut's 379-411 s had one free shot whose P05 named a person over a picture without one, and the
     spoken lines, P05s, running titles and P02s were all at their caps): a line of a full filler group gives way where
@@ -10725,7 +11836,7 @@ def _gap_room(rows: list, build, refused: set) -> list:
             keep, n = copy.deepcopy(rows[k]), len(DEV_DROPS)
             tid, words = keep["device"]["id"], _shown(keep)
             _drop_words(rows, k, "device", "made room for words in a quiet stretch")
-            added = fill_gaps_plain(_QUIET, rows, build, skip=refused, gaps=[(a, b)])
+            added = fill_gaps_plain(_QUIET, rows, build, skip=refused, gaps=[(a, b)], ok=ok)
             if added:
                 tids, m = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}, len(DEV_DROPS)
                 _fit_devices(rows, only=added)
@@ -10787,6 +11898,9 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
 
     def stuck(x, why=""):
         ctx["stuck"].append(dict(x, why=why))
+
+    def wok(kk, tid, words):                         # a phrase the wording rules pass where it would show
+        return _said_ok(rows, kk, words, ctx)
     for x in by.get("opening", []):
         new = _auto_title(dossier, ctx["title"])
         if not new:
@@ -10800,16 +11914,40 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
             _absorb(rows, 1)
         moved = True
         did(x, "opening title set" + (f" ({old} gives way)" if old else ""))
+    worded = {(x["id"], x.get("field")) for rule in _W_RULES for x in by.get(rule, [])}
     for x in by.get("text", []):
         k = at(x["id"])
         if k is None or not (rows[k].get("typedCaption") if x.get("caption") else rows[k].get("device")):
             continue                                 # gone with an earlier repair
+        if x.get("fix") == "reword" and (x["id"], x.get("field")) in worded:
+            continue                                 # the wording rules repair it below, a targeted edit first
         how = _fix_text(rows, k, x, ctx, build)
         if how:
             did(x, how)
             moved = moved or "dropped" in how or "re-worded" in how or "rebuilt" in how
+            ctx["resynced"].discard(x["id"])
         else:
-            stuck(x, "its words cannot be repaired")
+            stuck(x, "its words cannot be repaired" if x.get("fix") != "reword" else
+                  "no phrase of its line reads better, and its own words are said there: kept")
+    # the wording rules (2026-10-13): each broken text repaired from the words said around it - a targeted edit, a
+    # fresh phrase, another gap filler on the shot, the nearest free shot - else it goes with a warning and the quiet
+    # rule refills its stretch next round. One repair a text (its faults together); a text an earlier repair of this
+    # round changed is looked at again next round. Its filler flag stays; a moved filler takes it along
+    faults = {}
+    for x in [x for rule in _W_RULES for x in by.get(rule, [])]:
+        faults.setdefault((x["id"], x.get("tid"), x.get("field"), x.get("n")), []).append(x)
+    for xs in faults.values():
+        k = at(xs[0]["id"])
+        if k is None:
+            continue
+        how, changed = _fix_wording(rows, k, xs, ctx, build)
+        if not how:
+            continue
+        for x in xs:
+            did(x, how)
+        for rid in changed:
+            ctx["resynced"].discard(rid)         # its words changed: the words rule may re-sync it once more
+        moved = moved or bool(changed)
     for x in by.get("page", []):                     # a highlighted page: re-timed, re-synced, cut or held, else dropped
         k = at(x["id"])
         if k is None or (rows[k].get("device") or {}).get("id") != "highlight-page":
@@ -10881,7 +12019,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         if alt is not None and _swap(rows, k, dict(alt), r.get("step") or "card"):
             did(x, f"picture swapped for a runner-up that shows '{lab}'")
             continue
-        new = _retemplate(rows, k, lab, build, avoid=tid)
+        new = _retemplate(rows, k, lab, build, avoid=tid, ok=wok)
         if new:
             did(x, f"re-set as {new} (words that name no picture)")
             continue
@@ -10900,7 +12038,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
                     break
                 words = str((rows[k]["device"] or {}).get({"shadow-up": "line", "top-title": "line1", "P02": "headline"}.get(
                     rows[k]["device"]["id"], "-")) or "")
-                new = _retemplate(rows, k, words, build, avoid=rows[k]["device"]["id"]) if words else ""
+                new = _retemplate(rows, k, words, build, avoid=rows[k]["device"]["id"], ok=wok) if words else ""
                 if new:
                     did(x, f"'{words[:40]}' re-set as {new}")
                 else:
@@ -10981,7 +12119,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         # stopped on a 32 s stretch after five rounds)
         refused, kept = ctx.setdefault("fill_refused", set()), set()
         for _ in range(GATE_FILL_TRIES):
-            added = fill_gaps_plain(engine, rows, build, skip=refused, gaps=_gaps(rows, True)) if build else set()
+            added = fill_gaps_plain(engine, rows, build, skip=refused, gaps=_gaps(rows, True), ok=wok) if build else set()
             if not added:
                 break
             tids = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}
@@ -10996,7 +12134,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
             kept |= added - back
             if not back or not _gaps(rows, True):
                 break
-        moved_in = _gap_room(rows, build, refused) if build and _gaps(rows, True) else []
+        moved_in = _gap_room(rows, build, refused, ok=wok) if build and _gaps(rows, True) else []
         if kept or moved_in:
             _recut(engine, job, rows, cues, dossier)
         for x in by["quiet"]:
@@ -11161,6 +12299,9 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
     for x in [x for x in found if x["rule"] in ("average", "pace")]:   # pacing never stops a film (owner 2026-10-11)
         ctx["warnings"].append(f"pacing: {x['what']}")
         found.remove(x)
+    for x in [x for x in found if x["rule"] in _W_RULES or x["rule"] == "text" and x.get("fix") == "reword"]:
+        ctx["warnings"].append(f"{x['rule']}: {x['what']} - left as it is after every repair")   # word rules are
+        found.remove(x)                              # heuristics: never a stop (2026-10-13), the text stays on screen
     spots = [x for x in found if x["rule"] in ("map", "date")]
     for x in spots:                                  # a map or a date never stops a film: what is still broken goes
         k = next((k for k, r in enumerate(rows) if id(r) == x["id"]), None)
@@ -11340,6 +12481,8 @@ def _plan_rows(job: Path) -> list:
                 r[key] = True
         if sh.get("md_moved") is not None:               # moved after the map or date that took its words' shot
             r["_md_moved"] = sh["md_moved"]
+        if sh.get("cut_from"):                           # a chapter heading made shorter: what it was made from
+            r["_cut_from"] = sh["cut_from"]
         if sc.get("companions"):
             r["companions"] = [{"photo": by_key.get(c.get("path")) or f"gone/key-{c.get('path')}"} for c in sc["companions"]]
         if (sc.get("device") or {}).get("id") == "chapter-plate":

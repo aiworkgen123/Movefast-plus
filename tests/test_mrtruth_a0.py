@@ -138,7 +138,9 @@ class OpeningAndGallery(unittest.TestCase):
         M.assign(e, rows, opps, script, cues, dossier, "A Test Film")
         dev = lambda r: (r.get("device") or {}).get("id")
         self.assertEqual(dev(rows[0]), "P03")
-        self.assertEqual(rows[0]["device"]["kicker"], "The Grand Northern")          # whole words, not '...Archi'
+        # a whole part of the setting, never a name cut at whole words ("The Grand Northern" of "The Grand Northern
+        # Archive Library", 34 letters, is the name cut the six test films opened on, 2026-10-13)
+        self.assertEqual(rows[0]["device"]["kicker"], "Elsewhere")
         gal = [k for k, r in enumerate(rows) if dev(r) == "gallery-strip"]
         self.assertEqual(len(gal), 1)
         g = rows[gal[0]]
@@ -169,7 +171,8 @@ class ChapterHeadings(unittest.TestCase):
         got = self.headings({"chapters": [], "overlays": []},
                             [{"title": "x"}, {"title": "Keepers Unwritten Northern Ledgers"},
                              {"title": "Second Movement"}])
-        self.assertEqual(got, ["Keepers Unwritten", "Second Movement"])          # was 'Keepers Unwritten Norther'
+        # its head noun kept, a modifier dropped (2026-10-13; a cut at whole words, "Keepers Unwritten", lost it)
+        self.assertEqual(got, ["Keepers Unwritten Ledgers", "Second Movement"])  # was 'Keepers Unwritten Norther'
 
 
 class Caches(unittest.TestCase):
