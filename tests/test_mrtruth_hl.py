@@ -555,6 +555,37 @@ class Gate(G.Base):
         self.assertLessEqual(M._hl_frames(dev), 150)
         self.assertTrue(dev["phrases"][1].startswith("the north door"))
 
+    def test_a_wording_repair_never_takes_the_plain_shot_a_page_is_held_from(self):
+        # review 2026-10-13: the wording repair ran before the page's and moved a broken running title onto the plain
+        # shot after the page (under HL_MIN_S, held from that shot): the page was dropped. The page must come out
+        # exactly as it does with no wording repair at all - a broken line two shots after it is moved or dropped,
+        # never onto the shot beside it; one beside it stays as it is (with a warning)
+        def run(k, wording):
+            M.HL.update(dropped=[])
+            rows = gate_film(k=26, ms=4600)
+            for j in (23, 30):                                           # (shot 29 has its typed caption)
+                rows[j]["text"] = "It was so."
+            rows[k]["text"] = "If you went and if you stayed and if you left, it was so."
+            rows[k]["device"], rows[k]["filler"] = {"id": "top-title", "line1": "If you went", "line2": ""}, True
+            heard = copy.deepcopy(rows)
+            with mock.patch.object(M, "_fix_wording", M._fix_wording if wording else lambda *a: ("", set())):
+                rec, _ = self.gate(rows, words_from=heard)
+            return rows, rec
+        page = lambda rs: [(k, r["startMs"], r["endMs"], r["device"]) for k, r in enumerate(rs)
+                           if (r.get("device") or {}).get("id") == "highlight-page"]
+        for k in (28, 25):
+            with self.subTest(shot=k):
+                rows, rec = run(k, True)
+                self.assertEqual(any(x["rule"] in M._W_RULES for x in rec["repairs"]), k == 28, rec["repairs"])
+                self.assertEqual(self.page_rows(rows), [26])
+                self.assertEqual(rec["highlight"]["dropped"], [])
+                self.assertTrue(any(x["rule"] == "page" and x["fix"].startswith("held") for x in rec["repairs"]))
+                self.assertEqual(page(rows), page(run(k, False)[0]))
+                self.assertFalse(rows[27].get("device"))                 # the shot it is held from stays plain
+                if k == 25:
+                    self.assertEqual(rows[25]["device"]["line1"], "If you went")
+                    self.assertTrue(any("left as it is" in w and "highlighted page" in w for w in rec["warnings"]))
+
     def test_read_back(self):
         rows = gate_film()
         found, _ = self.find(rows)

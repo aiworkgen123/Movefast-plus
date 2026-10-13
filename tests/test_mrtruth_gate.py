@@ -531,6 +531,135 @@ class Wording(Base):
             self.assertFalse([x for x in self.find_with(rows) if x["rule"] in M._W_RULES])
 
 
+class WordingFlow(Base):
+    """The wording repair inside the gate (review 2026-10-13): what nothing can change stays with a warning, never a
+    repair logged every round; a drop's warning reaches gate.json and the log; a drop never leaves a stretch the quiet
+    rule would stop on, and the stretch it opens gets a line of its own; a one-row list takes the same steps; a move
+    never covers a beat overlay. Made-up words."""
+    find_with = Wording.find_with
+
+    def flagged(self, rows, k, rule, dossier=DOSSIER):
+        found = self.find_with(rows, dossier)
+        self.assertTrue(any(x["rule"] == rule and x["k"] == k for x in found),
+                        [(x["rule"], x["k"], x["what"]) for x in found])
+
+    def stuck_line(self, rows, k, line):
+        """Shot k carries a running title the wording rules flag ('If you went' of a condition), whose own line has no
+        phrase that reads whole and fits."""
+        rows[k]["text"] = "If you went and if you stayed and if you left, it was so."
+        rows[k]["device"], rows[k]["filler"] = {"id": "top-title", "line1": line, "line2": ""}, True
+
+    def test_what_nothing_whole_can_replace_stays_with_a_warning_never_a_repair(self):
+        # a heading cut from a longer one with no other section title to take; an opening kicker that is a whole part
+        # of the setting where the narration names it longer: 'kept' was logged as a repair in every round, the film
+        # re-cut each time, and a second gate said REPAIRED on rows it left as they were
+        A, B, C, P, Q = (word(910, j).title() for j in range(5))
+        chapter = film()
+        chapter[14]["_cut_from"] = f"The {A}'s {B} {C} Remembers Everything"
+        chapter[14]["device"]["heading"] = M._short_heading(chapter[14]["_cut_from"], 25)
+        setting = dict(DOSSIER, setting=f"{P}, far away")
+        kicker = film()
+        kicker[0]["device"] = M._auto_title(setting, "")
+        kicker[0]["text"] = f"Near the {P} {Q} the keepers met."
+        for rows, k, rule, d in ((chapter, 14, "cut off", dict(DOSSIER, sections=DOSSIER["sections"][:1])),
+                                 (kicker, 0, "names", setting)):
+            with self.subTest(rule=rule):
+                self.flagged(rows, k, rule, d)
+                heard, before = copy.deepcopy(rows), copy.deepcopy(rows)
+                with mock.patch.object(M, "_recut", wraps=M._recut) as recut:
+                    rec, eng = self.gate(rows, words_from=heard, dossier=d)
+                self.assertEqual((rec["result"], rec["repairs"], recut.call_count), ("PASS", [], 0))
+                self.assertEqual(rows, before)
+                left = [w for w in rec["warnings"] if w.startswith(f"{rule}: ")]
+                self.assertTrue(left and "left as it is after every repair (no whole" in left[0], rec["warnings"])
+                self.assertIn(f"  ⚠ pre-render gate: {left[0]}", eng.lines)
+                again, _ = self.gate(rows, words_from=heard, dossier=d)
+                self.assertEqual((again["result"], again["repairs"], rows == before), ("PASS", [], True))
+
+    def test_a_drop_reaches_gate_json_and_the_log_as_a_warning(self):
+        # the drop's warning went to the list the next look empties: neither gate.json nor plan.log had it
+        w0, w1 = word(912, 0), word(912, 1)
+        caption = film()
+        caption[29]["text"] = f"There were 31 {w0}s in the {w1} hall."
+        caption[29]["typedCaption"] = {"lines": [f"Thirty-One {w0.title()}s"], "startFrame": M.TYPED_CAPTION_START_F}
+        spoken = film()
+        spoken[5]["text"] = f"The {w0} was not {w1} in origin."
+        spoken[5]["device"], spoken[5]["filler"] = {"id": "shadow-up", "line": f"{w1.title()} in origin"}, True
+        for rows, k, rule, kind in ((caption, 29, "detail", "typed caption"), (spoken, 5, "negation", "shadow-up")):
+            with self.subTest(kind=kind), mock.patch.object(M, "_try_text", lambda *a, **kw: False), \
+                    mock.patch.object(M, "_try_template", lambda *a, **kw: False):
+                self.flagged(rows, k, rule)
+                rec, eng = self.gate(rows, words_from=copy.deepcopy(rows))
+                self.assertTrue(any(x["rule"] == rule and "dropped" in x["fix"] for x in rec["repairs"]), rec["repairs"])
+                warned = [w for w in rec["warnings"] if w.startswith(f"{kind} '") and "dropped" in w]
+                self.assertTrue(warned, rec["warnings"])
+                self.assertIn(f"  ⚠ pre-render gate: {warned[0]}", eng.lines)
+                self.assertIn(warned[0], json.loads((self.job / "mrtruth" / "gate.json").read_text())["warnings"])
+
+    def test_a_drop_never_stops_the_film_on_a_quiet_stretch(self):
+        # the only words of 22-60 s, broken, and no other line there with a phrase: dropping them stopped the film
+        rows = film()
+        for k in (6, 7, 8, 9, 11, 12, 13):
+            rows[k]["text"] = "It was so."
+        self.stuck_line(rows, 10, "If you went")
+        self.flagged(rows, 10, "cut off")
+        rec, eng = self.gate(rows, words_from=copy.deepcopy(rows))   # MRTRUTH_ALLOW_DEGRADED=0: a stop raises
+        self.assertNotEqual(rec["result"], "STOPPED")
+        self.assertEqual(rows[10]["device"]["line1"], "If you went")    # kept, with a warning
+        self.assertFalse(M._gaps(rows, True))
+        self.assertTrue(any(w.startswith("cut off: ") and "without words" in w for w in rec["warnings"]), rec["warnings"])
+        self.assertFalse(any("stopped before drawing" in l for l in eng.lines))
+
+    def test_the_stretch_a_drop_opens_gets_a_line_of_its_own(self):
+        # nothing within two shots can carry it; three shots on, inside the stretch, a line can: the drop left 26 s
+        # without words, under the quiet rule's 30 s, and nothing refilled it
+        rows = film()
+        rows[8]["device"] = {"id": "P02", "headline": first(8, 2), "label": ""}
+        for k in (9, 11, 12):
+            rows[k]["text"] = "It was so."
+        self.stuck_line(rows, 10, "If you went")
+        heard = copy.deepcopy(rows)
+        rec, _ = self.gate(rows, words_from=heard)
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        self.assertTrue(any(x["rule"] == "cut off" and "set at" in x["fix"] for x in rec["repairs"]), rec["repairs"])
+        on8 = rows[8]["startMs"]
+        on14 = next(r["startMs"] for r in rows if (r.get("device") or {}).get("id") == "chapter-plate" and r["startMs"] > on8)
+        self.assertEqual(len([t for t in M._text_times(rows, True) if on8 < t < on14]), 1)     # a line in the stretch
+        self.assertFalse(rows[10].get("device"))
+        again, _ = self.gate(rows, words_from=heard)
+        self.assertEqual(again["result"], "PASS", again["first_look"])
+
+    def test_a_one_row_list_takes_the_wording_steps_before_it_goes(self):
+        # a one-row list went straight to a plain photo: no re-set on its shot, 43 s without words until the quiet rule
+        rows = film()
+        rows[24]["device"] = {"id": "bullet-checklist", "title": first(24, 2), "rows": [word(24, 2).title()]}
+        rec, _ = self.gate(rows, words_from=copy.deepcopy(rows))
+        self.assertEqual(rec["result"], "REPAIRED", rec.get("left"))
+        fix = next(x["fix"] for x in rec["repairs"] if x["rule"] == "text" and "one row" in x["what"])
+        self.assertTrue(fix.startswith("re-set as"), fix)
+        dev = rows[24]["device"]
+        self.assertIn(dev["id"], M.GAP_FILLER_TEMPLATES)
+        self.assertNotEqual(dev["id"], "bullet-checklist")
+        self.assertEqual(dev[M._MAIN[dev["id"]]], first(24, 2))
+        self.assertFalse(any(x["rule"] == "quiet" for x in rec["repairs"]))
+
+    def test_a_move_or_a_refill_never_covers_a_beat_overlay(self):
+        # shot 5 cannot carry its line again (no picture), shots 3, 4 and 7 are taken: the move went onto shot 6,
+        # whose beat overlay the renderer then never drew
+        w0, w1 = word(913, 0), word(913, 1)
+        rows = film()
+        for k in (3, 4, 7):
+            rows[k]["device"] = {"id": "P08"}
+        rows[5].update(text=f"The {w0} was not kept in the {w1} hall.", filler=True, pick=None, spare=[],
+                       device={"id": "shadow-up", "line": f"Kept in the {w1} hall"})
+        rows[6]["overlay"] = {"text": first(6, 1)}
+        self.flagged(rows, 5, "negation")
+        rec, _ = self.gate(rows, words_from=copy.deepcopy(rows))
+        self.assertNotEqual(rec["result"], "STOPPED")
+        self.assertEqual(rows[6].get("overlay"), {"text": first(6, 1)})
+        self.assertFalse([k for k, r in enumerate(rows) if r.get("overlay") and r.get("device")])
+
+
 class Frames(Base):
     def test_double_text_clears_the_beat_overlay(self):
         rows = film()
@@ -954,8 +1083,9 @@ class ReadBack(Base):
         shots[5]["text"] = f"The {word(77, 0)} was not {word(77, 1)} in origin."
         (self.job / "mrtruth" / "shots.json").write_text(json.dumps(shots))
         (self.job / "subs.srt").unlink()                              # a pod film's read-back: the shots' own lines
-        lines = M.check(self.job)
-        self.assertTrue(any(l.startswith("FAIL  negation shot 5") for l in lines), lines)
+        lines = M.check(self.job)                                     # a wording fault never stops a film: a warning
+        self.assertTrue(any(l.startswith("WARN  negation shot 5") for l in lines), lines)
+        self.assertFalse([l for l in lines if l.startswith("FAIL  negation")], lines)
 
 
 class Wiring(unittest.TestCase):

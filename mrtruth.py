@@ -9339,20 +9339,22 @@ def _repeats_words(rows: list, text: str, at: int) -> bool:
     return False
 
 
-def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = None, ok=None) -> set:
+def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = None, ok=None, avoid=()) -> set:
     """The guarantee under fill_gaps: any stretch still longer than OVERLAY_MAX_GAP_S gets a line of the narration
-    of a free shot in its middle - words that are said there by definition, a phrase that reads whole (_spoken_phrase),
+    of a free shot in its middle (no template, typed caption, chapter turn or beat overlay: a template over an overlay
+    hides it, 2026-10-13) - words that are said there by definition, a phrase that reads whole (_spoken_phrase),
     in the text template whose group has the most room (spoken line, running title, editorial card; never one over its
     cap). Such a shot is marked row["filler"]: the first to go when the gate finds too much text. `skip`: (id(row),
     template) pairs the fit step took back before (the gate's quiet repair), never tried again; `gaps`: only these
     stretches (default: every one); `ok(k, template, phrase)`: the gate's own reading of the shot (_wording against
-    its subtitles), when given. The phrase is read with the two lines before and after it (_context), the best of
-    them that repeats no words on screen is set (2026-10-13)."""
+    its subtitles), when given; `avoid`: shots never taken (the wording repair's: _held_near). The phrase is read with
+    the two lines before and after it (_context), the best of them that repeats no words on screen is set
+    (2026-10-13)."""
     added, skip = set(), skip or set()
     for a, b in (_gaps(rows) if gaps is None else gaps):
         need = max(1, int((b - a) / 1000 // GAP_SPACING_S))
-        free = [k for k, r in enumerate(rows) if a + 4000 <= r["startMs"] < b - 4000 and k > 0
-                and not (r.get("device") or r.get("typedCaption") or r.get("section_turn"))]
+        free = [k for k, r in enumerate(rows) if a + 4000 <= r["startMs"] < b - 4000 and k > 0 and k not in avoid
+                and not (r.get("device") or r.get("typedCaption") or r.get("section_turn") or r.get("overlay"))]
         for j in range(need):
             mid = a + (b - a) * (j + 1) / (need + 1)
             for k in sorted(free, key=lambda k: abs(rows[k]["startMs"] - mid)):
@@ -10580,7 +10582,8 @@ def _field_problems(rows: list, k: int, ctx: dict) -> list:
     placeholder, a field over its copy limit, a title or heading ending on a word cut short, a P03 that does not fit or
     whose lines share a word, a line taken from the narration that does not read whole (A2). Repairs: cut (at whole
     words), clear (an optional field), reword (a new phrase of the same line), title (the opening rebuilt), heading
-    (another of the dossier's section titles), drop (the template goes)."""
+    (another of the dossier's section titles), reset (its words re-set the wording rules' way: _fix_list), drop (the
+    template goes)."""
     r = rows[k]
     dev = r.get("device") or {}
     tid = dev.get("id")
@@ -10611,7 +10614,7 @@ def _field_problems(rows: list, k: int, ctx: dict) -> list:
     if f and dev.get(f) and not _phrase_ok(str(dev[f]), r.get("text", ""), *_context(rows, k)):
         out.append((f, f"'{dev[f]}' does not read whole (it stops mid-phrase)", "reword"))
     if tid == "bullet-checklist" and len([x for x in dev.get("rows") or [] if str(x or "").strip()]) == 1:
-        out.append(("rows", "has one row (a list needs two: 2026-10-13)", "drop"))
+        out.append(("rows", "has one row (a list needs two: 2026-10-13)", "reset"))
     return out
 
 
@@ -10629,6 +10632,12 @@ def _caption_problems(r: dict, ctx: dict) -> list:
     if sum(map(len, lines)) > TC_TOTAL_MAX + 3:
         out.append((len(lines) - 1, f"the caption is longer than {TC_TOTAL_MAX + 3} letters", "clear"))
     return out
+
+
+def _wording_soft(x: dict) -> bool:
+    """A fault of the wording rules (2026-10-13: heuristics) or of a line that does not read whole or a one-row list:
+    repaired, else a warning in the gate and in its read-back - never a stop."""
+    return x["rule"] in _W_RULES or x["rule"] == "text" and x.get("fix") in ("reword", "reset")
 
 
 def _gate_find(rows: list, ctx: dict) -> list:
@@ -11309,7 +11318,8 @@ def _try_text(rows: list, k: int, tid: str, f: str, n, c: str, ctx: dict, build,
     """New words `c` in field f (index n) of the template on shot k, set only when they pass every check: the field's
     limit, _wording and A2 (_phrase_ok), the template's own build (words said nearby; a secondary field: said on the
     shot or the two around it, a name's or a picture label's support on its own line), heard near the shot (_words_near:
-    sync keeps them), no repeat of words on screen (_repeats_words, the shot's own cleared) and the pictures' checks."""
+    sync keeps them, and none beside a page, a map or a date unless said at the moment the old ones are: _heard_here),
+    no repeat of words on screen (_repeats_words, the shot's own cleared) and the pictures' checks."""
     r = rows[k]
     dev = r.get("device") or {}
     if not c or len(c) > _field_limit(tid, f) or dev.get("id") != tid:
@@ -11339,7 +11349,7 @@ def _try_text(rows: list, k: int, tid: str, f: str, n, c: str, ctx: dict, build,
         if not _spoken_in(c, win):
             return False
     words = _overlay_words({"device": new})
-    if words and _words_near(words, ctx, r["startMs"]) is None:
+    if words and not _heard_here(rows, k, words, _overlay_words(r), ctx):
         return False
     r["device"] = None
     again = _repeats_words(rows, c, r["startMs"])
@@ -11359,7 +11369,7 @@ def _try_template(rows: list, k: int, tid: str, c: str, ctx: dict, build) -> boo
     if not new:
         return False
     words = _overlay_words({"device": new})
-    if words and _words_near(words, ctx, r["startMs"]) is None or _repeats_words(rows, c, r["startMs"]):
+    if words and not _heard_here(rows, k, words, [], ctx) or _repeats_words(rows, c, r["startMs"]):
         return False
     return _set_device(rows, k, new)
 
@@ -11404,6 +11414,156 @@ def _tc_lines(text: str) -> list:
     return list(min(fit, key=lambda s: abs(len(s[0]) - len(s[1])))) if fit else []
 
 
+_BY_HELD = "kept: it sits beside a highlighted page, a map, a date or a year plate (only words said at the same moment " \
+           "may replace it there)"
+
+
+def _by_held(rows: list, j: int) -> bool:
+    """Shot j carries or sits next to a highlighted page, a map, a date or a year plate (2026-10-13): their own repairs
+    hold them from the plain shot beside them (a line moved onto the shot after a page under HL_MIN_S had the page
+    dropped), and the re-cut lays their shots out from the moments of the words beside them (a spoken line re-worded to
+    words said a shot earlier moved a map's end by 0.3 s). The wording repair seats no words there, and words already
+    there it changes only for words said at the same moment (_heard_here), never moving or dropping them."""
+    return any((rows[i].get("device") or {}).get("id") in ("highlight-page", "P12", "P14") + SPOT_DEVICES
+               for i in (j - 1, j, j + 1) if 0 <= i < len(rows))
+
+
+def _held_near(rows: list, j: int) -> bool:
+    """Shot j takes no words from the wording repair: _by_held, or it carries a beat overlay (a template over it hides
+    it: the renderer draws one or the other)."""
+    return bool(rows[j].get("overlay")) or _by_held(rows, j)
+
+
+def _heard_here(rows: list, k: int, words: list, was: list, ctx: dict, on: int = None) -> bool:
+    """New words for the text on shot k are heard near it (_words_near: the re-sync keeps them), and where the re-sync
+    pins them (sync_overlays: _spoken_at around the narration the shot was cut on) moves no page, map, date or year
+    plate: on a shot none sits beside (_by_held), or at the very moment the words they replace (`was`) are pinned."""
+    if _words_near(words, ctx, rows[k]["startMs"] if on is None else on) is None:
+        return False
+    s0, e0 = rows[k].get("_said") or (rows[k]["startMs"], rows[k]["endMs"])
+    at = lambda ws: _spoken_at(ws, ctx["heard"], s0 - 12000, e0 + 12000)
+    t = at(words)
+    j = next((j for j, x in enumerate(rows) if t is not None and x["startMs"] <= t < x["endMs"]), k)
+    return not (_by_held(rows, k) or _by_held(rows, j)) or bool(was) and t is not None and t == at(was)
+
+
+def _refill(engine, rows: list, build, refused: set, ok, open_, avoid=()) -> set:
+    """Lines of the narration set in the stretches open_() gives (fill_gaps_plain), through the pictures' checks: a
+    filler the fit step takes back is never tried again (refused) and the next free shot of its stretch is tried in the
+    same round while open_() still gives one (impl-z, 2026-10-11: the same refused P05 was set and taken back in every
+    round, the repair said done, and the film stopped on a 32 s stretch after five rounds). The rows that kept one."""
+    kept = set()
+    for _ in range(GATE_FILL_TRIES):
+        added = fill_gaps_plain(engine, rows, build, skip=refused, gaps=open_(), ok=ok, avoid=avoid) if build else set()
+        if not added:
+            break
+        tids = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}
+        n = len(DEV_DROPS)
+        _fit_devices(rows, only=added)
+        del DEV_DROPS[n:]
+        back = {id(r) for r in rows if id(r) in added and not r.get("device")}
+        for r in rows:
+            if id(r) in back:
+                r.pop("filler", None)
+        refused |= {(i, tids[i]) for i in back if i in tids}
+        kept |= added - back
+        if not back or not open_():
+            break
+    return kept
+
+
+def _dropped(rows: list, k: int, kind: str, name: str, text: str, what: str, ctx: dict, build) -> tuple:
+    """Step 5 of a wording repair: the block of words of `kind` on shot k goes, with a warning that outlives the next
+    look (ctx["fix_warnings"]: gate.json and plan.log carry it), and the stretch without words it opens takes lines of
+    its own narration, one every GAP_SPACING_S, on the free shots nearest their places, and a part of it still over
+    OVERLAY_MAX_GAP_S one more (the quiet rule's own refill, _refill, in the same round: 2026-10-13, a drop left 29 s
+    without words, under the quiet rule's 30 s, and nothing refilled it). When a part over OVERLAY_MAX_GAP_S is left,
+    every shot is put back as it was and the block stays: a wording fault never stops a film on the quiet rule. Never
+    beside a page, a map, a date or a year plate (_by_held). Returns (what was done, the rows whose words changed), or
+    (why it stays, set())."""
+    if _by_held(rows, k):
+        return _BY_HELD, set()
+    r, on, at = rows[k], _on_screen_ms(rows[k]), rows[k]["startMs"] / 1000
+    keep, n = [(x, dict(x)) for x in rows], len(DEV_DROPS)
+    _drop_words(rows, k, kind, what)
+    new = []
+    if not _text_times([r], True):                   # (its shot may still show words: a template under its caption)
+        marks = [0] + _text_times(rows, True) + [rows[-1]["endMs"]]
+        a, b = max(m for m in marks if m <= on), min((m for m in marks if m > on), default=rows[-1]["endMs"])
+
+        def parts():                                 # the stretch, cut where a line was set in it
+            m = [a] + [t for t in _text_times(rows, True) if a < t < b] + [b]
+            return list(zip(m, m[1:]))
+        over = lambda: [p for p in parts() if p[1] - p[0] > OVERLAY_MAX_GAP_S * 1000]
+        refused, got = ctx.setdefault("fill_refused", set()), set()
+        for _ in range(2):                           # a line in the stretch, one more in a part still too long
+            got |= _refill(_QUIET, rows, build, refused, lambda kk, tid, w: _said_ok(rows, kk, w, ctx),
+                           lambda: over() or (parts() if len(parts()) == 1 else []),
+                           {j for j in range(len(rows)) if _held_near(rows, j)})
+            if not over():
+                break
+        if over():
+            for x, old in keep:
+                x.clear()
+                x.update(old)
+            del DEV_DROPS[n:]
+            return f"kept: without it {(b - a) / 1000:.0f}s would pass without words on screen and nothing else fits " \
+                   f"there", set()
+        new = [x for x in rows if id(x) in got and x.get("device")]
+    instead = "; ".join(f"{x['device']['id']} '{_shown(x)}' set at {x['startMs'] / 1000:.1f}s" for x in new)
+    ws = ctx.setdefault("fix_warnings", [])
+    w = f"{name} '{text[:40]}' at {at:.1f}s dropped: {what} (no wording that reads whole fits there or on a shot beside " \
+        f"it)" + (f"; in its stretch {instead}" if instead else "")
+    if w not in ws:
+        ws.append(w)
+    return f"{'caption' if kind == 'caption' else name} dropped (no wording from the narration reads whole there)" + \
+        (f"; {instead}" if instead else ""), {id(r)} | {id(x) for x in new}
+
+
+def _elsewhere(rows: list, k: int, tid: str, text: str, cands: list, what: str, ctx: dict, build) -> tuple:
+    """Steps 3-5 of a wording repair, for words the template on shot k cannot carry: (3) another of the owner's gap
+    fillers with room on the same shot (_filler_order, _can), `cands` first, then the shot's own phrases; (4) the
+    nearest free shot within two with a phrase of its own line (a shot seat() and _reseat would take, never one
+    _held_near); (5) else the block goes and its stretch is refilled (_dropped). Returns (what was done, the rows whose
+    words changed), or (why it stays, set())."""
+    r = rows[k]
+    if _by_held(rows, k):
+        return _BY_HELD, set()
+    before, after = _context(rows, k)
+    keep = {key: r.get(key) for key in ("device", "companions", "type_shade", "filler")}
+    r["device"] = None
+    r.pop("companions", None)
+    r.pop("type_shade", None)
+    for tid2, lim2 in _filler_order(rows):           # 3. another gap filler with room, same shot
+        if tid2 == tid or tid2 not in GAP_FILLER_TEMPLATES:
+            continue
+        for c in [c for c in cands if len(c) <= lim2] + _spoken_phrases(r.get("text", ""), lim2, before, after):
+            if _try_template(rows, k, tid2, c, ctx, build):
+                return f"re-set as {tid2} '{c}'", {id(r)}
+    near = sorted((j for j in range(max(1, k - 2), min(len(rows), k + 3)) if j != k), key=lambda j: (abs(j - k), j))
+    for j in near:                                   # 4. the nearest free shot within two
+        y = rows[j]
+        if y.get("device") or y.get("typedCaption") or y.get("section_turn") or y.get("hold") or _covered(y) \
+                or not y.get("pick") or _held_near(rows, j):
+            continue
+        b2, a2 = _context(rows, j)
+        for tid2, lim2 in ([(tid, dict(_FILLERS)[tid])] if tid in dict(_FILLERS) else []) + \
+                [t for t in _filler_order(rows) if t[0] != tid]:
+            if tid2 not in GAP_FILLER_TEMPLATES:
+                continue
+            for c in _spoken_phrases(y.get("text", ""), lim2, b2, a2, ctx.get("names") or ()):
+                if _try_template(rows, j, tid2, c, ctx, build):
+                    if keep.get("filler"):
+                        y["filler"] = True
+                    r.pop("filler", None)
+                    return f"moved to the shot at {y['startMs'] / 1000:.1f}s as {tid2} '{c}'", {id(r), id(y)}
+    for key, v in keep.items():
+        if v is not None:
+            r[key] = v
+    r.setdefault("device", None)
+    return _dropped(rows, k, "device", tid, text, what, ctx, build)     # 5. the block goes, its stretch refilled
+
+
 def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
     """A text the wording rules flag (xs: its faults, one field), repaired from the spoken words (2026-10-13), the
     first candidate that passes every check winning:
@@ -11412,10 +11572,13 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
       2. a fresh phrase of the shot's own line that reads whole, same template (_spoken_phrases);
       3. another of the owner's gap fillers with room on the same shot (_filler_order: group caps, _can);
       4. the nearest free shot within two (a shot seat() and _reseat would take) with a phrase of its own line;
-      5. else the block goes, with a warning, so the quiet rule refills the stretch in the next round.
+      5. else the block goes, with a warning, and the stretch it opens takes a line of its own narration - or, when
+         nothing fits there and it would pass OVERLAY_MAX_GAP_S without words, the block stays (_elsewhere).
     The opening title takes another kicker or title (_kicker, _auto_title), a chapter heading another whole one
-    (_short_heading, the dossier's section titles), a typed caption its edited words or it goes, a template's optional
-    field is cleared. Returns (what was done, the rows whose words changed); ("", ...) when the text changed already."""
+    (_short_heading, the dossier's section titles), a typed caption its edited words or it goes (step 5), a beat
+    overlay its edited words or it is cleared, a template's optional field is cleared. Returns (what was done, the rows
+    whose words changed); ("", set()) when the text changed already; (why it stays, set()) when nothing whole fits -
+    the gate's warning, never a repair."""
     r, x0 = rows[k], xs[0]
     tid, f, n, kind, text = x0["tid"], x0["field"], x0.get("n"), x0["wkind"], x0["text"]
     what = "; ".join(x["what"] for x in xs)
@@ -11428,13 +11591,11 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
             if not new or not _said_ok(rows, k, " ".join(new), ctx):
                 continue
             words = _overlay_words({"typedCaption": {"lines": new}})
-            if words and _words_near(words, ctx, _on_screen_ms(r)) is None:
+            if words and not _heard_here(rows, k, words, _overlay_words(r), ctx, _on_screen_ms(r)):
                 continue
             r["typedCaption"] = dict(r["typedCaption"], lines=new)
             return f"caption re-worded from the narration: '{' / '.join(new)}'", {id(r)}
-        r.pop("typedCaption", None)
-        ctx.setdefault("warnings", []).append(f"typed caption '{text[:50]}' at {r['startMs'] / 1000:.1f}s dropped: {what}")
-        return "caption dropped (no wording from the narration fits it)", {id(r)}
+        return _dropped(rows, k, "caption", "typed caption", text, what, ctx, build)
     if tid == "beat overlay":
         if str((r.get("overlay") or {}).get("text") or "").strip() != text:
             return "", set()
@@ -11443,7 +11604,9 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
         if c:
             r["overlay"] = dict(r["overlay"], text=c)
             return f"beat overlay re-worded: '{c}'", {id(r)}
-        r.pop("overlay", None)
+        r.pop("overlay", None)                       # (a beat overlay is no words for the quiet rule)
+        ctx.setdefault("fix_warnings", []).append(f"beat overlay '{text[:40]}' at {r['startMs'] / 1000:.1f}s cleared: "
+                                                  f"{what}")
         return "beat overlay cleared", {id(r)}
     dev = r.get("device") or {}
     cur = dev.get(f)
@@ -11469,8 +11632,7 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
             if new and new["headline"] != text and not _wording(new["headline"], "", "title", ctx.get("names") or ()):
                 r["device"] = new
                 return f"opening title rebuilt: '{new['headline']}'", {id(r)}
-        ctx.setdefault("warnings", []).append(f"P03 {f} '{text}': {what} - kept, no whole one fits")
-        return "kept (no whole title fits): a warning", set()
+        return "no whole title fits: kept", set()
     if tid == "chapter-plate":
         used = {_norm((x.get("device") or {}).get("heading")) for x in rows if x is not r}
         titles = [s.get("title") for s in (d.get("sections") or [])[1:]]
@@ -11480,8 +11642,7 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
                     and not _wording(c, "", "title", ctx.get("names") or (), [y for y in longer if _norm(y) != _norm(c)]):
                 dev["heading"] = c
                 return f"chapter heading made whole: '{c}'", {id(r)}
-        ctx.setdefault("warnings", []).append(f"chapter '{text}': {what} - kept, no whole heading fits")
-        return "kept (no whole heading fits): a warning", set()
+        return "no whole heading fits: kept", set()
     lim = _field_limit(tid, f)
     said = _said_around(rows, k, ctx)
     for c in _targets(xs, said, lim):                # 1. targeted, same template and field
@@ -11501,42 +11662,21 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
         if not (_FIELDS.get(tid) or {}).get(f, (0, True))[1]:
             dev[f] = [] if isinstance(vals, list) else ""
             return f"{tid} {f} cleared", {id(r)}
-    keep = {key: r.get(key) for key in ("device", "companions", "type_shade", "filler")}
-    r["device"] = None
-    r.pop("companions", None)
-    r.pop("type_shade", None)
     cands = _targets(xs, said, 46) + _spoken_phrases(r.get("text", ""), 46, before, after, ctx.get("names") or ())
-    for tid2, lim2 in _filler_order(rows):           # 3. another gap filler with room, same shot
-        if tid2 == tid or tid2 not in GAP_FILLER_TEMPLATES:
-            continue
-        for c in [c for c in cands if len(c) <= lim2] + _spoken_phrases(r.get("text", ""), lim2, before, after):
-            if _try_template(rows, k, tid2, c, ctx, build):
-                return f"re-set as {tid2} '{c}'", {id(r)}
-    near = sorted((j for j in range(max(1, k - 2), min(len(rows), k + 3)) if j != k), key=lambda j: (abs(j - k), j))
-    for j in near:                                   # 4. the nearest free shot within two
-        y = rows[j]
-        if y.get("device") or y.get("typedCaption") or y.get("section_turn") or y.get("hold") or _covered(y) \
-                or not y.get("pick"):
-            continue
-        b2, a2 = _context(rows, j)
-        for tid2, lim2 in ([(tid, dict(_FILLERS)[tid])] if tid in dict(_FILLERS) else []) + \
-                [t for t in _filler_order(rows) if t[0] != tid]:
-            if tid2 not in GAP_FILLER_TEMPLATES:
-                continue
-            for c in _spoken_phrases(y.get("text", ""), lim2, b2, a2, ctx.get("names") or ()):
-                if _try_template(rows, j, tid2, c, ctx, build):
-                    if keep.get("filler"):
-                        y["filler"] = True
-                    r.pop("filler", None)
-                    return f"moved to the shot at {y['startMs'] / 1000:.1f}s as {tid2} '{c}'", {id(r), id(y)}
-    for key, v in keep.items():
-        if v is not None:
-            r[key] = v
-    r.setdefault("device", None)
-    _drop_words(rows, k, "device", what)             # 5. the block goes; the quiet rule refills its stretch
-    ctx.setdefault("warnings", []).append(f"{tid} '{text[:40]}' at {r['startMs'] / 1000:.1f}s dropped: {what} "
-                                          f"(no wording that reads whole fits there or on a shot beside it)")
-    return f"{tid} dropped (no wording from the narration reads whole there)", {id(r)}
+    return _elsewhere(rows, k, tid, text, cands, what, ctx, build)     # 3-5. another template, shot, else it goes
+
+
+def _fix_list(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
+    """A bullet-checklist with one row (a list needs two, 2026-10-13), through the wording repair's steps 3-5: no
+    second row is made up for it (a whole phrase said nearby is no item of the list), so its title, then its row, then
+    the shot's own phrases are re-set as another gap filler on the shot, else on the nearest free shot, else it goes and
+    its stretch is refilled (_elsewhere). Returns what _fix_wording returns."""
+    dev = rows[k].get("device") or {}
+    words = [" ".join(str(w or "").split()) for w in [dev.get("title")] + list(dev.get("rows") or [])]
+    if dev.get("id") != "bullet-checklist" or len([w for w in words[1:] if w]) != 1:
+        return "", set()                             # changed by an earlier repair
+    words = [w for w in words if w]
+    return _elsewhere(rows, k, "bullet-checklist", " / ".join(words), words, xs[0]["what"], ctx, build)
 
 
 def _absorb(rows: list, k: int) -> bool:
@@ -11884,9 +12024,11 @@ def _can_count(rows: list, tid: str) -> bool:
 
 def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, ctx: dict, found: list) -> None:
     """One round of repairs, picture-free ones first (critique 2026-10-10: the scarce pictures last): the opening, broken
-    words, two blocks in a frame, the same words twice, labels the card check refused, the groups, words off their
-    words, an animation cut short → re-cut if words moved → quiet stretches → long shots and quick runs → the average →
-    the period, stand-ins and repeats. Each repair is written to ctx["fixed"]; what none could repair to ctx["stuck"]."""
+    words, the highlighted pages, two blocks in a frame, the same words twice, labels the card check refused, the
+    groups, words off their words, an animation cut short, the maps and dates, then the wording rules (after every
+    repair that holds a page, a map or a date from the plain shot beside it: 2026-10-13) → re-cut if words moved →
+    quiet stretches → long shots and quick runs → the average → the period, stand-ins and repeats. Each repair is
+    written to ctx["fixed"]; what none could repair to ctx["stuck"]."""
     at = lambda rid: next((k for k, r in enumerate(rows) if id(r) == rid), None)
     by = {}
     for x in found:
@@ -11919,7 +12061,7 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         k = at(x["id"])
         if k is None or not (rows[k].get("typedCaption") if x.get("caption") else rows[k].get("device")):
             continue                                 # gone with an earlier repair
-        if x.get("fix") == "reword" and (x["id"], x.get("field")) in worded:
+        if x.get("fix") == "reword" and (x["id"], x.get("field")) in worded or x.get("fix") == "reset":
             continue                                 # the wording rules repair it below, a targeted edit first
         how = _fix_text(rows, k, x, ctx, build)
         if how:
@@ -11929,25 +12071,6 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         else:
             stuck(x, "its words cannot be repaired" if x.get("fix") != "reword" else
                   "no phrase of its line reads better, and its own words are said there: kept")
-    # the wording rules (2026-10-13): each broken text repaired from the words said around it - a targeted edit, a
-    # fresh phrase, another gap filler on the shot, the nearest free shot - else it goes with a warning and the quiet
-    # rule refills its stretch next round. One repair a text (its faults together); a text an earlier repair of this
-    # round changed is looked at again next round. Its filler flag stays; a moved filler takes it along
-    faults = {}
-    for x in [x for rule in _W_RULES for x in by.get(rule, [])]:
-        faults.setdefault((x["id"], x.get("tid"), x.get("field"), x.get("n")), []).append(x)
-    for xs in faults.values():
-        k = at(xs[0]["id"])
-        if k is None:
-            continue
-        how, changed = _fix_wording(rows, k, xs, ctx, build)
-        if not how:
-            continue
-        for x in xs:
-            did(x, how)
-        for rid in changed:
-            ctx["resynced"].discard(rid)         # its words changed: the words rule may re-sync it once more
-        moved = moved or bool(changed)
     for x in by.get("page", []):                     # a highlighted page: re-timed, re-synced, cut or held, else dropped
         k = at(x["id"])
         if k is None or (rows[k].get("device") or {}).get("id") != "highlight-page":
@@ -12110,6 +12233,32 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         _md_drop(rows, k, x["what"])
         moved = True
         did(x, f"{kind} dropped (the shot shows a picture of its own)")
+    # the wording rules (2026-10-13): each broken text repaired from the words said around it - a targeted edit, a
+    # fresh phrase, another gap filler on the shot, the nearest free shot - else it goes with a warning and its stretch
+    # takes a line of its own narration, or it stays when nothing fits there and the stretch would pass the quiet
+    # rule's limit. After the pages, maps and dates are held from their plain shots, and never on a shot beside one
+    # (_held_near). One repair a text (its faults together); a text an earlier repair of this round changed is looked
+    # at again next round. Its filler flag stays; a moved filler takes it along. A one-row list takes the same steps
+    # (_fix_list). What nothing whole can replace stays as it is: stuck, never a repair (a warning at the gate's end)
+    faults = {}
+    lists = [x for x in by.get("text", []) if x.get("fix") == "reset"]
+    for x in lists + [x for rule in _W_RULES for x in by.get(rule, [])]:
+        faults.setdefault((x["id"], x.get("tid"), x.get("field"), x.get("n")), []).append(x)
+    for xs in faults.values():
+        k = at(xs[0]["id"])
+        if k is None:
+            continue
+        how, changed = (_fix_list if xs[0]["rule"] == "text" else _fix_wording)(rows, k, xs, ctx, build)
+        if not how:
+            continue                                 # changed by an earlier repair: looked at again next round
+        for x in xs:
+            if changed:
+                did(x, how)
+            else:
+                stuck(x, how)
+        for rid in changed:
+            ctx["resynced"].discard(rid)         # its words changed: the words rule may re-sync it once more
+        moved = moved or bool(changed)
     if moved or len(ctx["fixed"]) > n_fixed:         # the words changed: the film is re-cut around them, and the
         _recut(engine, job, rows, cues, dossier)     # steps below work on the new cut
     if by.get("quiet") and _gaps(rows, True):
@@ -12117,23 +12266,8 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
         # next free shot of the stretch is tried in the same round, and the one taken back is never tried again (impl-z,
         # 2026-10-11: the same refused P05 was set and taken back in every round, the repair said done, and the film
         # stopped on a 32 s stretch after five rounds)
-        refused, kept = ctx.setdefault("fill_refused", set()), set()
-        for _ in range(GATE_FILL_TRIES):
-            added = fill_gaps_plain(engine, rows, build, skip=refused, gaps=_gaps(rows, True), ok=wok) if build else set()
-            if not added:
-                break
-            tids = {id(r): r["device"]["id"] for r in rows if id(r) in added and r.get("device")}
-            n = len(DEV_DROPS)
-            _fit_devices(rows, only=added)
-            del DEV_DROPS[n:]
-            back = {id(r) for r in rows if id(r) in added and not r.get("device")}
-            for r in rows:
-                if id(r) in back:
-                    r.pop("filler", None)
-            refused |= {(i, tids[i]) for i in back if i in tids}
-            kept |= added - back
-            if not back or not _gaps(rows, True):
-                break
+        refused = ctx.setdefault("fill_refused", set())
+        kept = _refill(engine, rows, build, refused, wok, lambda: _gaps(rows, True))
         moved_in = _gap_room(rows, build, refused, ok=wok) if build and _gaps(rows, True) else []
         if kept or moved_in:
             _recut(engine, job, rows, cues, dossier)
@@ -12257,8 +12391,10 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
     minute; no empty or broken template field; the opening title on the first shot; the period where it matters, from
     the stored verdicts only - plus the card check: every label that names its picture, asked once on JUDGE_MODEL
     (_card_looks). Each break is repaired (_gate_fix) and the whole checked again, up to GATE_ROUNDS; what is still
-    broken stops the run (_stop: PlanningStopped, or logged with MRTRUTH_ALLOW_DEGRADED=1). Writes mrtruth/gate.json.
-    A plan that passes is left exactly as it was (a second gate changes nothing and asks nothing)."""
+    broken stops the run (_stop: PlanningStopped, or logged with MRTRUTH_ALLOW_DEGRADED=1) - but the wording rules
+    (2026-10-13), like pacing, never stop a film: what no repair changed stays on screen with a warning, as does what a
+    repair dropped (gate.json and plan.log). Writes mrtruth/gate.json. A plan that passes is left exactly as it was (a
+    second gate changes nothing and asks nothing)."""
     GATE.clear()
     if not rows:
         return {}
@@ -12299,9 +12435,12 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
     for x in [x for x in found if x["rule"] in ("average", "pace")]:   # pacing never stops a film (owner 2026-10-11)
         ctx["warnings"].append(f"pacing: {x['what']}")
         found.remove(x)
-    for x in [x for x in found if x["rule"] in _W_RULES or x["rule"] == "text" and x.get("fix") == "reword"]:
-        ctx["warnings"].append(f"{x['rule']}: {x['what']} - left as it is after every repair")   # word rules are
-        found.remove(x)                              # heuristics: never a stop (2026-10-13), the text stays on screen
+    for x in [x for x in found if _wording_soft(x)]:   # word rules are heuristics: never a stop (2026-10-13); the
+        why = next((y["why"] for y in ctx["stuck"] if y.get("id") == x["id"] and y["rule"] == x["rule"]), "")
+        ctx["warnings"].append(f"{x['rule']}: {x['what']} - left as it is after every repair"   # text stays on
+                               + (f" ({why})" if why else ""))                                  # screen, and why
+        found.remove(x)
+    ctx["warnings"] += [w for w in ctx.get("fix_warnings", []) if w not in ctx["warnings"]]   # a drop's (_dropped)
     spots = [x for x in found if x["rule"] in ("map", "date")]
     for x in spots:                                  # a map or a date never stops a film: what is still broken goes
         k = next((k for k, r in enumerate(rows) if id(r) == x["id"]), None)
@@ -12494,7 +12633,8 @@ def _plan_rows(job: Path) -> list:
 def check(job: Path) -> list:
     """The gate read back (`python mrtruth.py check <job>`), with no call and no change: gate.json's result and repairs
     when the job was planned with the gate, then every code rule run again on plan.json and shots.json (a FAIL line
-    each); a label the card check has no answer for is a LOOK line. Returns the lines."""
+    each; a WARN line for the wording rules, which never stop a film: _wording_soft); a label the card check has no
+    answer for is a LOOK line. Returns the lines."""
     job = Path(job)
     work = job / "mrtruth"
     rows = _plan_rows(job)
@@ -12527,11 +12667,14 @@ def check(job: Path) -> list:
     ctx["soft"] = dict(rec.get("soft") or {})        # the gate's own warnings (a group no shot could carry)
     ctx["md_years"] = _md_years((rec.get("places_dates") or {}).get("candidate_dates"))
     found = _gate_find(rows, ctx)
-    out += [f"FAIL  {x['rule']}" + (f" shot {x['k']} ({x['at'] / 1000:.1f}s)" if x.get("k") is not None else "")
-            + f": {x['what']}" for x in found]
+    say = lambda x: f"{x['rule']}" + (f" shot {x['k']} ({x['at'] / 1000:.1f}s)" if x.get("k") is not None else "") \
+        + f": {x['what']}"
+    soft = [x for x in found if _wording_soft(x)]    # the word rules never stop a film: a warning, as the gate gives
+    found = [x for x in found if x not in soft]
+    out += [f"FAIL  {say(x)}" for x in found]
     out += [f"LOOK  shot {k}: {tid} '{lab}' - the card check has no answer for this label on this picture"
             for k, tid, lab in ctx.get("looks", [])]
-    out += [f"WARN  {w}" for w in ctx.get("warnings", [])]
+    out += [f"WARN  {w}" for w in ctx.get("warnings", [])] + [f"WARN  {say(x)}" for x in soft]
     out += [f"NOTE  {n}" for n in ctx.get("notes", [])]          # the repo's G15, never a stop: a year said on a
                                                                    # plain shot where the year card could have gone
     if not found:
