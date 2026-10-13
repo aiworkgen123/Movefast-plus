@@ -139,7 +139,9 @@ class OpeningAndGallery(unittest.TestCase):
         M.assign(e, rows, opps, script, cues, dossier, "A Test Film")
         dev = lambda r: (r.get("device") or {}).get("id")
         self.assertEqual(dev(rows[0]), "P03")
-        self.assertEqual(rows[0]["device"]["kicker"], "The Grand Northern")          # whole words, not '...Archi'
+        # a whole part of the setting, never a name cut at whole words ("The Grand Northern" of "The Grand Northern
+        # Archive Library", 34 letters, is the name cut the six test films opened on, 2026-10-13)
+        self.assertEqual(rows[0]["device"]["kicker"], "Elsewhere")
         gal = [k for k, r in enumerate(rows) if dev(r) == "gallery-strip"]
         self.assertEqual(len(gal), 1)
         g = rows[gal[0]]
@@ -150,6 +152,15 @@ class OpeningAndGallery(unittest.TestCase):
         self.assertIn("gallery-strip×1", summary)
         self.assertIn("P03×1", summary)
         self.assertNotIn("P12×2", summary)
+
+    def test_the_opening_kicker_is_read_against_the_first_words_said(self):
+        # (review 2026-10-13) the kicker was read against the setting only, the gate reads it against the narration:
+        # 'Morvane' of a setting 'Morvane, Elsewhere' where the narrator says 'the Morvane Tessick' was flagged and kept
+        rows, cues = film_rows()
+        cues[0] = (cues[0][0], cues[0][1], "Near the Morvane Tessick the keepers met.")
+        rows[0]["text"] = cues[0][2]
+        M.assign(Engine(), rows, [], " ".join(c[2] for c in cues), cues, {"setting": "Morvane, Elsewhere"}, "A Test Film")
+        self.assertEqual(rows[0]["device"]["kicker"], "Morvane Tessick")
 
 
 class ChapterHeadings(unittest.TestCase):
@@ -170,7 +181,29 @@ class ChapterHeadings(unittest.TestCase):
         got = self.headings({"chapters": [], "overlays": []},
                             [{"title": "x"}, {"title": "Keepers Unwritten Northern Ledgers"},
                              {"title": "Second Movement"}])
-        self.assertEqual(got, ["Keepers Unwritten", "Second Movement"])          # was 'Keepers Unwritten Norther'
+        # its head noun kept, a modifier dropped (2026-10-13; a cut at whole words, "Keepers Unwritten", lost it)
+        self.assertEqual(got, ["Keepers Unwritten Ledgers", "Second Movement"])  # was 'Keepers Unwritten Norther'
+
+    def test_a_heading_starts_with_a_capital(self):
+        # (review 2026-10-13) a sentence-case section title less its article went on screen as 'glorpwick's narrow
+        # vantle'; a heading Claude writes in lower case starts with a capital too
+        got = self.headings({"chapters": [], "overlays": []},
+                            [{"title": "x"}, {"title": "The glorpwick's narrow vantle"}, {"title": "a zemblar of quorts"}])
+        self.assertEqual(got, ["Glorpwick's narrow vantle", "A zemblar of quorts"])
+        got = self.headings({"chapters": [{"shot": 12, "heading": "the zemblar's long vantle"}], "overlays": []}, [])
+        self.assertEqual(got[0], "The zemblar's long vantle")
+
+    def test_a_filled_heading_keeps_what_it_was_made_from(self):
+        # (review 2026-10-13, round 4) the gate reads a heading only against what it was made from: a shortened
+        # section title filled in keeps it, as a planner's heading does
+        rows, _ = film_rows(n=60)
+        with tempfile.TemporaryDirectory() as d:
+            M.fill_overlays(Engine(lambda p: json.dumps({"chapters": [], "overlays": []})), Path(d), rows, "s",
+                            {"sections": [{"title": "x"}, {"title": "Keepers Unwritten Northern Ledgers"},
+                                          {"title": "Second Movement"}]}, lambda *a: None)
+        made = {r["device"]["heading"]: r.get("_cut_from") for r in rows
+                if (r.get("device") or {}).get("id") == "chapter-plate"}
+        self.assertEqual(made, {"Keepers Unwritten Ledgers": "Keepers Unwritten Northern Ledgers", "Second Movement": None})
 
 
 class Caches(unittest.TestCase):
