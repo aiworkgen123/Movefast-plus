@@ -93,6 +93,12 @@ res = {"shots": len(shots), "steps": dict(steps), "ai": sum(s["ai"] for s in sho
        "timing_s": {k: v for k, v in timing.items() if isinstance(v, (int, float))},
        "planning_total_s": round(sum(v for v in timing.values() if isinstance(v, (int, float))), 1),
        "timing_detail": timing.get("detail") or {},
+       # the planner (owner 2026-10-14: Claude Sonnet through Anthropic, or through Token Supply on test): Token
+       # Supply's calls and Anthropic's, the answers asked again or handed to Anthropic, why Token Supply turned off;
+       # its log line, the run's whole Claude bill line and Token Supply's part of it
+       "planner": (timing.get("detail") or {}).get("planner") or {},
+       "planner_line": grab(r"planner \(\w+\): .*"), "claude_line": grab(r"Claude this run: .*"),
+       "token_supply_line": grab(r"Token Supply this run: .*"),
        "pictures_line": grab(r"pictures in .*"), "judge_line": grab(r"judge: .*"),
        "checks_line": grab(r"picture checks \(.*"), "store_line": grab(r"verdict store: .*"),
        "words_line": grab(r"words on screen: .*"), "unplanned_line": grab(r".*could not be planned.*"),

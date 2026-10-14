@@ -197,6 +197,9 @@ td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line)}
         <h3>Machines per film</h3>
         <div class="row"><input type="number" id="machines" min="1" max="5" style="width:100px"><button class="btn" id="saveMachines">Save</button>
         <span class="hint">One cheap machine plans the film and draws a share; the others only draw. 3 is the usual. Each is the cheapest one RunPod has free.</span></div>
+        <h3>Planner</h3>
+        <div class="row"><select id="planner" style="width:auto"></select><button class="btn" id="savePlanner">Save</button>
+        <span class="hint">Claude Sonnet through Token Supply is cheaper and on test (it needs the Token Supply key), and Anthropic still writes the highlighted pages and is its automatic backup.</span></div>
       </div>
       <div class="card">
         <h2>People</h2>
@@ -255,19 +258,24 @@ function go(tab){
 }
 $$('[data-go]').forEach(b => b.onclick = () => go(b.dataset.go));
 
+// the keys still missing (/api/me): boot, and the Planner's Save, which must not reload Settings over what is typed there
+function banner(d){
+  const b = $('#setupBanner');
+  if (d.user && d.setup_needed){
+    b.classList.remove('hide');
+    b.innerHTML = d.user.role==='owner'
+      ? 'Before the first film, add the keys in <a href="#" onclick="go(\'settings\');return false">Settings</a>: ' + esc((d.missing_keys||[]).join(', ')) + '.'
+      : 'An owner still has to add the keys before films can be made.';
+  } else b.classList.add('hide');
+}
+
 async function boot(){
   const d = await api('/api/me');
   if (!d.user){ show('login'); $('#ln').focus(); return; }
   ME = d; show('app');
   $('#who').textContent = d.user.name + (d.user.role==='owner' ? ' (owner)' : '');
   $('#setBtn').classList.toggle('hide', d.user.role!=='owner');
-  const b = $('#setupBanner');
-  if (d.setup_needed){
-    b.classList.remove('hide');
-    b.innerHTML = d.user.role==='owner'
-      ? 'Before the first film, add the keys in <a href="#" onclick="go(\'settings\');return false">Settings</a>: ' + esc((d.missing_keys||[]).join(', ')) + '.'
-      : 'An owner still has to add the keys before films can be made.';
-  } else b.classList.add('hide');
+  banner(d);
   $('#places').innerHTML = d.run_on.map((p,i) => `<label class="place ${p.ready?'':'off'}">
       <input type="radio" name="run_on" value="${esc(p.id)}" ${p.ready?'':'disabled'} ${p.ready && !d.run_on.slice(0,i).some(q=>q.ready)?'checked':''}>
       <span><b>${esc(p.label)}</b><br><span class="hint">${esc(p.note)}</span></span></label>`).join('');
@@ -347,7 +355,7 @@ function film(j){
   }
   if (j.status==='done' && j.links){
     body += playing.has(j.id) ? `<video controls preload="metadata" src="${esc(j.links.watch)}"></video>` : '';
-    const parts = [['Machine',c.pod],['Picture checks',c.gemini],['Claude',c.claude],['AI pictures',c.ai_pictures]].filter(p => p[1]!==undefined);
+    const parts = [['Machine',c.pod],['Picture checks',c.gemini],['Claude',c.claude],['Token Supply',c.token_supply],['AI pictures',c.ai_pictures]].filter(p => p[1]!==undefined);
     if (parts.length) body += `<div class="costs" style="margin-top:8px">${parts.map(p=>`<span>${p[0]} <b>${money(p[1])}</b></span>`).join('')}<span>Total <b>${money(c.total)}</b></span></div>`;
   }
   if (j.error) body += `<div class="err">${esc(j.error)}</div>`;
@@ -360,7 +368,7 @@ function film(j){
   if (['failed','cancelled'].includes(j.status)) acts.push(`<button class="btn small" data-act="retry" data-id="${j.id}">Try again</button>`);
   if (!active) acts.push(`<button class="btn small danger" data-act="delete" data-id="${j.id}">Delete</button>`);
   if (j.status!=='queued') acts.push(`<button class="btn small" data-act="log" data-id="${j.id}">${openLogs.has(j.id)?'Hide':'Show'} details</button>`);
-  const info = [j.user, when(j.created), dur(j.seconds) ? 'voice '+dur(j.seconds) : '', j.music_name ? 'music: '+j.music_name+(j.music_vol!=null && j.music_vol<100 ? ' ('+Math.round(j.music_vol)+'%)' : '') : 'no music', j.pod_desc||''].filter(Boolean).join(' · ');
+  const info = [j.user, when(j.created), dur(j.seconds) ? 'voice '+dur(j.seconds) : '', j.music_name ? 'music: '+j.music_name+(j.music_vol!=null && j.music_vol<100 ? ' ('+Math.round(j.music_vol)+'%)' : '') : 'no music', j.planner==='ts' ? 'planner: Claude through Token Supply (test)' + (c.token_supply_off ? ' - Token Supply was off ('+c.token_supply_off+'): Anthropic planned in its place' : '') : '', j.pod_desc||''].filter(Boolean).join(' · ');
   return `<div class="film" id="f-${j.id}"><div class="top"><span class="name">${esc(j.title)}</span>
     <span class="badge ${j.status}">${LABEL[j.status]||j.status}</span></div>
     <div class="meta">${esc(info)}</div>${body}<div class="acts">${acts.join('')}</div>
@@ -408,6 +416,7 @@ async function loadSettings(){
      <input type="password" name="${k.name}" placeholder="${esc(k.help)}" autocomplete="off"></div>`).join('');
   $('#maxPar').value = d.max_parallel;
   $('#machines').value = d.machines;
+  $('#planner').innerHTML = d.planners.map(p => `<option value="${esc(p.id)}"${p.id===d.planner?' selected':''}>${esc(p.label)}</option>`).join('');
   $('#people').innerHTML = d.users.map(u => `<tr><td>${esc(u.name)}</td><td>${u.role}</td><td style="text-align:right">
      <button class="btn small" data-pw="${esc(u.name)}">New password</button>
      ${u.name!==ME.user.name?`<button class="btn small danger" data-rm="${esc(u.name)}">Remove</button>`:''}</td></tr>`).join('');
@@ -426,6 +435,7 @@ $('#testKeys').onclick = async () => { $('#testOut').textContent = 'Testing…';
   $('#testOut').innerHTML = r.error ? esc(r.error) : Object.entries(r.results).map(([k,v]) => `${esc(k)}: <b style="color:var(--${String(v).startsWith('ok')?'ok':'bad'})">${esc(v)}</b>`).join('<br>'); };
 $('#saveMax').onclick = async () => { const r = await api('/api/settings', {json:{max_parallel:+$('#maxPar').value}}); toast(r.error || 'Saved.'); };
 $('#saveMachines').onclick = async () => { const r = await api('/api/settings', {json:{machines:+$('#machines').value}}); toast(r.error || 'Saved. New films use it.'); };
+$('#savePlanner').onclick = async () => { const r = await api('/api/settings', {json:{planner:$('#planner').value}}); toast(r.error || 'Saved. New films use it.'); if (!r.error) banner(await api('/api/me')); };
 $('#addUser').onsubmit = async e => { e.preventDefault(); $('#userErr').textContent='';
   const r = await api('/api/users', {json:Object.fromEntries(new FormData(e.target))});
   if (r.error) return $('#userErr').textContent = r.error; e.target.reset(); toast('Added. Send them the website address, their name and password.'); loadSettings(); };

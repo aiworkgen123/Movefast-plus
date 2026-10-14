@@ -212,6 +212,95 @@ class Web(unittest.TestCase):
         self.assertEqual(c.post("/api/users/juan/delete", json={}).status_code, 200)
         self.assertIsNone(self.A.store.user("juan"))
 
+    # Settings → Planner (owner 2026-10-14: Claude Sonnet, or Claude Sonnet through Token Supply on test) and the key
+    # test, through the website itself
+    def test_settings_show_and_save_the_planner(self):
+        c = self.client("owner1")
+        self.addCleanup(self.A.store.put, "planner", "sonnet")
+        s = c.get("/api/settings").json
+        self.assertEqual(s["planner"], "sonnet")
+        self.assertEqual([p["id"] for p in s["planners"]], ["sonnet", "ts"])
+        self.assertEqual([p["label"] for p in s["planners"]],
+                         ["Claude Sonnet", "Claude Sonnet through Token Supply (cheaper, test)"])
+        self.assertIn("TOKENSUPPLY_API_KEY", [k["name"] for k in s["keys"] if not k["needed"]])
+        self.assertIn("ANTHROPIC_API_KEY", [k["name"] for k in s["keys"] if k["needed"]])   # needed in every mode
+        for bad in ("mix", "gpt", "", 3):
+            r = c.post("/api/settings", json={"planner": bad})
+            self.assertEqual(r.status_code, 400, bad)
+            self.assertIn("the planner is one of: Claude Sonnet, Claude Sonnet through Token Supply", r.json["error"])
+        self.assertEqual(c.get("/api/settings").json["planner"], "sonnet")
+        self.assertEqual(self.client("maria").post("/api/settings", json={"planner": "ts"}).status_code, 403)
+        self.assertEqual(c.post("/api/settings", json={"planner": "ts"}).status_code, 200)
+        self.assertEqual(c.get("/api/settings").json["planner"], "ts")
+        jid = self.new(c).json["id"]                                      # a film keeps the planner it was made with
+        c.post("/api/settings", json={"planner": "sonnet"})
+        self.assertEqual(self.A.store.job(jid)["planner"], "ts")
+        self.assertEqual(next(j for j in c.get("/api/jobs").json["jobs"] if j["id"] == jid)["planner"], "ts")
+        sonnet = self.new(c).json["id"]
+        self.assertEqual(next(j for j in c.get("/api/jobs").json["jobs"] if j["id"] == sonnet)["planner"], "sonnet")
+        for x in (jid, sonnet):
+            c.post(f"/api/jobs/{x}/cancel", json={})
+        c.post(f"/api/jobs/{jid}/retry", json={})                         # a Try again keeps it too
+        self.assertEqual(self.A.store.job(jid)["planner"], "ts")
+        c.post(f"/api/jobs/{jid}/cancel", json={})
+
+    def test_the_key_test_checks_token_supply_with_one_token(self):
+        c = self.client("owner1")
+        self.addCleanup(self.A.store.put, "planner", "sonnet")
+        sent, answer = [], {"code": 200}
+
+        def post(url, **kw):
+            if "token-supply" in url:
+                sent.append((url, kw))
+                return mock.Mock(ok=answer["code"] < 400, status_code=answer["code"], text="{}")
+            return mock.Mock(ok=True, status_code=200, text="{}")               # Claude's credit check
+        get = lambda url, **kw: mock.Mock(ok=True, status_code=200, text="{}", json=lambda: {})
+        with mock.patch("requests.get", get), mock.patch("requests.post", post), \
+                mock.patch.object(self.A.studio, "sources", lambda: FakeSources()):
+            test = lambda: c.post("/api/settings/test", json={}).json["results"]["Token Supply"]
+            self.assertEqual(test(), "not set (only for the Token Supply planner)")
+            self.A.store.put("planner", "ts")
+            self.assertEqual(test(), "failed: not set, and the planner is Claude Sonnet through Token Supply")
+            self.assertEqual(sent, [])                                       # nothing asked without a key
+            c.post("/api/settings", json={"keys": {"TOKENSUPPLY_API_KEY": "ts-test-key-123456"}})
+            self.addCleanup(c.post, "/api/settings", json={"clear": ["TOKENSUPPLY_API_KEY"]})
+            self.assertEqual(test(), "ok")
+            url, kw = sent[-1]
+            self.assertEqual(url, "https://api.token-supply.com/v1/messages")
+            self.assertEqual(kw["headers"], {"x-api-key": "ts-test-key-123456", "anthropic-version": "2023-06-01",
+                                             "Authorization": "Bearer ts-test-key-123456",
+                                             "content-type": "application/json"})
+            self.assertEqual((kw["json"]["max_tokens"], kw["json"]["model"]), (1, "claude-sonnet-5"))
+            answer["code"] = 401
+            self.assertEqual(test(), "failed: the Token Supply key was refused (HTTP 401) - check it in Settings")
+            self.A.store.put("planner", "sonnet")                            # a set key is checked whatever the planner
+            self.assertTrue(test().startswith("failed: the Token Supply key was refused"))
+            self.assertEqual(len(sent), 3)
+        self.assertNotIn("ts-test-key-123456", json.dumps(c.get("/api/settings").json))
+
+    def test_an_older_database_gets_the_planner_column(self):
+        import sqlite3
+        from web.store import Store
+        p = Path(tempfile.mkdtemp()) / "old.sqlite"
+        self.addCleanup(shutil.rmtree, p.parent, ignore_errors=True)
+        db = sqlite3.connect(p)                                  # the live version's jobs table, without the planner
+        old = subprocess.run(["git", "-C", str(HERE), "show", "e8ef33b:web/store.py"], capture_output=True, text=True)
+        if old.returncode == 0:
+            db.executescript(old.stdout.split('SCHEMA = """', 1)[1].split('"""', 1)[0])
+        else:
+            db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY, title TEXT, status TEXT, deleted INTEGER DEFAULT 0, "
+                       "created REAL)")
+        db.execute("INSERT INTO jobs(id, title, status, deleted, created) VALUES('a','old film','done',0,1)")
+        db.commit()
+        db.close()
+        s = Store(p)
+        self.assertIsNone(s.job("a")["planner"])                 # a film made before the choice: Claude Sonnet's
+        self.assertEqual(s.job("a")["title"], "old film")
+        jid = s.new_job(user="u", title="new", planner="ts")
+        self.assertEqual(s.job(jid)["planner"], "ts")
+        Store(p)                                                 # opened again: nothing added twice
+        self.assertEqual(s.job(jid)["planner"], "ts")
+
 
 class FakeSources:
     """RunPod and Vast.ai stand-in for the runner's tests: `free` machines can still be rented; machines by id."""
@@ -265,7 +354,7 @@ class Runner(unittest.TestCase):
         self.src = FakeSources()
         self.s.bucket = lambda: self.b
         self.s.sources = lambda: self.src
-        self.s.missing_keys = lambda: []
+        self.s.missing_keys = lambda made=False: []
         self.s.keys = lambda: {"RUNPOD_API_KEY": "k"}
         self.s.package = lambda b: ("mrtruth/pkg/x.tgz", "abc123def456aa")
         self.s.stop.wait = lambda t=None: None
@@ -1180,6 +1269,398 @@ class Machines(unittest.TestCase):
                                               "vast": {"balance": 18.2, "spend_hr": None}})
             src.balances()
         self.assertEqual(calls, ["rp", "vast"])
+
+
+class PlannerSetting(unittest.TestCase):
+    """Settings → Planner (owner 2026-10-14): Claude Sonnet by default, or Claude Sonnet through Token Supply on test -
+    the setting, the Token Supply key it needs for new films, Token Supply never holding a film up or being asked
+    before a machine is rented, only a Token Supply film's planning machine getting its settings, the planner's own
+    .env on the machine, the cost split and the pod's summary. All HTTP is faked."""
+
+    def setUp(self):
+        from web.jobs import Studio, LocalBucket
+        from web.store import Store
+        import web.jobs as J
+        self.J = J
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+        self.s = Studio(Store(self.d / "s.sqlite"), self.d)
+        self.b = LocalBucket(self.d / "bucket")
+        self.src = FakeSources()
+        self.s.bucket = lambda: self.b
+        self.s.sources = lambda: self.src
+        self.s.package = lambda b: ("mrtruth/pkg/x.tgz", "abc123def456aa")
+        self.s.stop.wait = lambda t=None: None
+        self.keys = {k: "k-" + k.lower() for k, _, need, _ in J.KEYS if need}
+        self.s.keys = lambda: dict(self.keys)
+        self.posted, self.real_check = [], J.tokensupply_check   # no film may call Token Supply (or anything else)
+
+        def post(url, **kw):
+            self.posted.append(url)
+            raise AssertionError(f"a film asked {url}")
+        for p in (mock.patch.object(J.VS, "env_for", lambda b, run, mf, keys, log=None: {"RUN_ID": run, "_mine": "m"}),
+                  mock.patch.object(J, "claude_credit", lambda key: ""),
+                  mock.patch.object(J, "tokensupply_check", side_effect=AssertionError("Token Supply was asked")),
+                  mock.patch.object(J.requests, "post", post)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def job(self, planner=None, plan_log=""):
+        jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=1, seconds=60, planner=planner)
+        ins = self.s.folder(jid) / "inputs"
+        ins.mkdir(parents=True)
+        (ins / "voice.mp3").write_bytes(b"v")
+        (ins / "script.txt").write_text("s")
+        self.s.store.update(jid, status="starting")
+
+        def finished(name, env):                     # what a planner that finished writes: video, done, its logs
+            K = self.s.keys_of(jid, "T", self.s.store.job(jid)["run"])
+            self.b.put_bytes(K["video"], b"video")
+            self.b.put_bytes(K["done"], json.dumps({"ok": True}).encode())
+            self.b.put_bytes(K["result"], self.tgz(plan_log).read_bytes())
+        self.src.on_rent = finished
+        return jid
+
+    def tgz(self, plan_log):
+        buf = self.d / f"r{len(list(self.d.glob('r*.tgz')))}.tgz"
+        with tarfile.open(buf, "w:gz") as t:
+            info = tarfile.TarInfo("plan.log")
+            info.size = len(plan_log.encode())
+            t.addfile(info, io.BytesIO(plan_log.encode()))
+        return buf
+
+    def made(self, jid):
+        self.s._guard(jid, self.s._run)
+        j = self.s.store.job(jid)
+        self.assertEqual(j["status"], "done", j["error"])
+        self.assertEqual(self.posted, [])
+        return j
+
+    def test_sonnet_is_the_default_and_the_setting_keeps_to_the_list(self):
+        self.assertEqual(self.s.planner(), "sonnet")
+        self.s.store.put("planner", "ts")
+        self.assertEqual(self.s.planner(), "ts")
+        for other in ("mix", "gpt", ""):
+            self.s.store.put("planner", other)
+            self.assertEqual(self.s.planner(), "sonnet", other)
+        self.assertEqual(self.J.PLANNERS, {"sonnet": "Claude Sonnet",
+                                           "ts": "Claude Sonnet through Token Supply (cheaper, test)"})
+        self.assertEqual(self.J.PLANNER_DEFAULT, "sonnet")
+
+    def test_the_token_supply_key_is_needed_only_for_new_token_supply_films(self):
+        row = next(k for k in self.J.KEYS if k[0] == "TOKENSUPPLY_API_KEY")
+        self.assertEqual(row, ("TOKENSUPPLY_API_KEY", "Token Supply (the cheaper Claude planner, on test)", False,
+                               "token-supply.com → API keys (Anthropic group); only needed when Planner is Claude "
+                               "through Token Supply"))
+        self.assertEqual(self.s.missing_keys(), [])
+        self.s.store.put("planner", "ts")
+        self.assertEqual(self.s.missing_keys(), [row[1]])
+        self.assertEqual(self.s.missing_keys(made=True), [])      # a film made already is never held up over it
+        self.keys["TOKENSUPPLY_API_KEY"] = "ts-key"
+        self.assertEqual(self.s.missing_keys(), [])
+        claude = next(k[1] for k in self.J.KEYS if k[0] == "ANTHROPIC_API_KEY")
+        del self.keys["ANTHROPIC_API_KEY"]                         # Anthropic: the backup and the pages, every mode
+        for planner in ("ts", "sonnet"):
+            self.s.store.put("planner", planner)
+            self.assertEqual(self.s.missing_keys(), [claude], planner)
+            self.assertEqual(self.s.missing_keys(made=True), [claude], planner)
+        self.assertNotIn("TOKENSUPPLY_API_KEY", self.J.POD_KEYS)   # never given to a Sonnet film's machine
+
+    def test_a_sonnet_film_never_fails_over_the_token_supply_key(self):
+        """Planner saved as Token Supply before its key is set: the Sonnet films already waiting (or tried again) are
+        made as before - they never use Token Supply."""
+        self.s.store.put("planner", "ts")
+        for planner in (None, "sonnet"):
+            self.src.rents.clear()
+            self.made(self.job(planner))
+            self.assertFalse({"PLANNER", "K_TOKENSUPPLY_API_KEY"} & set(self.src.rents[0][1]), planner)
+
+    def test_a_sonnet_films_machine_gets_exactly_what_it_got_before(self):
+        self.keys["TOKENSUPPLY_API_KEY"] = "ts-key"                # saved, but the film is Sonnet's
+        envs = []
+        for planner in (None, "sonnet", "ts"):
+            self.src.rents.clear()
+            self.made(self.job(planner))
+            envs.append(self.src.rents[0][1])
+            self.assertEqual(self.src.rents[0][2], self.J.PLAN_SCRIPT)
+        for env in envs[:2]:
+            self.assertFalse({"PLANNER", "K_TOKENSUPPLY_API_KEY"} & set(env))
+            self.assertFalse([v for v in env.values() if "ts-key" in str(v)])
+            self.assertEqual({k for k in env if k.startswith("K_")}, {"K_" + k for k in self.J.POD_KEYS})
+        self.assertEqual(set(envs[0]), set(envs[1]))
+        self.assertEqual((set(envs[2]) - set(envs[0]), set(envs[0]) - set(envs[2])),   # a Token Supply film: these
+                         ({"PLANNER", "K_TOKENSUPPLY_API_KEY"}, set()))                  # two more, nothing else
+
+    def test_a_token_supply_film_gets_its_settings_and_token_supply_is_never_asked(self):
+        self.keys["TOKENSUPPLY_API_KEY"] = "ts-key"
+        stages = []
+        jid = self.job("ts")
+        finished = self.src.on_rent
+        self.src.on_rent = lambda name, env: stages.append(self.s.store.job(jid)["stage"]) or finished(name, env)
+        self.made(jid)
+        self.assertEqual(len(self.src.rents), 1)
+        env = self.src.rents[0][1]
+        self.assertEqual((env["PLANNER"], env["K_TOKENSUPPLY_API_KEY"]), ("ts", "ts-key"))
+        self.assertEqual(env["K_ANTHROPIC_API_KEY"], "k-anthropic_api_key")      # the backup and the pages
+        self.assertEqual(stages, ["Renting a machine"])
+        self.assertNotIn("Token Supply", (self.d / "studio.log").read_text() if (self.d / "studio.log").exists() else "")
+
+    def test_token_supply_never_holds_a_film_up(self):
+        """Owner: a film never stops or waits because of Token Supply. A Token Supply film whose key was cleared after
+        it was made (the owner went back to Sonnet) is made at once, Anthropic plans it, and the reason is said on it.
+        Nothing is asked of Token Supply (no cost, no delay): a refused key or an empty wallet is found by the machine,
+        which turns Token Supply off and plans on Anthropic."""
+        self.s.store.put("planner", "sonnet")
+        stages = []
+        jid = self.job("ts")
+        finished = self.src.on_rent
+        self.src.on_rent = lambda name, env: stages.append(self.s.store.job(jid)["stage"]) or finished(name, env)
+        with mock.patch.object(self.J, "RENT_WAIT_S", 0):                     # a hold would fail the film at once
+            self.made(jid)
+        self.assertEqual(len(self.src.rents), 1)                                 # rented at once, nothing waited for
+        env = self.src.rents[0][1]
+        self.assertEqual((env["PLANNER"], env["K_TOKENSUPPLY_API_KEY"]), ("ts", ""))
+        self.assertEqual(stages, ["Renting a machine (Token Supply: no Token Supply key in Settings - Anthropic plans "
+                                  "in its place)"])
+        log = (self.d / "studio.log").read_text()
+        self.assertIn(f"[{jid}] Token Supply (the Claude Sonnet through Token Supply planner): no Token Supply key in "
+                      f"Settings - the film is made all the same, and Anthropic plans it", log)
+        self.assertNotIn("Waiting for", log)
+
+    def test_a_film_carried_on_from_its_saved_plan_keeps_its_planner(self):
+        """A replacement machine (or a Try again) of a Token Supply film carries on as one, and says nothing about the
+        key: nothing is planned again."""
+        for key in ("ts-key", None):
+            self.src.rents.clear()
+            self.keys.pop("TOKENSUPPLY_API_KEY", None)
+            if key:
+                self.keys["TOKENSUPPLY_API_KEY"] = key
+            jid = self.job("ts")
+            with mock.patch.object(self.s, "_plan_run", lambda b, jid_, title, runs, commit: "web-earlier-1"):
+                self.made(jid)
+            env = self.src.rents[0][1]
+            self.assertIn("CKPT_GET", env)
+            self.assertEqual((env["PLANNER"], env["K_TOKENSUPPLY_API_KEY"]), ("ts", key or ""))
+            self.assertEqual(self.s.store.job(jid)["planner"], "ts")
+        self.assertNotIn("Token Supply", (self.d / "studio.log").read_text() if (self.d / "studio.log").exists() else "")
+
+    def test_a_lost_planning_machine_is_replaced_with_the_same_planner(self):
+        self.keys["TOKENSUPPLY_API_KEY"] = "ts-key"
+        jid = self.job("ts")
+        self.s.store.update(jid, status="running", pod_id="p", run="web-y-1",
+                            pod_started=time.time() - self.J.START_LIMIT_S - 60)
+        self.s._guard(jid, self.s._reattach)                     # never started: back in the queue
+        self.assertEqual(self.s.store.job(jid)["status"], "queued")
+        self.s.store.update(jid, status="starting")
+        self.s.store.put("planner", "sonnet")                    # the setting changed meanwhile
+        self.made(jid)
+        self.assertEqual(self.src.rents[-1][1]["PLANNER"], "ts")
+
+    def test_drawing_machines_get_no_token_supply_settings(self):
+        self.keys["TOKENSUPPLY_API_KEY"] = "ts-key"
+        jid = self.s.store.new_job(user="a", title="T", run_on="runpod", minutes=10, seconds=600, planner="ts")
+        self.s.store.update(jid, status="running", pod_id="planner", pod_hr=0.13, run="web-r-1",
+                            runs=json.dumps([{"run": "web-r-1", "commit": "c", "plan": "web-r-1"}]),
+                            pod_started=time.time(), machines=3, drawers="[]")
+        self.s._drawers(jid, self.b, self.s.keys_of(jid, "T", "web-r-1"), "10:00:00 PLAN start\n10:20:00 PICTURES done")
+        self.assertEqual(len(self.src.rents), 2)
+        for name, env, script, kw in self.src.rents:
+            self.assertIs(script, self.J.DRAW_SCRIPT)
+            self.assertFalse(any(k.startswith("K_") or k == "PLANNER" for k in env), env)
+            self.assertFalse([v for v in env.values() if "ts-key" in str(v)])
+        self.assertNotIn("TOKENSUPPLY", self.J.DRAW_SCRIPT)
+
+    def test_the_two_claude_parts_add_up_to_the_claude_line_to_the_cent(self):
+        """Review 2026-10-14: rounded each on its own, Anthropic's part and Token Supply's came to a cent less (or more)
+        than the Claude line's own total."""
+        for total, ts in (("1.2051", "0.3049"), ("1.2049", "0.3051"), ("2.3456", "0.1234")):
+            c = self.s.costs(self.tgz(f"  Claude this run: Claude: 30 calls, 300k in / 90k out = ${total} — x\n"
+                                      f"  Token Supply this run: ${ts} of it, 25 calls; 0 call(s) went to Anthropic "
+                                      f"instead\n"))
+            self.assertEqual(round(c["claude"] + c["token_supply"], 2), round(float(total), 2), (total, ts))
+            self.assertEqual(c["token_supply"], round(float(ts), 2))
+        self.assertEqual(self.s.costs(self.tgz("  Claude this run: Claude: 17 calls, 170k in / 56k out = $0.8952 — "
+                                               "claude-sonnet-5\n")), {"claude": 0.9})    # a Sonnet film: as before
+
+    def test_saving_the_planner_keeps_what_is_typed_in_settings(self):
+        """Review 2026-10-14: the Planner's Save reloaded the page's Settings (boot -> go -> loadSettings), and a Token
+        Supply key typed but not yet saved was gone. It now only redraws the missing-keys banner."""
+        page = (HERE / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        save = next(l for l in page.splitlines() if l.startswith("$('#savePlanner').onclick"))
+        self.assertIn("banner(await api('/api/me'))", save)
+        for reloads in ("boot()", "go(", "loadSettings("):
+            self.assertNotIn(reloads, save)
+        boot = page[page.index("async function boot(){"):page.index("$('#loginForm')")]
+        self.assertIn("banner(d);", boot)                                   # the banner as it was, drawn by boot too
+        self.assertIn("Before the first film, add the keys in", page[page.index("function banner(d){"):
+                                                                       page.index("async function boot(){")])
+
+    def test_the_cost_shows_token_supply_and_the_total_counts_it_once(self):
+        log = ("  Claude this run: Claude: 30 calls, 300k in / 90k out = $0.4000 — claude-sonnet-5 100k in / 30k out, "
+               "claude-sonnet-5 (Token Supply) 200k in / 60k out\n"
+               "  Token Supply this run: $0.0600 of it, 25 calls; 2 call(s) went to Anthropic instead (tokensupply po "
+               "245s: HTTP 500: Internal server error; tokensupply po 251s: HTTP 500: Internal server error)\n"
+               "  Gemini photo picks: 438 (1698k in, 83k out, 0k thinking = $1.50), 0 handed to Claude\n")
+        self.keys["TOKENSUPPLY_API_KEY"] = "ts-key"
+        j = self.made(self.job("ts", log))
+        cost = json.loads(j["cost"])
+        self.assertEqual((cost["claude"], cost["token_supply"], cost["gemini"]), (0.34, 0.06, 1.5))
+        self.assertAlmostEqual(cost["total"], round(cost["pod"] + 0.34 + 0.06 + 1.5, 2))
+        self.assertNotIn("token_supply_off", cost)
+        sonnet = self.s.costs(self.tgz("  Claude this run: Claude: 17 calls, 170k in / 56k out = $0.8942 — "
+                                       "claude-sonnet-5\n"))
+        self.assertEqual(sonnet, {"claude": 0.89})                                # a Sonnet film's cost as before
+        page = (HERE / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("['Token Supply',c.token_supply]", page)
+
+    def test_a_token_supply_film_planned_by_anthropic_says_so(self):
+        """The machine turned Token Supply off (its planner line, mrtruth): the film's line says Anthropic planned in
+        its place, instead of the film being held or failed."""
+        # the lines as make_video and mrtruth write them (a refused key: Token Supply off after its first refusal)
+        off = 'tokensupply HTTP 401: {"error":"unauthorized"}'
+        line = ("    planner (ts): Token Supply answered 3 of 41 Claude calls; asked again on Token Supply: none; handed "
+                f"to Anthropic: research dossier 1; highlighted pages: Anthropic; Token Supply turned off: {off}\n")
+        log = line + ("  Claude this run: Claude: 41 calls, 300k in / 90k out = $1.2000 — x\n"
+                      f"  Token Supply this run: $0.0100 of it, 3 calls; 38 call(s) went to Anthropic instead ({off}); "
+                      f"Token Supply turned off: {off}\n")
+        j = self.made(self.job("ts", log))
+        cost = json.loads(j["cost"])
+        self.assertEqual(cost["token_supply_off"], off)
+        self.assertEqual((cost["claude"], cost["token_supply"]), (1.19, 0.01))
+        self.assertAlmostEqual(cost["total"], round(cost["pod"] + 1.19 + 0.01, 2))   # a note, never counted as money
+        for other in ("    planner (ts): Token Supply answered 41 of 41 Claude calls; asked again on Token Supply: "
+                      "templates 1; handed to Anthropic: none; highlighted pages: Anthropic\n",
+                      "  planner (mix): shots x6 (OpenRouter off: HTTP 401)\n", ""):
+            self.assertNotIn("token_supply_off", self.s.costs(self.tgz(other)))
+        only = self.s.costs(self.tgz(                            # no planner line (planning stopped early): the
+            "  Token Supply this run: $0.0100 of it, 3 calls; 2 call(s) went to Anthropic instead (tokensupply po "  # bill's
+            f"245s: HTTP 500: Internal server error; {off}); Token Supply turned off: {off}\n"))              # line says
+        self.assertEqual((only["token_supply"], only["token_supply_off"]), (0.01, off))
+        page = (HERE / "web" / "static" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("j.planner==='ts' ? 'planner: Claude through Token Supply (test)' + (c.token_supply_off ? ' - "
+                      "Token Supply was off ('+c.token_supply_off+'): Anthropic planned in its place' : '') : ''", page)
+        self.assertIn('id="planner"', page)
+        self.assertIn("planner:$('#planner').value", page)
+
+    def test_the_machine_writes_the_planner_into_its_env_only_for_token_supply(self):
+        """PLAN_SCRIPT's .env lines, run in bash: a Sonnet film's .env is byte for byte what the live version (e8ef33b)
+        wrote; a Token Supply film's says CLAUDE_PROVIDER=tokensupply on the one CLAUDE_PROVIDER line (never two:
+        run_test.py reads .env without override and make_video.py with it), Anthropic as the fallback, and the key."""
+        script = self.J.PLAN_SCRIPT
+        a = script.index("\nCP=anthropic\n")
+        new = script[a:script.index("\nseed_verdicts\n", a)]
+        old = subprocess.run(["git", "-C", str(HERE), "show", "e8ef33b:web/jobs.py"], capture_output=True, text=True)
+        if old.returncode != 0:
+            self.skipTest("e8ef33b is not in this copy's git history")
+        a = old.stdout.index('{ echo "GEMINI_API_KEY=')
+        old = old.stdout[a:old.stdout.index("chmod 600 .env", a) + len("chmod 600 .env")]
+        keys = {f"K_{k}": f"v-{k}" for k in self.J.POD_KEYS}
+
+        def written(block, **env):
+            with tempfile.TemporaryDirectory() as d:
+                r = subprocess.run(["bash", "-c", "set -u\nsay(){ echo \"$*\" >> said.txt; }\n" + block], cwd=d,
+                                   env=dict(keys, PATH=os.environ["PATH"], **env), capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                said = (Path(d) / "said.txt").read_text() if (Path(d) / "said.txt").exists() else ""
+                return (Path(d) / ".env").read_text(), oct((Path(d) / ".env").stat().st_mode & 0o777), said
+        then = written(old)
+        self.assertEqual(then[0].count("CLAUDE_PROVIDER=anthropic\n"), 1)
+        self.assertEqual(written(new), then)                                 # Sonnet: as before, nothing said
+        self.assertEqual(written(new, PLANNER="sonnet"), then)
+        self.assertEqual(written(new, PLANNER="mix", K_TOKENSUPPLY_API_KEY="ts-key"), then)   # not a planner here
+        ts, mode, said = written(new, PLANNER="ts", K_TOKENSUPPLY_API_KEY="ts-key")
+        self.assertEqual(mode, "0o600")
+        self.assertEqual(ts, then[0].replace("CLAUDE_PROVIDER=anthropic\n", "CLAUDE_PROVIDER=tokensupply\n")
+                         + "CLAUDE_FALLBACK=anthropic\nTOKENSUPPLY_API_KEY=ts-key\n")
+        self.assertEqual(ts.count("CLAUDE_PROVIDER="), 1)
+        self.assertEqual(said, "planner: Claude Sonnet through Token Supply (on test)\n")
+        from dotenv import dotenv_values
+        got = dotenv_values(stream=io.StringIO(ts))
+        self.assertEqual((got["CLAUDE_PROVIDER"], got["CLAUDE_FALLBACK"], got["TOKENSUPPLY_API_KEY"],
+                          got["SCRIPT_PROVIDER"], got["ANTHROPIC_API_KEY"]),
+                         ("tokensupply", "anthropic", "ts-key", "anthropic", "v-ANTHROPIC_API_KEY"))
+        nokey, _, said = written(new, PLANNER="ts")                           # no key: Anthropic plans, said so
+        self.assertIn("CLAUDE_PROVIDER=tokensupply\n", nokey)
+        self.assertTrue(nokey.endswith("TOKENSUPPLY_API_KEY=\n"))
+        self.assertEqual(said, "planner: Claude Sonnet through Token Supply (on test) - no Token Supply key in "
+                               "Settings: Anthropic plans in its place\n")
+        r = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_token_supply_check(self):
+        """Settings → Test keys' one-token call (about $0.0002), faked: what each answer means."""
+        def post(status=200, boom=False):
+            def f(url, **kw):
+                self.assertEqual(url, "https://api.token-supply.com/v1/messages")
+                self.assertEqual(kw["headers"], {"x-api-key": "k", "Authorization": "Bearer k",
+                                                 "anthropic-version": "2023-06-01", "content-type": "application/json"})
+                self.assertEqual(kw["json"], {"model": "claude-sonnet-5", "max_tokens": 1,
+                                              "messages": [{"role": "user", "content": "ok"}]})
+                if boom:
+                    raise self.J.requests.ConnectionError("down")
+                return mock.Mock(ok=status < 400, status_code=status, text="{}")
+            return mock.patch.object(self.J.requests, "post", f)
+        check = self.real_check                                 # the real one (setUp forbids it for films)
+        with post(200):
+            self.assertEqual(check("k"), "")
+        with post(401):
+            self.assertEqual(check("k"), "the Token Supply key was refused (HTTP 401) - check it in Settings")
+        with post(403):
+            self.assertIn("refused (HTTP 403)", check("k"))
+        with post(402):
+            self.assertIn("out of credit (HTTP 402)", check("k"))
+        with post(404):
+            self.assertIn("(HTTP 404)", check("k"))
+        with post(500):
+            self.assertEqual(check("k"), "HTTP 500")
+        with post(boom=True):
+            self.assertEqual(check("k"), "Token Supply could not be reached (ConnectionError)")
+        self.assertEqual(check(""), "no Token Supply key in Settings")
+
+    def test_the_pods_summary_copies_the_planner(self):
+        """web/pod/summarize.py: the planner detail (timing.json) and the planner, Claude and Token Supply lines."""
+        work = self.d / "work"
+        work.mkdir()
+        (work / "shots.json").write_text("[]")
+        # mrtruth._ts_record / _ts_line and make_video's two spend lines, as they write them
+        detail = {"planner": "ts", "ts_calls": 38, "anthropic_calls": 3, "reasked": {"templates": 1},
+                  "handed": {"research dossier": 1}, "fell_back": 1, "off": "",
+                  "why": ["templates: stops at 66% of the script", "research dossier: no JSON in it"]}
+        (work / "timing.json").write_text(json.dumps({"plan": 12.5, "detail": {"planner": detail}}))
+        lines = ["    planner (ts): Token Supply answered 38 of 41 Claude calls; asked again on Token Supply: "
+                 "templates 1; handed to Anthropic: research dossier 1; highlighted pages: Anthropic",
+                 "  Claude this run: Claude: 41 calls, 300k in / 90k out = $0.5000 — x",
+                 "  Token Supply this run: $0.1200 of it, 38 calls; 1 call(s) went to Anthropic instead (tokensupply "
+                 "po 245s: HTTP 500: Internal server error)"]
+        (self.d / "plan.log").write_text("\n".join(["  other line"] + lines) + "\n")
+        r = subprocess.run([sys.executable, str(HERE / "web" / "pod" / "summarize.py"), str(work),
+                            str(self.d / "plan.log"), str(self.d / "summary.json")], cwd=self.d,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads((self.d / "summary.json").read_text())
+        self.assertEqual(got["planner"], detail)
+        self.assertEqual((got["planner_line"], got["claude_line"], got["token_supply_line"]),
+                         (lines[0].strip(), lines[1].strip(), lines[2].strip()))
+
+    def test_the_farm_pod_keeps_the_token_supply_planner_only_when_the_env_chooses_it(self):
+        """farm/config.py (the farm CLI's pods): POD_FORCED plans on Anthropic as before; a .env that chooses Token
+        Supply (with its key) keeps it on the pod, with Anthropic as the fallback."""
+        from farm import config as FC
+        base = {"WAVESPEED_API_KEY": "w", "ANTHROPIC_API_KEY": "a"}
+        for env, want in (({}, ("anthropic", "", None)),
+                          ({"CLAUDE_PROVIDER": "claudecode", "TOKENSUPPLY_API_KEY": "t"}, ("anthropic", "", "t")),
+                          ({"CLAUDE_PROVIDER": "tokensupply"}, ("anthropic", "", None)),       # no key: as before
+                          ({"CLAUDE_PROVIDER": "tokensupply", "TOKENSUPPLY_API_KEY": "t", "CLAUDE_FALLBACK": "kie"},
+                           ("tokensupply", "anthropic", "t"))):
+            with mock.patch.dict(os.environ, dict(base, **env)):
+                for k in ("CLAUDE_PROVIDER", "TOKENSUPPLY_API_KEY", "CLAUDE_FALLBACK"):
+                    if k not in env:
+                        os.environ.pop(k, None)
+                got = FC.Config().pod_env("jobs/x.json")
+            self.assertEqual((got["CLAUDE_PROVIDER"], got["CLAUDE_FALLBACK"], got.get("TOKENSUPPLY_API_KEY")), want, env)
+            self.assertEqual(got["SCRIPT_PROVIDER"], "anthropic")
+        self.assertIn("TOKENSUPPLY_API_KEY", FC.RENDER_KEYS)
+        self.assertEqual(FC.POD_FORCED["CLAUDE_PROVIDER"], "anthropic")
 
 
 if __name__ == "__main__":

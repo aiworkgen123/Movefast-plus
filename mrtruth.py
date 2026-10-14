@@ -24,6 +24,7 @@ film about a minute apart; a date overlay on every important date said, the mont
     python mrtruth.py check "<job folder>"   # the rules, read back off a finished video's plan
 """
 import bisect
+import contextlib
 import copy
 import functools
 import hashlib
@@ -420,8 +421,92 @@ def _guide() -> str:
         return ""
 
 
+# ── Claude Sonnet through Token Supply (owner 2026-10-14: Settings → Planner, on test, off by default) ────────────────
+# make_video's CLAUDE_PROVIDER=tokensupply sends the planner's Claude calls to genuine Claude Sonnet resold by Token
+# Supply at about 30% of Anthropic's price, which runs it inside an AI coding tool whose own instructions leak into
+# some answers (a planning-only test of an 11-minute film, 2026-10-14: prose before the JSON, several JSON attempts in a
+# row, a research answer that did not parse, a visual plan that stopped proposing two-thirds of the way through,
+# chapters the placement rules refused). Every check below runs only on that planner (_ts_planner), and only for a
+# call that goes to Token Supply (_ts_now): an answer it cannot give properly is given by Anthropic (make_video's
+# claude_on pin), never lost, and the highlighted pages are Anthropic's from the start (the owner's rule: that page does
+# not change in any way). The default planner, Claude Sonnet through Anthropic, runs none of it.
+TS_PROSE_MAX = 200           # characters of prose around its JSON a Token Supply answer may carry (real Sonnet: none)
+TS_TEMPLATES_GAP = 0.25      # the visual plan's reach: its tail, or its longest stretch without a template, as a share
+                             # of the script. Sonnet's stretches stay under 0.10; its tails by startChar run 0.01-0.30
+                             # on the same 11-minute script (its offsets run up to about 1.17x short of where their
+                             # words are said), by its words 0.01-0.23 (_said_tail). Token Supply's: 0.34, by words 0.36
+TS = {"reasked": {}, "handed": {}, "why": []}     # this run, by step: asked again on Token Supply, handed to Anthropic
+_TS_LOCK = threading.Lock()
+_ASKED = threading.local()          # Token Supply's planner: whether this thread's last _ask was Token Supply's answer
+TS_STEPS = ("research dossier", "visual brief", "shots", "templates", "more overlays", "typed captions",
+            "quiet-stretch fill", "archive names", "round-3 anchors")       # the steps that name themselves to _ask
+_TS_UNNAMED = {"places_and_dates": "maps and dates", "highlight_pages": "highlighted pages"}   # for the log only
+
+
+def _ts_planner(engine) -> bool:
+    """True when the planner is Claude through Token Supply (make_video's CLAUDE_PROVIDER, read at call time)."""
+    return getattr(engine, "CLAUDE_PROVIDER", "") == "tokensupply"
+
+
+def _ts_now(engine) -> bool:
+    """True when a call made here goes to Token Supply: its planner, and this thread not pinned to Anthropic. An
+    engine that cannot pin a call to Anthropic (claude_on; every make_video since Token Supply has it) runs none of
+    the checks: what they find is handed to Anthropic."""
+    if not _ts_planner(engine):
+        return False
+    now = getattr(engine, "claude_provider", None)
+    return callable(now) and callable(getattr(engine, "claude_on", None)) and now() == "tokensupply"
+
+
+def _anthropic(engine):
+    """engine.claude_on("anthropic") on a Token Supply planner: the calls inside go to Anthropic exactly as today's
+    planner sends them (no fallback; the run ends if Anthropic fails). On any other planner: nothing at all."""
+    if _ts_planner(engine) and callable(getattr(engine, "claude_on", None)):
+        return engine.claude_on("anthropic")
+    return contextlib.nullcontext()
+
+
+def _step_kind(step: str) -> str:
+    """A step's name without its part: "shots 120s-240s" -> "shots", "archive names from shot 60" -> "archive names"."""
+    return next((k for k in TS_STEPS if step == k or step.startswith(k + " ")), step)
+
+
+def _ts_note(what: str, step: str, why: str) -> None:
+    """Counts one re-ask on Token Supply (`what` "reasked") or one hand-over to Anthropic ("handed") of a step."""
+    kind = _step_kind(step)
+    with _TS_LOCK:
+        TS[what][kind] = TS[what].get(kind, 0) + 1
+        if len(TS["why"]) < 12:
+            TS["why"].append(f"{step}: {why}")
+
+
+def _ts_handed(engine, step: str, why: str) -> None:
+    """One hand-over of a step to Anthropic (_ts_note "handed"), told to the engine too: its answers were paid for on
+    Token Supply and again on Anthropic, and TOKENSUPPLY_GIVE_UP such steps switch Token Supply off for the rest of
+    the run (make_video.tokensupply_handed, review 2026-10-14)."""
+    _ts_note("handed", step, why)
+    told = getattr(engine, "tokensupply_handed", None)
+    if callable(told):
+        told(f"{_step_kind(step)}: {why}")
+
+
+def _ts_prose(raw: str) -> str:
+    """Why an answer that parsed is still not one to use: more than TS_PROSE_MAX characters of prose before its first
+    '{' or after its last '}', one ```json fence around it aside (the tool talking about itself, thinking out loud or
+    correcting itself, which real Sonnet never does); "" when there is none."""
+    t = raw.strip()
+    m = re.fullmatch(r"```[\w-]*\s*(.*?)\s*```", t, re.DOTALL)
+    if m:
+        t = m.group(1)
+    a, b = t.find("{"), t.rfind("}")
+    for n, where in ((len(t[:max(a, 0)].strip()), "before"), (len(t[b + 1:].strip()) if b >= 0 else 0, "after")):
+        if n > TS_PROSE_MAX:
+            return f"{n} characters of prose {where} its JSON"
+    return ""
+
+
 def _ask(engine, prompt: str, max_tokens: int, model: str = "", head: str = "", begun: threading.Event = None,
-         step: str = "") -> dict:
+         step: str = "", tries: int = 3) -> dict:
     """One JSON object from Claude (the repo used forced tool calls; here the object is asked for in words).
     `head`: a long beginning that several calls share word for word, sent before the prompt and kept in Anthropic's
     prompt cache; `begun` is set once the answer has begun, or the call failed.
@@ -429,31 +514,65 @@ def _ask(engine, prompt: str, max_tokens: int, model: str = "", head: str = "", 
     asked again once with half as much room again; cut off a second time it is not asked again (2026-10-13: it was
     asked again as it was, cut off again and paid for again). A caller that names none, the highlighted-page step
     among them, is answered exactly as before: a cut-off answer is parsed like any other and, if it does not parse,
-    asked again at the same size."""
+    asked again at the same size.
+    Token Supply's planner (owner 2026-10-14; _ts_now, nothing of it on any other planner): an answer of Token Supply's
+    is also unusable when it carries long prose around its JSON (_ts_prose); after two tries, two answers it could not
+    give properly or one cut off twice, the step is Anthropic's: this whole _ask again inside claude_on("anthropic"),
+    today's three tries and its more room once from the step's own size, so what Token Supply cannot answer is
+    Anthropic's answer, never a step lost (review 2026-10-14: one pinned try left Anthropic no second go). Each re-ask
+    and hand-over is logged and counted once (TS).
+    `tries`: 1 for the visual plan's and the chapters' own second ask on Token Supply, which hand over themselves."""
     strict = prompt + ("\n\nRETURN FORMAT FOR THIS RUN: there is no tool to call. Reply with ONLY the JSON object the "
                        "tool would have received — begin with '{' and end with '}'. No prose, no markdown fences.")
     model = model or engine.UTILITY_MODEL
     kw = {"head": head, "begun": begun} if head else {}
-    last, grown = "", False
-    for attempt in range(3):
+    ts = _ts_now(engine)
+    name = (step or _TS_UNNAMED.get(sys._getframe(1).f_code.co_name, "a planning step")) if ts else ""
+    if ts:
+        _ASKED.ts = False
+    last, grown, size = "", False, max_tokens
+    # Token Supply only: answers it could not give properly, a runaway of its own, why, and whether any answer here was
+    # its own (one Anthropic gave in its place, inside make_video, is not blamed on it)
+    bad, hand, unusable, theirs = 0, False, "", False
+    for attempt in range(tries):
+        if ts and (attempt == 2 or bad >= 2 or hand):
+            if theirs:
+                why = unusable or last
+                _ts_handed(engine, name, why)
+                engine.log(f"  ⚠ Token Supply's answer to {name} could not be used ({why}) — asking Anthropic")
+            with _anthropic(engine):                 # inside it _ts_now is False: today's _ask, Anthropic's to the end
+                return _ask(engine, prompt, size, model, head, begun, step)
+        if unusable:
+            _ts_note("reasked", name, unusable)
+            engine.log(f"  ⚠ Token Supply's answer to {name} could not be used ({unusable}) — asking again")
+            unusable = ""
         try:
             raw = engine.claude(strict, model, max_tokens=max_tokens, **kw)
         except Exception as e:                                       # noqa: BLE001 - asked again
             last = str(e)[:160]
+            if ts:
+                bad, unusable, theirs = bad + 1, last, True
             continue
         finally:
             if begun is not None:                   # answering, or failed: the calls waiting on this one go ahead
                 begun.set()
+        mine = ts and getattr(engine, "claude_was_tokensupply", lambda: True)()
+        theirs = theirs or mine
         if step and getattr(engine, "claude_cut_off", lambda: False)():
             # more room once: no answer has come near its step's max_tokens (the shot answers run to about a third of
             # their 24000), so one cut off twice is a runaway that more room would only pay more for. Its tail is
             # logged to tell a runaway from a long answer
             more = min(int(max_tokens * 1.5), engine.claude_max_out(model))
-            again = not grown and more > max_tokens and attempt < 2
+            again = not grown and more > max_tokens and attempt < min(2, tries - 1)
+            over = mine and not again and attempt + 1 < tries      # Token Supply's runaway: Anthropic answers it
             engine.log(f"  ⚠ answer cut off ({step}) at {max_tokens} tokens, {len(raw)} characters ending "
                        f"\"{' '.join(raw[-80:].split())}\" - "
-                       + (f"asking again with room for {more}" if again else "not asked again"))
+                       + (f"asking again with room for {more}" if again else
+                          "not asked again on Token Supply" if over else "not asked again"))
             last = f"answer cut off at {max_tokens} tokens"
+            if over:
+                hand, unusable = True, last + (" twice" if grown else "")
+                continue
             if not again:
                 break
             max_tokens, grown = more, True
@@ -461,9 +580,20 @@ def _ask(engine, prompt: str, max_tokens: int, model: str = "", head: str = "", 
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(0))
+                got = json.loads(m.group(0))
             except ValueError as e:
                 last = str(e)[:160]
+            else:
+                prose = _ts_prose(raw) if mine else ""
+                if not prose:
+                    if ts:
+                        _ASKED.ts = mine
+                    return got
+                last = prose
+        elif mine:
+            last = "no JSON in it"
+        if mine:
+            bad, unusable = bad + 1, last
     raise RuntimeError(f"Mr Truth: no JSON from Claude — {last}")
 
 
@@ -591,9 +721,17 @@ def visual_brief(engine, job: Path, script: str, dossier: dict, force: bool = Fa
     engine.log("Mr Truth: the film's visual brief (Claude)...")
     prompt = BRIEF_PROMPT.replace("[INSERT FILM HERE]", _film_block(dossier)).replace("[INSERT SCRIPT HERE]", script)
     brief = {}
-    for _ in range(2):
+    for again in range(2):
+        # Token Supply's planner (owner 2026-10-14): the second try is Anthropic's (a brief without its tone or its
+        # people, or none at all)
+        ts = again and _ts_now(engine)
+        if ts and getattr(_ASKED, "ts", False):
+            _ts_handed(engine, "visual brief", "no tone or no people list in it")
+            engine.log("  ⚠ Token Supply's answer to visual brief could not be used (no tone or no people list in it) "
+                       "— asking Anthropic")
         try:
-            brief = _ask(engine, prompt, 8000, step="visual brief")
+            with (_anthropic(engine) if ts else contextlib.nullcontext()):
+                brief = _ask(engine, prompt, 8000, step="visual brief")
         except RuntimeError as e:
             engine.log(f"  {e}")
         if brief.get("tone") and isinstance(brief.get("people"), list):
@@ -735,14 +873,26 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
         'Late' is measured from the part's first subtitle line, not from the 120-s mark: the line at 240 s began at
         241.7 s and a correct answer was thrown away and asked again twice, then as halves (pod run 2026-10-10)."""
         first = next((s for s in starts if s >= rng[0]), rng[0])
+        theirs = False                       # Token Supply's planner: whether it gave either answer (_ask, this thread)
         for attempt in range(2):
             got = kept_of(rng, one(rng))
+            theirs = theirs or getattr(_ASKED, "ts", False)
             if got and got[0]["startMs"] <= first + 1500:
                 return got
             what = "empty" if not got else f"starting at {got[0]['startMs'] // 1000}s"
             engine.log(f"  ⚠ beats {rng[0] // 1000}s-{rng[1] // 1000}s came back {what} - asking again")
         mid = (rng[0] + rng[1]) // 2
-        halves = [kept_of((rng[0], mid), one((rng[0], mid))), kept_of((mid, rng[1]), one((mid, rng[1])))]
+        # Token Supply's planner (owner 2026-10-14): a part it answered empty or late twice is Anthropic's, in halves as
+        # on any planner (this worker thread's calls only), so lines it left unplanned never stop the film. Blamed on
+        # it and counted only when an answer was its own: switched off, or answered by Anthropic in its place, the two
+        # were Anthropic's (review 2026-10-14)
+        ts = _ts_now(engine)
+        if ts and theirs:
+            _ts_handed(engine, "shots", f"part {rng[0] // 1000}s-{rng[1] // 1000}s came back empty or late twice")
+            engine.log(f"  ⚠ Token Supply's answer to shots {rng[0] // 1000}s-{rng[1] // 1000}s could not be used "
+                       f"(empty or starting late twice) — asking Anthropic, in two halves")
+        with (_anthropic(engine) if ts else contextlib.nullcontext()):
+            halves = [kept_of((rng[0], mid), one((rng[0], mid))), kept_of((mid, rng[1]), one((mid, rng[1])))]
         return [x for h in halves for x in h]
 
     starts = sorted({a for a, _, _ in cues} | {cues[-1][1]})
@@ -1515,7 +1665,10 @@ def preflight(engine) -> None:
     if _BRAVE_OUT["why"] and _BING.get("why"):
         bad.append(f"no web picture search: Bing {_BING['why']}; Brave {_BRAVE_OUT['why']}")
     a = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    if a and str(os.environ.get("CLAUDE_PROVIDER", "")).lower() == "anthropic":
+    # (Token Supply's planner too, owner 2026-10-14: Anthropic writes its highlighted pages and answers what Token
+    # Supply cannot, as today's planner would - a dry account would end the film there. Token Supply is not pinged: a
+    # refused key or an empty wallet costs one quick refusal and Anthropic plans in its place)
+    if a and str(os.environ.get("CLAUDE_PROVIDER", "")).lower() in ("anthropic", "tokensupply"):
         try:                                         # a one-token call: a dry Claude account stops the run here, not
             r = requests.post("https://api.anthropic.com/v1/messages", timeout=30,   # minutes into planning
                               headers={"x-api-key": a, "anthropic-version": "2023-06-01", "content-type": "application/json"},
@@ -1565,6 +1718,8 @@ def opportunities(engine, job: Path, script: str, force: bool = False) -> list:
     engine.log("Mr Truth: choosing templates and their words (the repo's visual plan brief)...")
     try:
         got = _ask(engine, prompt, 32000, model=engine.SCRIPT_MODEL, step="templates").get("opportunities") or []
+        if _ts_now(engine) and getattr(_ASKED, "ts", False):     # Token Supply's answer: does it cover the script?
+            got = _ts_templates(engine, prompt, script, got)       # (saved under this prompt's key all the same)
     except RuntimeError as e:
         engine.log(f"  {e} — the film carries only the templates Mr Truth places by itself (asked again next run)")
         return []
@@ -1574,6 +1729,108 @@ def opportunities(engine, job: Path, script: str, force: bool = False) -> list:
         return []
     _dump(out, {"key": key, "opportunities": got})
     return got
+
+
+def _reach(opps, n: int) -> dict:
+    """How far a visual plan reaches through a script of n characters: the share after its last template's start
+    (`tail`), its longest stretch without one, from the script's start on (`gap`, from character `a` to `b`), and the
+    last start (`last`). Starts that are not whole numbers are left out; a plan with none reaches nowhere."""
+    starts = []
+    for o in opps if isinstance(opps, list) else []:
+        try:
+            starts.append(int(o.get("startChar")))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    starts = sorted(s for s in starts if s >= 0)
+    if not starts or n <= 0:
+        return {"tail": 1.0, "gap": 1.0, "a": 0, "b": max(n, 0), "last": 0}
+    a, b = max(zip([0] + starts, starts), key=lambda p: p[1] - p[0])
+    return {"tail": (n - starts[-1]) / n, "gap": (b - a) / n, "a": a, "b": b, "last": starts[-1]}
+
+
+def _said_tail(opps, script: str):
+    """The share of the script after the last place a visual plan's own words are said, or None when none of its
+    templates is found by its words (Token Supply's reach check, review 2026-10-14). A template with at least two
+    content words in its headline and lines goes on the sentence whose window (it and one sentence either side) holds
+    the most of them, the earliest of equals, when that is 60% or more of them. Sonnet's startChar runs short of where
+    its words are said (up to about 1.17x on the 11-minute script), so by startChar alone a plan of Sonnet's that
+    reaches the last sentence can look as short as Token Supply's that stopped (0.25 and 0.30 against its 0.34)."""
+    found = [(m.start(), set(_content(m.group(0)))) for m in re.finditer(r"[^.!?]+[.!?]+[\"'”’]*\s*", script)]
+    win = [set().union(*(w for _, w in found[max(0, i - 1):i + 2])) for i in range(len(found))]
+    said = []
+    for o in opps if isinstance(opps, list) else []:
+        if not isinstance(o, dict):
+            continue
+        lines = o.get("lines") if isinstance(o.get("lines"), list) else [o.get("lines") or ""]
+        q = set(_content(" ".join([str(o.get("headline") or "")] + [str(x) for x in lines])))
+        if len(q) < 2 or not win:
+            continue
+        best = max(range(len(win)), key=lambda i: (len(q & win[i]), -i))
+        if len(q & win[best]) >= 0.6 * len(q):
+            said.append(found[best][0])
+    return (len(script) - max(said)) / len(script) if said else None
+
+
+def _ts_short(reach: dict, said=None) -> bool:
+    """Short: a stretch without a template over TS_TEMPLATES_GAP of the script, or a tail by startChar over it that the
+    plan's words (`said`, _said_tail; None when not found by them) do not reach past."""
+    return reach["gap"] > TS_TEMPLATES_GAP or (reach["tail"] > TS_TEMPLATES_GAP
+                                               and (said is None or said > TS_TEMPLATES_GAP))
+
+
+def _ts_templates(engine, prompt: str, script: str, got: list) -> list:
+    """Token Supply's visual plan, checked for its reach (owner 2026-10-14): the planning test's stopped proposing
+    two-thirds of the way through (its last template at 66% of the script by startChar, its words last said at 64%).
+    Sonnet's on the same script end at 70-99% by startChar, whose offsets run short, and at 77-99% by where their words
+    are said (review 2026-10-14), so a tail counts only when the plan's words do not reach further (_said_tail). Its
+    tail or its longest stretch without a template over TS_TEMPLATES_GAP of the script: asked of Token Supply once more
+    with a note on where it stopped; still short, or unusable, asked of Anthropic with the brief as it was, and
+    Anthropic's answer is the one used whatever its reach (Sonnet's own plan is the baseline). Only when Anthropic gives
+    none either is the better of Token Supply's two kept. Every re-ask and hand-over is logged and counted (TS)."""
+    n = len(script)
+
+    def short(r):
+        if r["tail"] > TS_TEMPLATES_GAP:
+            return (f"stops at {round(100 * r['last'] / n) if n else 0}% of the script (its last template starts at "
+                    f"character {r['last']} of {n})")
+        return (f"leaves {round(100 * r['gap'])}% of the script without a template (characters {r['a']}-{r['b']} "
+                f"of {n})")
+
+    first = _reach(got, n)
+    if not _ts_short(first, _said_tail(got, script)):
+        return got
+    why = short(first)
+    _ts_note("reasked", "templates", why)
+    engine.log(f"  ⚠ Token Supply's visual plan {why} — asking again")
+    note = ([f"Your previous answer stopped proposing at character {first['last']} of {n}."]
+            if first["tail"] > TS_TEMPLATES_GAP else []) + \
+           ([f"Your previous answer proposed nothing between characters {first['a']} and {first['b']} of {n}."]
+            if first["gap"] > TS_TEMPLATES_GAP else [])
+    again = []
+    try:
+        again = _ask(engine, prompt + "\n\n" + " ".join(note + ["Cover the whole script to its last sentence."]),
+                     32000, model=engine.SCRIPT_MODEL, step="templates", tries=1).get("opportunities") or []
+        if not getattr(_ASKED, "ts", False):              # Token Supply could not answer it: Anthropic's answer
+            return again if isinstance(again, list) and again else got
+        second = _reach(again, n)
+        why = "" if not _ts_short(second, _said_tail(again, script)) else short(second)
+    except RuntimeError as e:
+        why = str(e)[:160]
+    if not why:
+        return again
+    _ts_handed(engine, "templates", why)
+    engine.log(f"  ⚠ Token Supply's visual plan, asked again, {why} — asking Anthropic")
+    try:
+        with _anthropic(engine):
+            sonnet = _ask(engine, prompt, 32000, model=engine.SCRIPT_MODEL, step="templates").get("opportunities") or []
+    except RuntimeError as e:
+        engine.log(f"  Anthropic's visual plan: {e}")
+        sonnet = []
+    if isinstance(sonnet, list) and sonnet:
+        return sonnet
+    best = min((x for x in (got, again) if isinstance(x, list) and x), key=lambda x: _reach(x, n)["tail"], default=got)
+    engine.log("  Anthropic gave no visual plan either — the one of Token Supply's that reaches further is kept")
+    return best
 
 
 def _char_ms(script: str, cues: list) -> callable:
@@ -1899,6 +2156,105 @@ def _group_of(tid: str) -> str:
     return next((g for g, (ts, _, _) in OVERLAY_GROUPS.items() if tid in ts), "")
 
 
+def _chapter_fit(rows: list, k: int, head: str, last: float, dossier: dict, names, also=()) -> tuple:
+    """The chapter placement's rule for a chapter `head` (whitespace-tidied) on shot k, `last` the start (ms) of the
+    chapter placed before it: (the heading as it would be set, the heading it was cut from or "", None when it can be
+    placed, else (kind, why): "long", no whole heading of it fits in 25 characters (the heading is returned as it came);
+    "seat", the shot is in the opening, within 30 s of the chapter before it, or the title shot). Read by the placement
+    in fill_overlays and by Token Supply's pre-check (_chapters_placed), which passes the headings it has placed in its
+    head in `also` (normalised) and leaves the rows as they are."""
+    src = ""
+    if len(head) > 25:                           # never cut inside a word (owner 2026-10-10) nor before its head noun
+        used = {_norm((x.get("device") or {}).get("heading")) for x in rows if (x.get("device") or {}).get("id") == "chapter-plate"}
+        cut = _short_heading(head, 25, [s_.get("title") for s_ in (dossier.get("sections") or [])[1:]], used | set(also), names)
+        if not cut:                              # (2026-10-13: "The Translator's Narrow Role" was "The Translator's
+            return head, "", ("long", f"has a heading, '{head}', with no whole form of 25 characters or fewer")  # Narrow")
+        src, head = head, cut
+    head = " ".join(w.lower() if j and w.lower() in ("of", "the", "a", "an", "and", "in", "on", "to", "for", "at", "by")
+                    else w for j, w in enumerate(head.split()))
+    head = head[:1].upper() + head[1:]           # a capital first, whatever case it was written in (2026-10-13)
+    r = rows[k]
+    if r["startMs"] < CHAPTER_FIRST_S * 1000:
+        return head, src, ("seat", f"is inside the opening {CHAPTER_FIRST_S:.0f} s")
+    if r["startMs"] - last < 30000:
+        return head, src, ("seat", f"is {(r['startMs'] - last) / 1000:.0f} s after the chapter before it (they must be at "
+                                   f"least 30 s apart)")
+    if (r.get("device") or {}).get("id") in ("P03", "gallery-strip"):
+        return head, src, ("seat", "carries the title card" if r["device"]["id"] == "P03" else "carries the opening gallery")
+    return head, src, None
+
+
+def _chapters_placed(rows: list, got: dict, dossier: dict, names) -> tuple:
+    """(how many of an answer's chapters fill_overlays would place, why each other one would not): its placement loop
+    run in the head on the rows as they are (Token Supply's pre-check, owner 2026-10-14). A chapter after the third
+    placed one is left out as there."""
+    placed, last, also, refused = 0, -1e9, set(), []
+    chapters = [c for c in (got.get("chapters") if isinstance(got.get("chapters"), list) else []) if isinstance(c, dict)]
+    for c in sorted(chapters, key=lambda c: int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1):
+        try:
+            k = int(c["shot"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
+        if not head or placed >= CHAPTERS_MAX:
+            continue
+        if not 0 <= k < len(rows):
+            refused.append(f"shot {k} is not a shot of this film")
+            continue
+        set_as, _, no = _chapter_fit(rows, k, head, last, dossier, names, also)
+        if no:
+            refused.append(f"shot {k} at {rows[k]['startMs'] / 1000:.0f} s {no[1]}")
+            continue
+        placed, last = placed + 1, rows[k]["startMs"]
+        also.add(_norm(set_as))
+    return placed, refused
+
+
+def _ts_chapters(engine, prompt: str, rows: list, got: dict, dossier: dict, names) -> dict:
+    """Token Supply's chapters, checked before they are placed (owner 2026-10-14: the planning test's answer put two of
+    its three on title shots, and the film got one chapter of its own and one filled in 11 s after it). Fewer than
+    CHAPTERS_MIN of them placeable: asked of Token Supply once more with a note naming each refused chapter and why;
+    still short, or unusable, asked of Anthropic with the brief as it was, and Anthropic's answer is the one used. Only
+    when Anthropic gives none either is the better of Token Supply's two kept. Logged and counted (TS)."""
+    placed, refused = _chapters_placed(rows, got, dossier, names)
+    if placed >= CHAPTERS_MIN:
+        return got
+    why = f"only {placed} of its chapters can be placed" + (f": {'; '.join(refused)}" if refused else "")
+    _ts_note("reasked", "more overlays", why)
+    engine.log(f"  ⚠ Token Supply's chapters: {why} — asking again")
+    # the rules themselves, and every shot they bar: the brief shows a title-card shot as any other [TAKEN] one, so a
+    # second answer could pick another title card and be refused again (review 2026-10-14). The brief stays as it is
+    # (the default planner's request and the cache key); this note goes with the second ask only
+    barred = [i for i, r in enumerate(rows) if (r.get("device") or {}).get("id") in ("P03", "gallery-strip")]
+    note = (f"Your previous answer's chapters cannot all be placed: "
+            + ("; ".join(refused) if refused else f"it proposed only {placed}")
+            + f". Only {placed} can be placed and the film needs {CHAPTERS_MIN}-{CHAPTERS_MAX}. A chapter never goes on "
+              f"a shot that carries the title card or the opening gallery"
+            + (f" (here shots {', '.join(map(str, barred))})" if barred else "")
+            + f", never before {CHAPTER_FIRST_S:.0f} s, and never within 30 s of another chapter. Choose the chapters "
+              f"again so that at least {CHAPTERS_MIN} of them keep these rules.")
+    again = {}
+    try:
+        again = _ask(engine, prompt + "\n\n" + note, 8000, model=engine.SCRIPT_MODEL, step="more overlays", tries=1)
+        if not getattr(_ASKED, "ts", False):              # Token Supply could not answer it: Anthropic's answer
+            return again
+        placed2, refused2 = _chapters_placed(rows, again, dossier, names)
+        why = "" if placed2 >= CHAPTERS_MIN else (f"only {placed2} of its chapters can be placed"
+                                                  + (f": {'; '.join(refused2)}" if refused2 else ""))
+    except RuntimeError as e:
+        why = str(e)[:160]
+    if not why:
+        return again
+    _ts_handed(engine, "more overlays", why)
+    engine.log(f"  ⚠ Token Supply's chapters, asked again: {why} — asking Anthropic")
+    try:
+        with _anthropic(engine):
+            return _ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL, step="more overlays")
+    except RuntimeError as e:
+        engine.log(f"  Anthropic's chapters and overlays: {e} — the better of Token Supply's two answers is kept")
+    return max((x for x in (got, again) if x), key=lambda x: _chapters_placed(rows, x, dossier, names)[0], default=got)
+
+
 def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, build, force: bool = False) -> None:
     """After assign(): 2-3 chapter plates (mandatory), then more overlays until every group has its minimum and the
     film carries something about every OVERLAY_EVERY_S. A placement that needs a longer shot holds its picture."""
@@ -1922,9 +2278,12 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
     out = job / "mrtruth" / "overlays_fill.json"
     key = _hash([prompt])
     got = None if force else _load(out)
+    names = _film_names(dossier, script)
     if not (isinstance(got, dict) and got.get("key") == key):
         try:
             got = dict(_ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL, step="more overlays"), key=key)
+            if _ts_now(engine) and getattr(_ASKED, "ts", False):   # Token Supply's answer: can its chapters be placed?
+                got = dict(_ts_chapters(engine, prompt, rows, got, dossier, names), key=key)   # (this prompt's key)
         except RuntimeError as e:
             engine.log(f"  overlay fill: {e}")
             return
@@ -1935,7 +2294,7 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         return next((j for j, x in enumerate(rows) if 0 <= n < len(snap) and x is snap[n]), -1)
 
     # chapters first: mandatory, so they may take a shot from a lesser template and hold their picture
-    chapters, last, names = 0, -1e9, _film_names(dossier, script)
+    chapters, last = 0, -1e9
     for c in sorted(got.get("chapters") or [], key=lambda c: int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1):
         try:
             k = at(int(c["shot"]))
@@ -1944,19 +2303,12 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
         if k < 0 or not head or chapters >= CHAPTERS_MAX:
             continue
-        src = ""
-        if len(head) > 25:                       # never cut inside a word (owner 2026-10-10) nor before its head noun
-            used = {_norm((x.get("device") or {}).get("heading")) for x in rows if (x.get("device") or {}).get("id") == "chapter-plate"}
-            cut = _short_heading(head, 25, [s_.get("title") for s_ in (dossier.get("sections") or [])[1:]], used, names)
-            if not cut:                          # (2026-10-13: "The Translator's Narrow Role" was "The Translator's
-                engine.log(f"      chapter '{head}' skipped (no whole heading of it fits)")      # Narrow")
-                continue
-            src, head = head, cut
-        head = " ".join(w.lower() if j and w.lower() in ("of", "the", "a", "an", "and", "in", "on", "to", "for", "at", "by")
-                        else w for j, w in enumerate(head.split()))
-        head = head[:1].upper() + head[1:]       # a capital first, whatever case it was written in (2026-10-13)
+        head, src, no = _chapter_fit(rows, k, head, last, dossier, names)
+        if no and no[0] == "long":
+            engine.log(f"      chapter '{head}' skipped (no whole heading of it fits)")
+            continue
         r = rows[k]
-        if r["startMs"] < CHAPTER_FIRST_S * 1000 or r["startMs"] - last < 30000 or (r.get("device") or {}).get("id") in ("P03", "gallery-strip"):
+        if no:
             engine.log(f"      chapter '{head}' at shot {k} skipped (opening, too close, or the title shot)")
             continue
         if r.get("device"):
@@ -1969,19 +2321,38 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
         engine.log(f"      chapter '{head}' at {r['startMs'] / 1000:.0f}s")
     if chapters < CHAPTERS_MIN:                 # never short: evenly spaced turns on free shots, the dossier's titles
         titles = [str(s.get("title") or "") for s in (dossier.get("sections") or [])[1:]] or ["The Turn", "What Remained"]
-        for f in [x / (CHAPTERS_MIN + 1) for x in range(1, CHAPTERS_MIN + 1)][chapters:]:
-            k = min((k for k in range(1, len(rows)) if not rows[k].get("section_turn") and (rows[k].get("device") or {}).get("id") not in ("P03", "gallery-strip")),
-                    key=lambda k: abs(rows[k]["startMs"] - f * total_s * 1000), default=None)
-            if k is None:
-                break
-            src = titles[min(chapters, len(titles) - 1)]
-            head = _short_heading(src, 25, names=names) or "The Turn"   # whole
-            rows[k]["device"], rows[k]["section_turn"] = {"id": "chapter-plate", "heading": head}, True
-            if head != " ".join(src.split()).rstrip("."):
-                rows[k]["_cut_from"] = src           # what it was made from (review 2026-10-13, round 4)
-            _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
-            chapters += 1
-            engine.log(f"      chapter '{head}' at {rows[k]['startMs'] / 1000:.0f}s (filled)")
+        aims = [x / (CHAPTERS_MIN + 1) for x in range(1, CHAPTERS_MIN + 1)][chapters:]
+
+        def fill_in(rows, engine, spacing):
+            """The fill-in on `rows`; with `spacing`, False (the rows half filled) at a target with no spaced shot."""
+            n = chapters
+            for f in aims:
+                free = [k for k in range(1, len(rows)) if not rows[k].get("section_turn") and (rows[k].get("device") or {}).get("id") not in ("P03", "gallery-strip")]
+                turns = [x["startMs"] for x in rows if x.get("section_turn")]
+                spaced = [k for k in free if rows[k]["startMs"] >= CHAPTER_FIRST_S * 1000
+                          and all(abs(rows[k]["startMs"] - t) >= 30000 for t in turns)]
+                if spacing and free and not spaced:
+                    return False
+                k = min(spaced if spacing else free, key=lambda k: abs(rows[k]["startMs"] - f * total_s * 1000), default=None)
+                if k is None:
+                    break
+                src = titles[min(n, len(titles) - 1)]
+                head = _short_heading(src, 25, names=names) or "The Turn"   # whole
+                rows[k]["device"], rows[k]["section_turn"] = {"id": "chapter-plate", "heading": head}, True
+                if head != " ".join(src.split()).rstrip("."):
+                    rows[k]["_cut_from"] = src           # what it was made from (review 2026-10-13, round 4)
+                _hold(engine, rows, k, _need_s("chapter-plate"), f"chapter '{head}'")
+                n += 1
+                engine.log(f"      chapter '{head}' at {rows[k]['startMs'] / 1000:.0f}s (filled)")
+            return True
+        # with the placed chapters' spacing (2026-10-14, every planner: a planned chapter at 425 s and this one at 436 s,
+        # 11 s apart): each the nearest free shot after the opening and 30 s or more from every other chapter, placed or
+        # filled - when that places every chapter still missing, tried first on a copy of the rows. Where it cannot (a
+        # film under about 90 s: the first fill pushed past the opening leaves the second no spaced shot, and it went
+        # next to the first, review 2026-10-14), the fill-in as before for all of them (2-3 chapters are mandatory)
+        class Quiet:                             # the try on the copy says nothing in the log
+            log = staticmethod(lambda s: None)
+        fill_in(rows, engine, fill_in(copy.deepcopy(rows), Quiet, True))
 
     # then the overlays, through the same word checks as the planner's own (build), on free shots, groups capped
     for o in sorted(got.get("overlays") or [], key=lambda o: int(o.get("shot", -1)) if str(o.get("shot", "")).lstrip("-").isdigit() else -1):
@@ -6808,7 +7179,8 @@ def highlight_pages(engine, job: Path, rows: list, script: str, dossier: dict, c
         engine.log(f"Mr Truth: highlighted pages - {len(ask)} moment(s) that cite a source, Claude chooses and writes "
                    f"at most {HL['cap']} (and {HL_SPARE} spares)...")
         try:
-            got = {"key": key, "answer": _ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL)}
+            with _anthropic(engine):                 # Anthropic's on Token Supply's planner too (owner 2026-10-14)
+                got = {"key": key, "answer": _ask(engine, prompt, 8000, model=engine.SCRIPT_MODEL)}
         except RuntimeError as e:
             engine.log(f"  highlighted pages: {e} - none this run (asked again next run)")
             HL["claude"] = "failed"
@@ -11098,7 +11470,33 @@ def _usage(engine) -> dict:
             "gemini": json.loads(json.dumps(g, default=str)), "brave_requests": _BRAVE["requests"],
             "wikimedia_requests": COMMONS["requests"], "search": dict(SEARCH), "bing_off": _BING.get("why", ""),
             "picture_checks": dict(VSTAT), "frame_rechecks": _crop_stats(dict(VSTAT), _spent(engine, ("frame recheck",))),
-            "claude": {k: c.get(k) for k in ("calls", "in", "out", "cache_read", "cache_write", "usd") if k in c}}
+            "claude": {k: c.get(k) for k in ("calls", "in", "out", "cache_read", "cache_write", "usd") if k in c},
+            **({"planner": _ts_record(engine)} if _ts_planner(engine) else {})}
+
+
+def _ts_record(engine) -> dict:
+    """Token Supply's planner (owner 2026-10-14) for timing.json and then the pod's summary.json: the calls Token Supply
+    answered and those Anthropic answered (the highlighted pages, the hand-overs, what Token Supply could not answer),
+    the answers asked again on Token Supply and handed to Anthropic by step and why, the calls that went to Anthropic
+    because Token Supply could not answer them, and why it was switched off ("" when it never was)."""
+    st = getattr(engine, "TOKENSUPPLY_STATS", None) or {}
+    spend = getattr(engine, "CLAUDE_SPEND", None) or {}
+    tag = getattr(engine, "TOKENSUPPLY_TAG", " (Token Supply)")
+    ts_streams = sum(v.get("calls", 0) for m, v in (spend.get("models") or {}).items() if m.endswith(tag))
+    with _TS_LOCK:
+        reasked, handed, why = dict(TS["reasked"]), dict(TS["handed"]), list(TS["why"])
+    return {"planner": "ts", "ts_calls": st.get("calls", 0),
+            "anthropic_calls": max(0, spend.get("calls", 0) - ts_streams), "reasked": reasked, "handed": handed,
+            "fell_back": st.get("fell_back", 0), "off": st.get("off", ""), "why": why}
+
+
+def _ts_line(engine) -> str:
+    """The same for the log, one line (the pod's summary copies it)."""
+    d = _ts_record(engine)
+    steps = lambda x: ", ".join(f"{k} {n}" for k, n in sorted(x.items())) or "none"
+    return (f"  planner (ts): Token Supply answered {d['ts_calls']} of {d['ts_calls'] + d['anthropic_calls']} Claude "
+            f"calls; asked again on Token Supply: {steps(d['reasked'])}; handed to Anthropic: {steps(d['handed'])}; "
+            f"highlighted pages: Anthropic" + (f"; Token Supply turned off: {d['off']}" if d["off"] else ""))
 
 
 def assemble(engine, job: Path, mp3: Path, srt: Path, style: str, force: bool, burn_subs: bool) -> Path:
@@ -11238,6 +11636,8 @@ def plan_film(engine, job: Path, srt: Path, force: bool, took) -> list:
     storage = work / "storage"
     sc_list = scenes(rows, storage, _cues(engine, srt))
     _gate_scenes(engine, job, rows, sc_list)     # the gate's last look, at the scenes as drawn (effects, moves, frames)
+    if _ts_planner(engine):                      # who planned it: Token Supply, and what Anthropic answered instead
+        engine.log(_ts_line(engine))
     took("scenes")
     _dump(work / "plan.json", sc_list)
     # anchor_switched: a picture found for another anchor or line (a 'contextual' one is now the right kind of thing

@@ -171,7 +171,7 @@ def own_password():
 def _view(j: dict) -> dict:
     out = {k: j.get(k) for k in ("id", "user", "title", "status", "stage", "progress", "run_on", "created",
                                  "started", "finished", "seconds", "minutes", "voice_name", "music_name", "music_vol",
-                                 "pod_desc", "video_mb", "error", "commit_id", "machines", "retries")}
+                                 "pod_desc", "video_mb", "error", "commit_id", "machines", "retries", "planner")}
     ds = json.loads(j.get("drawers") or "[]")
     used = [d for d in ds if d.get("id")]
     if used:                                        # the drawing machines, shown with the planner's
@@ -288,7 +288,7 @@ def _create_job():
     jid = store.new_job(user=u["name"], title=title, run_on=run_on, seconds=round(secs, 1),
                         minutes=max(1, int(-(-secs // 60))), voice_name=voice.filename[:120], music_name=mname,
                         music_vol=vol if mname else None,
-                        script_words=len(script.split()))
+                        script_words=len(script.split()), planner=studio.planner())   # the film keeps it
     tmp.rename(studio.folder(jid))
     return jsonify(id=jid)
 
@@ -362,6 +362,7 @@ def get_settings():
               "hint": ("…" + keys[k][-4:]) if keys.get(k) and len(keys[k]) > 8 else ("set" if keys.get(k) else "")}
              for k, label, need_, help_ in J.KEYS]
     return jsonify(keys=shown, max_parallel=studio.max_parallel(), machines=studio.machines(), users=store.users(),
+                   planner=studio.planner(), planners=[{"id": k, "label": v} for k, v in J.PLANNERS.items()],
                    version=_version())
 
 
@@ -378,6 +379,10 @@ def save_settings():
             store.put("max_parallel", max(1, min(10, int(d["max_parallel"]))))
         if d.get("machines") is not None:
             store.put("machines", max(1, min(J.MACHINES_MAX, int(d["machines"]))))
+        if d.get("planner") is not None:                # Settings → Planner (owner 2026-10-14): for new films
+            if d["planner"] not in J.PLANNERS:
+                raise ValueError("the planner is one of: " + ", ".join(J.PLANNERS.values()))
+            store.put("planner", d["planner"])
     except (ValueError, TypeError) as e:
         return jsonify(error=str(e)), 400
     return jsonify(ok=True)
@@ -427,6 +432,14 @@ def test_keys():
         dry = J.claude_credit(k.get("ANTHROPIC_API_KEY", ""))    # the model list answers even with no credit
         return f"failed: {dry}" if dry else "ok"
     run("Claude", claude)
+
+    def tokensupply():                              # one 1-token call (about $0.0002), only when the key is set
+        if not k.get("TOKENSUPPLY_API_KEY"):
+            return ("failed: not set, and the planner is Claude Sonnet through Token Supply" if studio.planner() == "ts"
+                    else "not set (only for the Token Supply planner)")
+        why = J.tokensupply_check(k["TOKENSUPPLY_API_KEY"])
+        return f"failed: {why}" if why else "ok"
+    run("Token Supply", tokensupply)
 
     def wavespeed():
         r = requests.get("https://api.wavespeed.ai/api/v3/balance", timeout=30,

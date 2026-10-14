@@ -24,6 +24,7 @@ Usage:
 
 import styles as _styles
 import argparse
+import contextlib
 import difflib
 import hashlib
 import json
@@ -72,6 +73,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 # ── Keys ───────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+TOKENSUPPLY_API_KEY = os.environ.get("TOKENSUPPLY_API_KEY", "")     # Claude through Token Supply (CLAUDE_PROVIDER)
 AI33_API_KEY = os.environ.get("AI33_API_KEY", "")
 KIE_API_KEY = os.environ.get("KIE_API_KEY", "")
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
@@ -87,7 +89,8 @@ STYLE_VOICE_PROVIDER: dict = {}   # "wavespeed" | "ai33" per channel
 # ── Models / Claude-compatible providers ────────────────────────────────────
 # "kie" = Claude via kie.ai (≈60% cheaper, billed to the kie wallet);
 # "anthropic" = direct Anthropic API; "codex" = local Codex CLI with the
-# saved ChatGPT subscription. The existing callers still use claude().
+# saved ChatGPT subscription; "tokensupply" = the same Claude models resold by
+# Token Supply (below). The existing callers still use claude().
 CLAUDE_PROVIDER = os.environ.get("CLAUDE_PROVIDER", "claudecode").lower()
 SCRIPT_MODEL = os.environ.get("CLAUDE_SCRIPT_MODEL", "claude-sonnet-5")
 # The outline (idea + structure) comes from Opus for quality; the long script BODY
@@ -113,6 +116,33 @@ CLAUDE_PRIMARY_BUDGET = int(os.environ.get("CLAUDE_PRIMARY_BUDGET", "45"))
 # Scripts can run through either the local Claude Code CLI or the local Codex CLI;
 # both use their own saved login rather than MoveFast's API keys.
 SCRIPT_PROVIDER = os.environ.get("SCRIPT_PROVIDER", "claudecode").lower()
+
+# ── Token Supply (CLAUDE_PROVIDER=tokensupply) ─────────────────────────────
+# Genuine Claude Sonnet 5 resold at about 30% of Anthropic's price through an endpoint in Anthropic's own format (owner
+# 2026-10-14: Settings → Planner, on test, off by default; Anthropic stays the default planner and the backup). It keeps
+# a prompt cache like Anthropic's, takes thinking switched off and a system text (all measured 2026-10-14), but runs
+# the model inside an AI coding tool ("Kiro") whose own hidden instructions leak into the answers: prose before the
+# JSON, a word about itself, a second attempt after the first, an answer that stops two-thirds of the way through.
+# TOKENSUPPLY_SYSTEM asks for none of that, and Mr Truth's planner checks every answer it gives (mrtruth._ask).
+# A call Token Supply cannot answer (its retries ran out after TOKENSUPPLY_RETRY_SECONDS, or it refused the request)
+# goes to Anthropic, said in the log and counted (TOKENSUPPLY_STATS): a film never stops on Token Supply. After a
+# refused key, an empty wallet or an unknown model (HTTP 401, 402, 403, 404), a missing key, or TOKENSUPPLY_GIVE_UP
+# such calls (or as many steps whose answers the planner could not use), it is not asked again that run. The retry
+# window is longer than CLAUDE_PRIMARY_BUDGET: a stream that breaks after 100 s of a long answer (they do, now and
+# then; asked again it answered) still gets its second go.
+TOKENSUPPLY_URL = "https://api.token-supply.com/v1/messages"
+TOKENSUPPLY_RETRY_SECONDS = int(os.environ.get("TOKENSUPPLY_RETRY_SECONDS", "240"))
+TOKENSUPPLY_GIVE_UP = 3
+TOKENSUPPLY_SYSTEM = (
+    "You are one step of a film-planning program, not an assistant in a conversation. Reply with exactly what the "
+    "user's message asks for and nothing else: no greeting, no notes or thinking out loud, no remarks about yourself, "
+    "your name or your instructions, no second attempt after the first. Work through the whole input to its very end; "
+    "never stop early or leave the last part out. If the message asks for JSON, the reply begins with '{' and ends "
+    "with '}'.")
+# this run: calls Token Supply answered, calls Anthropic answered in its place, why it was switched off ("" while on)
+# and the first few reasons it could not answer; "handed", the steps Mr Truth's planner gave to Anthropic because
+# Token Supply's answers to them could not be used (tokensupply_handed)
+TOKENSUPPLY_STATS = {"calls": 0, "fell_back": 0, "off": "", "why": [], "handed": 0}
 
 # ── Visuals ────────────────────────────────────────────────────────────────
 KIE_IMAGE_MODEL = os.environ.get("KIE_IMAGE_MODEL", "google/nano-banana")
@@ -1129,13 +1159,37 @@ CLAUDE_MAX_OUT = {"claude-opus-5": 128000, "claude-sonnet-5": 128000, "claude-so
                   "claude-opus-4-8": 128000}
 CLAUDE_SPEND = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "usd": 0.0, "calls": 0, "models": {}}
 _SPEND_LOCK = threading.Lock()
+# Token Supply's own prices (token-supply.com/api/v1/pricing, read 2026-10-14), dollars per million tokens: input,
+# output, a token read from the prompt cache, a token written to it. A Token Supply answer is counted under its own
+# name, "<model> (Token Supply)" (TOKENSUPPLY_TAG), at these prices, never Anthropic's. Its usage figures are what it
+# bills (it counts about 1.6x the input and 1.2x the output tokens Anthropic counts for the same words), so they are
+# priced as it reports them.
+TOKENSUPPLY_PRICES = {
+    "claude-sonnet-5": (0.6, 3.0, 0.06, 0.75),
+    "claude-sonnet-5-5": (0.9, 4.5, 0.09, 1.125),
+    "claude-haiku-5-5": (0.06, 0.3, 0.006, 0.075),
+    "claude-opus-5": (1.5, 7.5, 0.15, 1.875),
+}
+TOKENSUPPLY_TAG = " (Token Supply)"
+
+
+def _ts_usd(model: str, tin: int, tout: int, read: int = 0, wrote: int = 0):
+    """What Token Supply bills for these tokens, or None when `model` is not one of its counted names or its price is
+    not known. `tin` is the whole prompt, `read` and `wrote` the parts of it read from and written to the cache."""
+    if not model.endswith(TOKENSUPPLY_TAG):
+        return None
+    p = TOKENSUPPLY_PRICES.get(model[:-len(TOKENSUPPLY_TAG)])
+    if not p:
+        return None
+    return ((tin - read - wrote) * p[0] + tout * p[1] + read * p[2] + wrote * p[3]) / 1e6
 
 
 def _count_tokens(model: str, tin: int, tout: int, usd: float = None, *, read: int = 0, wrote: int = 0) -> None:
     """`usd`: the provider's own figure (the Claude Code CLI reports one) — used instead of the table.
     On a subscription it is the API-equivalent value, not money spent. `tin` is the whole prompt; `read` and `wrote`
     are the parts of it read from and written to the prompt cache, priced as such (by name only: a count passed fifth
-    is refused, never taken for a cache read)."""
+    is refused, never taken for a cache read). A Token Supply answer ("<model> (Token Supply)") is priced from
+    TOKENSUPPLY_PRICES and its row counts its calls too (the planner's record tells them from Anthropic's)."""
     with _SPEND_LOCK:
         CLAUDE_SPEND["in"] += tin
         CLAUDE_SPEND["out"] += tout
@@ -1148,8 +1202,13 @@ def _count_tokens(model: str, tin: int, tout: int, usd: float = None, *, read: i
         m["cache_read"] += read
         m["cache_write"] += wrote
         price = CLAUDE_PRICES.get(model)
+        ts = _ts_usd(model, tin, tout, read, wrote) if usd is None else None
+        if model.endswith(TOKENSUPPLY_TAG):
+            m["calls"] = m.get("calls", 0) + 1
         if usd is not None:
             CLAUDE_SPEND["usd"] += float(usd)
+        elif ts is not None:
+            CLAUDE_SPEND["usd"] += ts
         elif price:
             billed = tin - read - wrote + wrote * CLAUDE_CACHE_WRITE + read * CLAUDE_CACHE_READ.get(model, 0.1)
             CLAUDE_SPEND["usd"] += billed / 1e6 * price[0] + tout / 1e6 * price[1]
@@ -1176,10 +1235,48 @@ def claude_spend_line() -> str:
                 if v.get("cache_read") or v.get("cache_write") else "")
     who = ", ".join(f"{m} {n(v['in'])} in / {n(v['out'])} out{cache(v)}"
                     for m, v in sorted(sp["models"].items()))
-    unpriced = [m for m in sp["models"] if m not in CLAUDE_PRICES]
+    unpriced = [m for m in sp["models"] if m not in CLAUDE_PRICES and _ts_usd(m, 0, 0) is None]
     tail = f" (no price known for {', '.join(unpriced)})" if unpriced else ""
     return (f"Claude: {sp['calls']} calls, {n(sp['in'])} in / {n(sp['out'])} out "
             f"= ${sp['usd']:.4f} — {who}{tail}")
+
+
+def tokensupply_spend_line() -> str:
+    """Token Supply's share of the line above, for the log (the website reads its dollars, and shows the rest of the
+    Claude bill as Anthropic's): "Token Supply this run: $X.XXXX of it, N calls; M call(s) went to Anthropic instead
+    (why)", and why it was switched off when it was. "" on a run that did not use it."""
+    st = TOKENSUPPLY_STATS
+    with _SPEND_LOCK:
+        if not (st["calls"] or st["fell_back"] or st["off"]):
+            return ""
+        usd = sum(_ts_usd(m, v["in"], v["out"], v["cache_read"], v["cache_write"]) or 0.0
+                  for m, v in CLAUDE_SPEND["models"].items())
+        why = "; ".join(st["why"])
+        # (the steps handed to Anthropic come before the switch-off: the website reads that to the line's end)
+        return (f"Token Supply this run: ${usd:.4f} of it, {st['calls']} calls; {st['fell_back']} call(s) went to "
+                f"Anthropic instead" + (f" ({why})" if why else "")
+                + (f"; {st['handed']} step(s) handed to Anthropic after answers it could not give properly"
+                   if st.get("handed") else "")
+                + (f"; Token Supply turned off: {st['off']}" if st["off"] else ""))
+
+
+def tokensupply_handed(why: str) -> None:
+    """Mr Truth's planner gave a step to Anthropic because Token Supply's answers to it could not be used (prose around
+    its JSON, none, a visual plan that stops short, chapters that cannot be placed; mrtruth._ts_handed). Each such step
+    is paid for twice, Token Supply's answers and Anthropic's, so TOKENSUPPLY_GIVE_UP of them switch Token Supply off
+    for the rest of the run like the calls it could not answer at all (review 2026-10-14: a Token Supply that answered
+    every step badly cost 1.8x Anthropic alone, and nothing switched it off). Counted apart from those calls: one outage
+    and one bad answer are not two of the same."""
+    st = TOKENSUPPLY_STATS
+    why = " ".join(str(why).split())[:150]
+    with _SPEND_LOCK:
+        st["handed"] = st.get("handed", 0) + 1
+        now_off = not st["off"] and st["handed"] >= TOKENSUPPLY_GIVE_UP
+        if now_off:
+            st["off"] = f"{st['handed']} answers it could not give properly, the last: {why}"
+    if now_off:
+        log(f"⚠ Token Supply's answers could not be used {TOKENSUPPLY_GIVE_UP} times — every later call this run goes "
+            f"to Anthropic")
 
 
 _CLAUDE_LAST = threading.local()     # how this thread's last streamed answer ended: Anthropic's stop_reason
@@ -1194,18 +1291,30 @@ def claude_max_out(model: str) -> int:
     return CLAUDE_MAX_OUT.get(model, 64000)
 
 
-def _read_sse_text(resp, begun: threading.Event = None) -> str:
+def _read_sse_text(resp, begun: threading.Event = None, tokensupply: bool = False, deadline: float = None) -> str:
     """Collect the text deltas from an Anthropic streaming response.
 
     Only `text_delta` is kept — thinking deltas and the bookkeeping events are
     ignored. A mid-stream `error` event is raised (_ClaudeStreamError) so it is retried
     like a network error instead of silently returning a truncated script. `begun` is set on the
     first content event: the prompt cache this request writes is readable from then on.
+    `tokensupply`: the answer is Token Supply's, counted under "<model> (Token Supply)" at its own prices.
+    `deadline` (Token Supply's calls only): the end of the call's retry window. requests' read timeout starts again
+    on every line, so a stream that keeps sending its pings and never its answer would hold the film for good (review
+    2026-10-14: a proxy around a coding tool); one still open 120 s past the window with no text for 60 s is broken
+    off as stalled, and the window being over, the call goes to Anthropic. An answer still writing is never cut, and
+    Anthropic's stream is read as before (no deadline).
     """
     out = []
     model, usage = "", {}
     _CLAUDE_LAST.stop = ""
+    # A server-sent event stream is UTF-8 by definition. Anthropic says so in its Content-Type; Token Supply names no
+    # charset, and requests then reads the bytes as Latin-1: "—" arrived as "â€”" and "é" as "Ã©" (2026-10-14)
+    resp.encoding = "utf-8"
+    wrote = time.time() if deadline is not None else 0.0          # when its last text came (from the request on)
     for raw in resp.iter_lines(decode_unicode=True):
+        if deadline is not None and time.time() > deadline + 120 and time.time() - wrote > 60:
+            raise _ClaudeStreamError("stream stalled: no text for over 60 s, past its retry window")
         if not raw or not raw.startswith("data:"):
             continue
         chunk = raw[5:].strip()
@@ -1222,6 +1331,8 @@ def _read_sse_text(resp, begun: threading.Event = None) -> str:
             d = ev.get("delta") or {}
             if d.get("type") == "text_delta":
                 out.append(d.get("text", ""))
+                if deadline is not None:
+                    wrote = time.time()
         elif t == "message_start":
             msg = ev.get("message") or {}
             model = msg.get("model") or ""
@@ -1233,7 +1344,7 @@ def _read_sse_text(resp, begun: threading.Event = None) -> str:
         elif t == "error":
             raise _ClaudeStreamError(f"stream error: {str(ev.get('error'))[:150]}")
     if model or usage:
-        _count_usage(model or "unknown", usage)
+        _count_usage((model or "unknown") + (TOKENSUPPLY_TAG if tokensupply else ""), usage)
     return "".join(out).strip()
 
 
@@ -1260,6 +1371,12 @@ def _claude_endpoint(provider: str):
         return ("https://api.anthropic.com/v1/messages",
                 {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
                  "content-type": "application/json"})
+    if provider == "tokensupply":
+        if not TOKENSUPPLY_API_KEY:
+            return None
+        return (TOKENSUPPLY_URL,                     # it reads the key from either header (both sent, as it asks)
+                {"x-api-key": TOKENSUPPLY_API_KEY, "Authorization": f"Bearer {TOKENSUPPLY_API_KEY}",
+                 "anthropic-version": "2023-06-01", "content-type": "application/json"})
     return None
 
 
@@ -1272,10 +1389,42 @@ class _ClaudeStreamError(_ClaudeError):
     network error. Every other _ClaudeError (a client error, a missing key) is not asked again."""
 
 
+_CLAUDE_PIN = threading.local()      # this thread's provider for calls that name none (claude_on), or None
+
+
+@contextlib.contextmanager
+def claude_on(provider):
+    """Inside the block, a claude() call made in THIS thread without an explicit provider goes to `provider`, exactly
+    as if CLAUDE_PROVIDER said so: claude_on("anthropic") on a Token Supply planning machine (CLAUDE_FALLBACK=anthropic)
+    is today's planner, Anthropic with no fallback and the run ending on its failure. For the steps that must be
+    Anthropic's (owner 2026-10-14: the highlighted pages, and what Token Supply could not answer properly). Other
+    threads are not affected (a thread pool's workers each pin their own); blocks nest and the one outside comes back.
+    None changes nothing, and the configured provider is the same as no pin."""
+    old = getattr(_CLAUDE_PIN, "provider", None)
+    if provider:
+        p = str(provider).lower()
+        _CLAUDE_PIN.provider = None if p == CLAUDE_PROVIDER else p
+    try:
+        yield
+    finally:
+        _CLAUDE_PIN.provider = old
+
+
+def claude_provider() -> str:
+    """The provider a call without an explicit one goes to in this thread: the claude_on pin, else CLAUDE_PROVIDER."""
+    return getattr(_CLAUDE_PIN, "provider", None) or CLAUDE_PROVIDER
+
+
 def claude_caches() -> bool:
     """True when a call without an explicit provider goes to Anthropic itself, the one provider that is sent a cache
-    breakpoint (claude(head=...)): a caller with several parts that share the head then starts one part alone."""
-    p = CLAUDE_PROVIDER
+    breakpoint (claude(head=...)): a caller with several parts that share the head then starts one part alone.
+    Token Supply keeps a prompt cache like Anthropic's (the head is sent to it the same way): True while it is asked;
+    once it is off, its calls go to Anthropic, which caches too."""
+    p = claude_provider()
+    if p == "tokensupply":
+        if not TOKENSUPPLY_STATS["off"] and _claude_endpoint("tokensupply") is not None:
+            return True
+        p = "anthropic"
     if p in _DEAD_PROVIDERS and CLAUDE_FALLBACK != p:
         p = CLAUDE_FALLBACK
     return p == "anthropic" and _claude_endpoint("anthropic") is not None
@@ -1476,10 +1625,12 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
     Raises _ClaudeError on client error or when the budget runs out."""
     _CLAUDE_LAST.stop = ""
     # Only Anthropic is sent the head as a block of its own (marked for its prompt
-    # cache, below). Every other provider gets the head and the prompt as one string,
+    # cache, below), and Token Supply, which takes Anthropic's request and keeps the
+    # same cache (2026-10-14: a second call read 8312 of its 8318 tokens from it).
+    # Every other provider gets the head and the prompt as one string,
     # joined here before any provider's branch, so a branch that builds its own
     # request from `prompt` never loses the head.
-    if head and provider != "anthropic":
+    if head and provider not in ("anthropic", "tokensupply"):
         prompt, head = head + prompt, ""
     if provider == "codex":
         try:
@@ -1514,9 +1665,13 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
     # because the thinking is adaptive, so it looks like the API being flaky.
     # Nothing asked of Claude here needs deliberation: these are extraction and
     # formatting calls. Turning it off makes them deterministic and cheaper.
-    # (Never sent to kie, whose proxy has its own idea of the schema.)
-    if provider == "anthropic":
+    # (Never sent to kie, whose proxy has its own idea of the schema. Token Supply
+    # takes it, and a system text of ours over its own: TOKENSUPPLY_SYSTEM, sent to
+    # it alone - an Anthropic request is exactly what it was.)
+    if provider in ("anthropic", "tokensupply"):
         payload["thinking"] = {"type": "disabled"}
+    if provider == "tokensupply":
+        payload["system"] = TOKENSUPPLY_SYSTEM
     start = time.time()
     deadline = start + budget_s
     attempt = 0
@@ -1527,7 +1682,8 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
             resp = requests.post(url, headers=headers, json=payload,
                                  stream=True, timeout=(30, 180))
             if resp.status_code == 200:
-                text = _read_sse_text(resp, begun)
+                text = (_read_sse_text(resp, begun, tokensupply=True, deadline=deadline) if provider == "tokensupply"
+                        else _read_sse_text(resp, begun))
                 if text:
                     return text
                 last = "no text in stream"
@@ -1571,8 +1727,12 @@ def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = Non
 
     `head`: a long beginning that several calls share word for word, sent before
     `prompt` (to Anthropic as a cached block, see _claude_try). `begun` is set once
-    the answer starts streaming."""
-    primary = (provider or CLAUDE_PROVIDER).lower()
+    the answer starts streaming. A call without a provider goes where this thread's
+    claude_on pin says, else to CLAUDE_PROVIDER; Token Supply has its own path
+    (_claude_tokensupply), whether configured, pinned or named."""
+    primary = (provider or getattr(_CLAUDE_PIN, "provider", None) or CLAUDE_PROVIDER).lower()
+    if primary == "tokensupply":
+        return _claude_tokensupply(prompt, model, max_tokens, head, begun)
     if primary == "codex":
         # Codex is subscription-only by design. Do not let the legacy default
         # CLAUDE_FALLBACK send a failed ChatGPT request to Anthropic or kie.
@@ -1622,6 +1782,56 @@ def claude(prompt: str, model: str, max_tokens: int = 16000, provider: str = Non
         return _claude_try(fb, model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
     except _ClaudeError as e2:
         sys.exit(f"Claude API error — i fallback {fb} selhal: {e2}")
+
+
+def claude_was_tokensupply() -> bool:
+    """True when this thread's last call through Token Supply's path (_claude_tokensupply) was answered by Token
+    Supply itself, False when Anthropic answered it in its place (Mr Truth's planner checks Token Supply's answers)."""
+    return getattr(_CLAUDE_LAST, "tokensupply", False)
+
+
+def _claude_tokensupply(prompt: str, model: str, max_tokens: int, head: str, begun: threading.Event) -> str:
+    """A call to Token Supply (CLAUDE_PROVIDER=tokensupply, owner 2026-10-14), never the generic primary/fallback code:
+    Token Supply with its own retry window (TOKENSUPPLY_RETRY_SECONDS), and what it cannot answer goes to Anthropic
+    as today's planner sends it (Anthropic's retry window, the run ending if Anthropic fails too), said in the log and
+    counted. A refused key or an empty wallet (HTTP 401, 402, 403), an unknown model (404), a missing key, or
+    TOKENSUPPLY_GIVE_UP calls it could not answer switch it off for the rest of the run (TOKENSUPPLY_STATS["off"]), and
+    so do as many steps whose answers the planner could not use (tokensupply_handed): every later call goes straight
+    to Anthropic. It is never put among _DEAD_PROVIDERS."""
+    _CLAUDE_LAST.tokensupply = False
+    st = TOKENSUPPLY_STATS
+    with _SPEND_LOCK:
+        why = st["off"]
+    if not why:
+        try:
+            text = _claude_try("tokensupply", model, prompt, max_tokens, TOKENSUPPLY_RETRY_SECONDS, head, begun)
+        except _ClaudeError as e:
+            why = " ".join(str(e).split())[:150]          # one line: an error body may run over several
+        else:
+            with _SPEND_LOCK:
+                st["calls"] += 1
+            _CLAUDE_LAST.tokensupply = True
+            return text
+        with _SPEND_LOCK:
+            st["fell_back"] += 1
+            if len(st["why"]) < 5:
+                st["why"].append(why)
+            # read at the reason's start ("tokensupply HTTP 401: ...", "tokensupply: API key missing"): a 5xx whose
+            # body mentions an upstream 403 is a passing failure, not a refused key (review 2026-10-14)
+            if not st["off"] and re.match(r"tokensupply(?: HTTP 40[1-4]\b|: API key missing)", why):
+                st["off"] = why
+            elif not st["off"] and st["fell_back"] >= TOKENSUPPLY_GIVE_UP:
+                st["off"] = f"{st['fell_back']} calls it could not answer, the last: {why}"
+            off = bool(st["off"])
+        log(f"⚠ Token Supply could not answer ({why}) — this call goes to Anthropic"
+            + (" and so does every later one this run" if off else ""))
+    else:
+        with _SPEND_LOCK:
+            st["fell_back"] += 1
+    try:
+        return _claude_try("anthropic", model, prompt, max_tokens, CLAUDE_RETRY_SECONDS, head, begun)
+    except _ClaudeError as e2:
+        sys.exit(f"Claude API error: {e2}")
 
 
 def claude_research(prompt: str, model: str = None) -> str:
@@ -10745,6 +10955,8 @@ def run_pipeline(title: str, minutes: int = 20, force: bool = False,
         try:
             if CLAUDE_SPEND["calls"]:
                 log(f"Claude this run: {claude_spend_line()}")
+                if tokensupply_spend_line():                 # its part of that bill, read by the website
+                    log(tokensupply_spend_line())
                 if CLAUDE_CALLS:
                     log("Claude: biggest consumers\n" + claude_calls_report())
             if GEMINI_PICKS["calls"] or GEMINI_PICKS["fallback"]:     # also on a run with no Claude call at all

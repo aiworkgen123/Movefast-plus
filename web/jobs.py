@@ -43,12 +43,23 @@ KEYS = [
     ("FARM_BUCKET_SECRET", "R2 secret access key", True, "shown once when the R2 token is made"),
     ("GEMINI_API_KEY", "Gemini (picture checks)", True, "aistudio.google.com → API keys"),
     ("ANTHROPIC_API_KEY", "Claude (planning)", True, "console.anthropic.com → API keys"),
+    ("TOKENSUPPLY_API_KEY", "Token Supply (the cheaper Claude planner, on test)", False,
+     "token-supply.com → API keys (Anthropic group); only needed when Planner is Claude through Token Supply"),
     ("WAVESPEED_API_KEY", "WaveSpeed (AI stand-in pictures)", True, "wavespeed.ai → API keys"),
     ("BRAVE_SEARCH_API_KEY", "Brave Search (backup search)", False, "only used when Bing fails"),
     ("EUROPEANA_API_KEY", "Europeana (archive search)", False, "optional"),
 ]
 POD_KEYS = ("GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "WAVESPEED_API_KEY", "EUROPEANA_API_KEY", "ANTHROPIC_API_KEY")
 POD_PREFIX = "mrtruth-web-"                   # every machine this website rents is named so; the sweep owns only these
+# who plans a film (Settings → Planner; owner 2026-10-14): Claude Sonnet through Anthropic, as every film so far, or the
+# same Claude Sonnet resold by Token Supply at about 30% of the price, on test and off by default. A Token Supply film
+# still has Anthropic write its highlighted pages and answer every call Token Supply cannot answer, or answers unusably
+# (make_video.py / mrtruth.py), so the Anthropic key stays needed whatever the planner. A film keeps the planner it was
+# made with; only a Token Supply film's planning machine is given the Token Supply key and settings (PLAN_SCRIPT), and
+# Token Supply never holds up or stops a film (owner: reliability first): one without a key is made all the same and
+# Anthropic plans it, said on the film. Nothing asks Token Supply before a machine is rented (no cost, no delay)
+PLANNERS = {"sonnet": "Claude Sonnet", "ts": "Claude Sonnet through Token Supply (cheaper, test)"}
+PLANNER_DEFAULT = "sonnet"
 # a film on several small machines (owner 2026-10-12: the 48-core machine cost $2.49/h and 64-core ones are rarely
 # free, while 16-core ones are plentiful at $0.13-0.30/h): one PLANNER plans the film (mostly waiting on the internet),
 # draws its own share and finishes it; MACHINES - 1 DRAWERS each draw one share of the shots. Every machine is the
@@ -133,6 +144,33 @@ def claude_credit(key: str) -> str:
     if "credit balance" in r.text.lower():
         return CLAUDE_DRY
     return "the Claude key was refused - check it in Settings" if r.status_code == 401 else ""
+
+
+TOKENSUPPLY_URL = "https://api.token-supply.com/v1/messages"     # Anthropic's Messages format (make_video.py)
+
+
+def tokensupply_check(key: str) -> str:
+    """'' when Token Supply answers this key; otherwise why it will not plan: no key, a refused key (401/403), an empty
+    wallet (402), an unknown model (404), or it could not be reached. One 1-token call to the model the planner uses
+    (about $0.0002), sent with both of Token Supply's key headers as the planner sends them. Only Settings → Test keys
+    (and the test-film harness) call it, never a film: nothing asks Token Supply before a machine is rented (owner
+    2026-10-14: no cost, no delay), and a film whose Token Supply cannot answer is planned by Anthropic."""
+    if not key:
+        return "no Token Supply key in Settings"
+    try:
+        r = requests.post(TOKENSUPPLY_URL, timeout=30,
+                          headers={"x-api-key": key, "Authorization": f"Bearer {key}", "anthropic-version": "2023-06-01",
+                                   "content-type": "application/json"},
+                          json={"model": "claude-sonnet-5", "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]})
+    except requests.RequestException as e:
+        return f"Token Supply could not be reached ({type(e).__name__})"
+    if r.status_code in (401, 403):
+        return f"the Token Supply key was refused (HTTP {r.status_code}) - check it in Settings"
+    if r.status_code == 402:
+        return "the Token Supply account is out of credit (HTTP 402) - top it up at token-supply.com"
+    if r.status_code == 404:
+        return "Token Supply does not offer Claude Sonnet to this key (HTTP 404)"
+    return "" if r.ok else f"HTTP {r.status_code}"
 
 
 class LocalBucket:
@@ -228,11 +266,17 @@ class Studio:
         os.chmod(tmp, 0o600)
         tmp.replace(self.keys_file)
 
-    def missing_keys(self) -> list:
+    def missing_keys(self, made: bool = False) -> list:
+        """The keys not set yet: the ones every film needs (Anthropic's among them, whatever the planner: it writes a
+        Token Supply film's highlighted pages and answers what Token Supply cannot), and Token Supply's for the films
+        made from now on while Settings → Planner is Token Supply. A film made already (`made`: the runner's check) is
+        never held up over Token Supply, whatever the setting says now: a Sonnet film never uses it, and a Token
+        Supply film without it is planned by Anthropic (owner 2026-10-14)."""
         if self.fake:
             return []
-        keys = self.keys()
-        return [label for k, label, need, _ in KEYS if need and not keys.get(k)]
+        keys, ts = self.keys(), not made and self.planner() == "ts"
+        return [label for k, label, need, _ in KEYS
+                if (need or k == "TOKENSUPPLY_API_KEY" and ts) and not keys.get(k)]
 
     def bucket(self):
         if self.fake:
@@ -478,6 +522,11 @@ class Studio:
         except ValueError:
             return MACHINES_DEFAULT
 
+    def planner(self) -> str:
+        """Settings → Planner for new films: "sonnet" (the default) or "ts" (Claude Sonnet through Token Supply)."""
+        got = self.store.get("planner", PLANNER_DEFAULT)
+        return got if got in PLANNERS else PLANNER_DEFAULT
+
     def inputs(self, jid) -> dict:
         """The film's own files as uploaded: voice, script and (optionally) music."""
         d = self.folder(jid) / "inputs"
@@ -494,7 +543,7 @@ class Studio:
             raise RuntimeError(f"'{j['run_on']}' is not ready yet")
         if self.fake:
             return self._fake_run(jid)
-        missing = self.missing_keys()
+        missing = self.missing_keys(made=True)
         if missing:
             raise RuntimeError("missing keys in Settings: " + ", ".join(missing))
         keys, b = self.keys(), self.bucket()
@@ -551,6 +600,12 @@ class Studio:
                                 "ended": now, "state": "done", "why": "kept"})
         for k in POD_KEYS:
             env["K_" + k] = keys.get(k, "")
+        # the planner the film was made with (its own row: a retry, a replacement machine and a film carried on from
+        # its saved plan keep it): only a Token Supply film's planning machine gets these, and PLAN_SCRIPT writes them
+        # into its .env; the drawing machines get no keys at all (DRAW_SCRIPT), and a Sonnet film's env is as before
+        ts = j.get("planner") == "ts"
+        if ts:
+            env.update(PLANNER="ts", K_TOKENSUPPLY_API_KEY=keys.get("TOKENSUPPLY_API_KEY", ""))
         self.store.update(jid, stage="Loading the saved picture checks", progress=3)
         vk = {}
         venv = VS.env_for(b, run, str(CODE), vk, log=lambda s: self._note(jid, s))
@@ -560,6 +615,13 @@ class Studio:
             json.dump(list(vk.values()), f)
         self.store.update(jid, machines=n, drawers=json.dumps(drawers), pod_id=None)
         name = self._name(jid, attempt)
+        # a Token Supply film without its key (cleared after the film was made): said on the film and never a reason to
+        # hold it up (owner 2026-10-14) - its machine's planner finds no key, turns Token Supply off and Anthropic plans
+        # every step (the film's line says so). Token Supply itself is not asked here: no cost and no delay for a film
+        off = "no Token Supply key in Settings" if ts and not plan and not keys.get("TOKENSUPPLY_API_KEY") else ""
+        if off:
+            self._note(jid, f"Token Supply (the Claude Sonnet through Token Supply planner): {off} - the film is made "
+                            f"all the same, and Anthropic plans it")
         deadline, tries = time.time() + RENT_WAIT_S, 0
         try:
             while True:                                # wait for a machine rather than fail (owner 2026-10-12)
@@ -571,7 +633,8 @@ class Studio:
                     pod, tried = None, [dry]
                 else:
                     if not tries:                      # later tries keep the "Waiting for a machine" message
-                        self.store.update(jid, stage="Renting a machine", progress=4)
+                        self.store.update(jid, stage="Renting a machine" + (
+                            f" (Token Supply: {off} - Anthropic plans in its place)" if off else ""), progress=4)
                     pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU if n > 1 else 32,
                                             ram=32, max_hr=PLANNER_MAX_HR, fallback=True, ttl=ttl)
                 tries += 1
@@ -892,7 +955,8 @@ class Studio:
         now = time.time()
         cost = self.costs(d / "result.tgz")
         cost["pod"] = self._machine_cost(j, now)
-        cost["total"] = round(sum(v for k, v in cost.items() if k in ("pod", "gemini", "claude", "ai_pictures")), 2)
+        cost["total"] = round(sum(v for k, v in cost.items() if k in ("pod", "gemini", "claude", "token_supply",
+                                                                     "ai_pictures")), 2)
         full = (d / "pod_log.txt").read_text("utf-8", "replace") if (d / "pod_log.txt").exists() else ""
         tail = full.splitlines()[-80:]
         try:
@@ -969,7 +1033,12 @@ class Studio:
 
     @staticmethod
     def costs(result_tgz: Path) -> dict:
-        """What the film cost, read from its own logs (plan.log: the Claude and Gemini lines; the AI pictures made)."""
+        """What the film cost, read from its own logs (plan.log: the Claude and Gemini lines; the AI pictures made).
+        A Token Supply film's Claude line counts Token Supply's money too (make_video.claude_spend_line): it is shown
+        on its own (the "Token Supply this run: $X of it" line), and Claude is the rest, Anthropic's bill. A Token
+        Supply film whose Token Supply turned off (its planner line says why, mrtruth, and so does the Token Supply
+        line) was planned by Anthropic from then on: "token_supply_off", a note shown with the film's planner, never
+        counted as money."""
         out = {}
         try:
             with tarfile.open(result_tgz) as t:
@@ -980,8 +1049,18 @@ class Studio:
         c = re.findall(r"Claude this run: Claude: .*?= \$([\d.]+)", text)
         g = re.findall(r"Gemini photo picks: .*?= \$([\d.]+)\)", text)
         a = re.findall(r"AI on screen \d+ of \d+ from (\d+) drawings", text)
+        ts = re.findall(r"Token Supply this run: \$([\d.]+)", text)
+        off = (re.findall(r"planner \(ts\): .*?; Token Supply turned off: (.+?)\s*$", text, re.M) or
+               re.findall(r"Token Supply this run: .*?; Token Supply turned off: (.+?)\s*$", text, re.M))
+        # Token Supply's cents first and Claude the rest of the Claude line's own cents, so the two add up to that
+        # line's total to the cent (a Sonnet film's: its total, as before)
+        t = round(float(ts[-1]), 2) if ts else None
         if c:
-            out["claude"] = round(float(c[-1]), 2)
+            out["claude"] = round(round(float(c[-1]), 2) - (t or 0.0), 2)
+        if t is not None:
+            out["token_supply"] = t
+        if off:
+            out["token_supply_off"] = off[-1][:200]
         if g:
             out["gemini"] = round(float(g[-1]), 2)
         if a:
@@ -1137,9 +1216,20 @@ fi
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt -c testin/constraints.txt >>/root/log.txt 2>&1 || .venv/bin/pip install -q -r requirements.txt "av==15.1.0" >>/root/log.txt 2>&1
 say "pip done: $(.venv/bin/python -c 'import faster_whisper, av, numpy; print("ok", av.__version__)' 2>&1)"
+# the planner (Settings → Planner, owner 2026-10-14): Claude Sonnet through Anthropic, or through Token Supply (on test)
+# - then CLAUDE_PROVIDER says tokensupply instead, on its one line (run_test.py reads .env without override and
+# make_video.py again with it: one line leaves no doubt which wins), and Anthropic is the backup for every call Token
+# Supply cannot answer and writes the highlighted pages. A Sonnet film's .env is byte for byte what it was
+CP=anthropic
+if [ "${PLANNER:-}" = "ts" ]; then CP=tokensupply; fi
 { echo "GEMINI_API_KEY=$K_GEMINI_API_KEY"; echo "BRAVE_SEARCH_API_KEY=$K_BRAVE_SEARCH_API_KEY"; echo "WAVESPEED_API_KEY=$K_WAVESPEED_API_KEY";
   echo "EUROPEANA_API_KEY=$K_EUROPEANA_API_KEY"; echo "ANTHROPIC_API_KEY=$K_ANTHROPIC_API_KEY";
-  echo "CLAUDE_PROVIDER=anthropic"; echo "SCRIPT_PROVIDER=anthropic"; } > .env; chmod 600 .env
+  echo "CLAUDE_PROVIDER=$CP"; echo "SCRIPT_PROVIDER=anthropic"; } > .env; chmod 600 .env
+if [ "$CP" = "tokensupply" ]; then
+  { echo "CLAUDE_FALLBACK=anthropic"; echo "TOKENSUPPLY_API_KEY=${K_TOKENSUPPLY_API_KEY:-}"; } >> .env
+  if [ -n "${K_TOKENSUPPLY_API_KEY:-}" ]; then say "planner: Claude Sonnet through Token Supply (on test)"
+  else say "planner: Claude Sonnet through Token Supply (on test) - no Token Supply key in Settings: Anthropic plans in its place"; fi
+fi
 seed_verdicts
 if [ -n "${CKPT_GET:-}" ]; then
   # another machine planned this film and was lost: carry on from its saved plan (nothing is planned or paid again)

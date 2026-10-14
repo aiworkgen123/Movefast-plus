@@ -28,6 +28,21 @@ The same goes for Claude (console.anthropic.com, Plans & Billing): a 3-minute fi
 film about $1.80, and a film whose Claude account runs dry while it plans stops. A film checks Claude before it rents a
 machine and waits (up to an hour) while the account is empty; "Test keys" in Settings checks it too.
 
+## Who plans a film (Settings → Planner)
+
+* **Claude Sonnet** is the default, and what every film used so far: Anthropic answers every planning call.
+* **Claude Sonnet through Token Supply (cheaper, test)** is off by default and on test until test films show the same
+  quality. Token Supply (token-supply.com) resells the same Claude Sonnet at about 30% of Anthropic's price. New films
+  need its key (Settings → Keys); the Anthropic key stays needed, because Anthropic still writes the highlighted pages
+  and is the automatic backup: a call Token Supply cannot answer, or answers unusably, is asked again or answered by
+  Anthropic (said in the film's log, counted in its summary), and after a refused key or repeated failures Token
+  Supply is off for the rest of that film. A film never waits for or stops because of Token Supply: one without its
+  key is made all the same and Anthropic plans it; the list then says "Token Supply was off (...): Anthropic planned
+  in its place". The film's cost shows Token Supply's bill next to Claude's (Anthropic's). "Test keys" checks the key
+  with a one-token call (about $0.0002); a film never asks Token Supply before its machine is rented.
+* The choice applies to films made after it is saved; each film keeps the planner it was made with (a Try again and a
+  replacement machine too), and the list shows "planner: Claude through Token Supply (test)" on such a film.
+
 ## Install (once)
 
 1. Create an Ubuntu 24.04 server (the $6 plan is enough) and open its web console.
@@ -58,4 +73,4 @@ machine and waits (up to an hour) while the account is empty; "Test keys" in Set
   film's uploaded files under `jobs/<id>/`, `studio.log`.
 * A no-cost local try: `MRTRUTH_WEB_DATA=/tmp/mt MRTRUTH_WEB_FAKE=1 python -m web.manage add-owner me` then
   `MRTRUTH_WEB_DATA=/tmp/mt MRTRUTH_WEB_FAKE=1 python -m web.app` and open http://127.0.0.1:8080 ("Test run").
-* Tests: `python -m unittest tests/test_web.py tests/test_mrtruth_music.py`.
+* Tests: `python -m unittest tests/test_web.py tests/test_mrtruth_music.py tests/test_mrtruth_tokensupply.py`.

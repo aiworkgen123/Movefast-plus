@@ -22,6 +22,22 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   $1.80 for a 20-minute film, with no slower planning. An answer that breaks off part-way, or a model that thinks
   through all its room, is asked again instead of stopping the film; this also covers the highlighted-page step's
   requests, only where the film used to stop (owner's OK, 2026-10-13). The page itself is unchanged.
+- **Claude Sonnet through Token Supply** (owner 2026-10-14): Settings → Planner, **on test, off by default**. The same
+  Claude Sonnet resold by Token Supply at about 30% of Anthropic's price (`CLAUDE_PROVIDER=tokensupply`). **Claude
+  Sonnet through Anthropic stays the default planner and behaves exactly as before.** On the Token Supply planner the
+  **highlighted pages stay on Anthropic**, with the same prompt, cache key and request as today, and **Anthropic is the
+  automatic backup**: a call Token Supply cannot answer goes to Anthropic, and a refused key, an empty wallet, three
+  such calls or three steps whose answers could not be used switch Token Supply off for the rest of the film; a film
+  never stops or waits because of Token Supply (a stream that only keeps itself alive is given up 2 minutes after its
+  retry window). Safeguards against the side effects of the coding tool it runs Sonnet in: a system text asking for
+  the answer and nothing else, streamed answers read as UTF-8, an answer with long prose around its JSON asked again
+  (after two, the step is Anthropic's, with today's three tries), a visual plan that stops early (its last template
+  before 75% of the script where its words stop too, or a quarter of it without one) asked again and then
+  Anthropic's, chapters the placement rules would refuse asked again with those rules spelled out and then
+  Anthropic's; Anthropic's own answer is always kept; its share of the bill is shown on its own. On every planner: the
+  chapters filled in to reach the mandatory 2 keep the chapters' spacing (never within 30 s of another chapter, never
+  in the opening 25 s) where that places all of them, and are filled as before where it cannot (a film under about
+  90 s); a filled chapter had landed 11 s after a planned one.
 
 ## Picture checks (locked, "option A")
 

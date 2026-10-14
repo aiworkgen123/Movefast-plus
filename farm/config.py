@@ -26,6 +26,9 @@ RENDER_KEYS = (
     "VIDEO_W", "VIDEO_H", "FPS", "NUM_AI_IMAGES", "FOOTAGE_GRADE",
     "YT_SLEEP", "YT_WORKERS", "YTDLP_PLAYER_CLIENT", "YTDLP_ARGS", "YTDLP_PROXY",
     "AI_IMG_WORKERS", "DL_WORKERS", "RENDER_WORKERS", "FFMPEG_THREADS",
+    # the Claude Sonnet through Token Supply planner (on test, owner 2026-10-14): its key, used only when your .env
+    # chooses it (CLAUDE_PROVIDER=tokensupply, kept on the pod by pod_env below)
+    "TOKENSUPPLY_API_KEY",
 )
 
 # Sensible on a rented Linux box and wrong on your Mac, so they are set on the
@@ -158,6 +161,12 @@ class Config:
                {k: os.environ[k] for k in RENDER_KEYS if _env(k)})
         if self.render_mode != "prepared_final":
             env.update(POD_FORCED)
+            # Claude Sonnet through Token Supply (on test, owner 2026-10-14) is the one CLAUDE_PROVIDER a pod keeps:
+            # a .env that chooses it, with its key, plans on Token Supply there too, and Anthropic is the backup for
+            # every call Token Supply cannot answer and writes the highlighted pages (CLAUDE_FALLBACK, as on the
+            # website's planning machine). Without the key the pod plans on Anthropic, as before
+            if _env("CLAUDE_PROVIDER").lower() == "tokensupply" and env.get("TOKENSUPPLY_API_KEY"):
+                env.update(CLAUDE_PROVIDER="tokensupply", CLAUDE_FALLBACK="anthropic")
         env.update({
             "FARM_JOB_KEY": job_key,
             "FARM_RENDER_MODE": self.render_mode,
