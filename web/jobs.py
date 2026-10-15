@@ -82,8 +82,29 @@ SETUP_S, PLAN_S_MIN, DRAW_S_MIN, FINISH_S = 240, 100, 85, 150
 START_LIMIT_S = 25 * 60                       # a machine that has written no log line by then never started
 # reliability (owner 2026-10-12): a film waits for a machine instead of failing; a planner that dies, freezes or never
 # starts is replaced automatically (carrying on from the saved plan when there is one); a frozen drawer is replaced
+# (2026-10-15: and one that stopped drawing, STALL_S)
 RENT_WAIT_S, RENT_RETRY_S = 60 * 60, 120       # how long a film waits for a planner, and how often it tries
 FROZEN_S = 12 * 60                             # no sign of life (the log is sent every 30-45 s) for this long: frozen
+# a drawing machine that still answers but stopped drawing (owner 2026-10-15: film 261014-f4625c's share 3 drew nothing
+# for 35+ min while its log was still sent every 30 s, so FROZEN_S never fired and the planner waited ~23 min for it):
+# DRAW_SCRIPT says "DRAW progress <done>/<total>" each time the renderer's count of shots drawn moves, and the drawing
+# machine judges a stall by its OWN clock (owner 2026-10-15, after a review found the website's clock-based judgement
+# switched off a healthy drawer whose clock was 2+ min slow): while it draws, no progress for over STALL_S (its env
+# STALL) and its heartbeat says once "PART k failed (stopped drawing: no shot drawn for N s)", which _drawers handles
+# as any failure (switched off; a replacement while the planner still draws its own share, else the skip mark). The
+# saved render logs (19 shares, 2026-10-10..14, 15-237 shots on 4-16 processes; the three test films' own on 4-5, as a
+# drawer's) never went more than 120 s between two counts (printed every 30 s, so under 150 s in truth; the progress
+# line follows within one 30-s beat); npm ci took 2-5 s, the first count comes 30 s after the start and the first shot
+# (with the bundle) by 60 s. 300 s is twice the longest gap: a machine twice as slow as those (SLOW_RATIO calls 1.6x
+# slow) is not stopped. _drawers reads each drawer's log on every pass of _watch (about 20 s), so a stall is acted on
+# within STALL_S + about 2 min of the last shot drawn (30 s count + 30 s beat + the beat that says it, about 30 s past
+# STALL_S, sending it at once + one pass + the planner's 15-s look: about 2 min 5 s).
+# The website checks too, only as a backstop for a drawer whose heartbeat cannot judge (Studio._stalled): its last DRAW
+# start/progress line (the machine's clock) against R2's time of that copy of its log, with CLOCK_SLACK_S on top
+STALL_S = 5 * 60                               # drawing, no new DRAW progress this long (its own clock): stopped
+CLOCK_SLACK_S = 5 * 60                         # the website's own check waits this much longer: a machine clock up to
+#                                                ~5 min slow is never mistaken for a stall; the machine's own judgement
+#                                                comes first at STALL_S
 AUTO_RETRIES = 2                               # replacements for a planning machine before the film stops
 BEAT_EVERY_S, CHECK_EVERY_S = 120, 300         # how often the log's age and a machine's state are looked at
 # the drawing machines are rented while the planner is still choosing pictures (the longest part of planning: about 66-72 s
@@ -725,7 +746,7 @@ class Studio:
                         pass
                 got_log = True
                 self._progress(jid, j, log, seen)
-                if int(j.get("machines") or 1) > 1:
+                if int(j.get("machines") or 1) > 1:  # every pass (about 20 s), not every BEAT/CHECK: STALL_S
                     try:                             # a hiccup here never stops the film: the planner can draw
                         self._drawers(jid, b, K, "\n".join(log))     # every share itself
                     except Exception:
@@ -785,8 +806,8 @@ class Studio:
     def _drawers(self, jid, b, K, log: str) -> None:
         """The drawing machines: wanted once the planner's pictures are chosen, rented (or tried again every
         RENT_RETRY_S while one could still help), then watched. A share that arrived, or that the planner took over,
-        switches its machine off; one that failed, froze, vanished or never started gets a replacement while there is
-        time, else a skip mark - and the planner draws that share itself."""
+        switches its machine off; one that failed, froze, stopped drawing, vanished or never started gets a replacement
+        while there is time, else a skip mark - and the planner draws that share itself."""
         j = self.store.job(jid)
         n = int(j.get("machines") or 1)
         ds = json.loads(j.get("drawers") or "[]")
@@ -820,7 +841,7 @@ class Studio:
                 logkey = K["dlog"](f"{k}r{d['replaces']}" if d.get("replaces") else k)
                 env = {"PKG_GET": b.presign(P["rpkg"], ttl), "PART_PUT": b.presign(K["part"](k), ttl, "PUT"),
                        "LOG_PUT": b.presign(logkey, ttl, "PUT"), "PART": str(k), "NPARTS": str(n),
-                       "MAX_MIN": str(max(90, 30 + 3 * int(j["minutes"] or 10)))}
+                       "MAX_MIN": str(max(90, 30 + 3 * int(j["minutes"] or 10))), "STALL": str(STALL_S)}
                 try:
                     pod, tried = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=SMALL_VCPU, ram=24,
                                             max_hr=DRAWER_MAX_HR, ttl=ttl)
@@ -867,6 +888,8 @@ class Studio:
                     why = "never started"
                 elif at and now - at > FROZEN_S:
                     why = "froze"
+                elif at and self._stalled(dl, k, at):         # the backstop (the machine judges first: "PART k
+                    why = "stopped drawing"                   # failed" above), judged when its log was last sent
                 elif now - d.get("checked", d["started"]) >= CHECK_EVERY_S:
                     d["checked"] = now
                     changed = True
@@ -899,15 +922,39 @@ class Studio:
             return False
 
     @staticmethod
-    def _log_time(log: str, marker: str):
-        """When the machine wrote "HH:MM:SS <marker>" (its clock is UTC), as seconds since 1970; None if not there."""
-        m = re.search(r"^(\d\d):(\d\d):(\d\d) " + re.escape(marker), log, re.M)
-        if not m:
+    def _stalled(dl: str, k, sent) -> bool:
+        """The website's backstop for a drawer whose heartbeat cannot judge a stall itself (the machine judges first,
+        by its own clock, and says "PART k failed (stopped drawing ...)" after STALL_S): a drawer drawing its share
+        (its log says DRAW start, and not yet drawn, sent or failed) whose latest DRAW start or DRAW progress line -
+        written on the machine's clock - was more than STALL_S + CLOCK_SLACK_S old when this copy of its log was
+        `sent` (R2's time): it still answers but draws nothing (film 261014-f4625c). A healthy drawer's line is at most
+        ~180 s old at any upload, so a machine clock up to ~5 min slow (2026-10-15 review: one 2+ min slow was switched
+        off at STALL_S alone) or uploads that fail for a while (they are FROZEN_S's) never make it so. A log with no
+        progress line at all - a machine on the DRAW_SCRIPT before 2026-10-15 - is never judged so."""
+        i = dl.rfind("DRAW start")
+        if i < 0 or "DRAW progress" not in dl[i:]:
+            return False
+        if any(f"PART {k} {m}" in dl[i:] for m in ("drawn, sending it", "uploaded", "failed")):
+            return False                    # sending is not drawing: FROZEN_S and the planner's own wait cover it
+        at = Studio._log_time(dl, ("DRAW start", "DRAW progress"), last=True)
+        return bool(at) and sent - at > STALL_S + CLOCK_SLACK_S
+
+    @staticmethod
+    def _log_time(log: str, marker, last: bool = False):
+        """When the machine wrote "HH:MM:SS <marker>" (its clock is UTC), as seconds since 1970; None if not there.
+        `marker` may be several (any of them); the first such line, or with `last` the latest one in the log (by its
+        place, not its clock, so a log that runs past midnight is read right)."""
+        markers = (marker,) if isinstance(marker, str) else tuple(marker)
+        ms = list(re.finditer(r"^(\d\d):(\d\d):(\d\d) (?:" + "|".join(map(re.escape, markers)) + ")", log, re.M))
+        if not ms:
             return None
+        m = ms[-1] if last else ms[0]
         now = time.time()
         day = now - now % 86400
         at = day + int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
-        return at - 86400 if at > now + 3600 else at                     # written just before midnight
+        # written just before midnight and read after it, or just after the machine's midnight and read before ours
+        # (its clock a few seconds ahead, 2026-10-15 review): always between 23 h ago and 1 h ahead
+        return at - 86400 if at > now + 3600 else at + 86400 if at < now - 82800 else at
 
     def _machine_cost(self, j: dict, now: float) -> float:
         """Every machine of the film so far: earlier attempts, the planner from its start, each drawer from its start
@@ -1329,12 +1376,33 @@ POD_SCRIPT = PLAN_SCRIPT                        # the planner's script (the name
 
 # A drawing machine's script: no keys at all, only links. It sets up while the planner is still choosing pictures,
 # waits for the render package, draws its own share of the shots (remote_render.py --part K/N), sends it back to R2
-# and waits to be switched off. A failure is said in its log; the website then marks the share for the planner.
+# and waits to be switched off. A failure is said in its log; the website then marks the share for the planner. So is
+# its drawing (DRAW progress, owner 2026-10-15): one that stops drawing says so itself, judged by its own clock, in
+# about 5 minutes (STALL_S; the website checks too, with CLOCK_SLACK_S more for a machine clock that is slow).
 DRAW_SCRIPT = r'''
 set -u
 cd /root
-say(){ echo "$(date +%T) $*" | tee -a /root/log.txt; }
-( while true; do sleep 30; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT" >/dev/null; done ) &
+rm -f /root/.drawing        # a mark left from before a restart: the heartbeat judges drawing only after DRAW start
+say(){ echo "$(date -u +%T) $*" | tee -a /root/log.txt; }     # UTC, as the website reads it (2026-10-15 review)
+# the drawing progress, told by each beat before it sends the log: the renderer prints its count of shots drawn every
+# 30 s even when it has stopped drawing, so only a new count, or another new line in render.log (the packages, the
+# shots to draw, an error, a second try), is progress - said as one whole line appended to the log, as say does.
+# While the main script draws (/root/.drawing, from DRAW start until the share is drawn or failed) the beat judges a
+# stall by this machine's own clock (owner 2026-10-15): no progress for over $STALL s since the last progress (or since
+# it first saw the drawing begin) is said once, as a failure the website acts on at once (L: that time, F: said)
+C=""; O=0; L=0; D=""; F=""
+progress(){ local n x t
+  t=$(date +%s)
+  n=$(grep -o '[0-9][0-9]*/[0-9][0-9]* shots drawn' /root/render.log 2>/dev/null | tail -1 | cut -d' ' -f1)
+  x=$(grep -vc 'shots drawn, [0-9]*s$' /root/render.log 2>/dev/null); x=${x:-0}
+  if { [ -n "$n" ] && [ "$n" != "$C" ]; } || [ "$x" -ne "$O" ]; then
+    say "DRAW progress ${n:-(renderer starting)}"; L=$t; fi
+  C=$n; O=$x
+  [ -f /root/.drawing ] || return 0
+  [ -n "$D" ] || { D=1; L=$t; }
+  if [ -z "$F" ] && [ $((t - L)) -gt "${STALL:-300}" ]; then
+    F=1; say "PART $PART failed (stopped drawing: no shot drawn for $((t - L)) s)"; fi; }
+( while true; do sleep 30; progress; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT" >/dev/null; done ) &
 ( sleep $((MAX_MIN*60)); say "watchdog: time limit"; curl -s -m 30 -X PUT --data-binary @/root/log.txt "$LOG_PUT"; kill -TERM 1 ) &
 Q=$(cat /sys/fs/cgroup/cpu.max 2>/dev/null | awk '$1!="max"{x=$1/$2; y=int(x); if (x>y+0.05) y++; printf "%d", y}'); CPUS=${Q:-$VCPU}; [ "$CPUS" -gt "$(nproc)" ] && CPUS=$(nproc); [ "$CPUS" -lt 1 ] && CPUS=$VCPU
 MEMG=$(awk '$1!="max"{printf "%d", $1/1073741824}' /sys/fs/cgroup/memory.max 2>/dev/null); MEMG=${MEMG:-$(free -g | awk '/Mem/{print $2}')}
@@ -1346,10 +1414,13 @@ apt-get update -qq >/dev/null 2>&1
 apt-get install -y -qq --no-install-recommends python3 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 fonts-liberation ca-certificates >>/root/log.txt 2>&1 && say "apt ok, waiting for the plan"
 until curl -sf -m 900 "$PKG_GET" -o /root/pkg.tgz && tar tzf /root/pkg.tgz >/dev/null 2>&1; do sleep 15; done
 mkdir -p /root/rr && tar xzf /root/pkg.tgz -C /root/rr && say "DRAW start: share $PART/$NPARTS, workers $W"
+touch /root/.drawing                                      # drawing: the heartbeat now looks for a stall
 T0=$(date +%s)
 draw1(){ (cd /root/rr && python3 remote_render.py --part "$PART/$NPARTS" --out /root/seg.tgz --workers $W >> /root/render.log 2>&1); }
 draw1; RR=$?
 [ "$RR" -ne 0 ] && { say "share $PART: one more try after an error ($(tail -1 /root/render.log | cut -c1-200))"; draw1; RR=$?; }
+rm -f /root/.drawing                                      # drawn or failed: no stall is looked for any more
+[ "$RR" -eq 0 ] && say "PART $PART drawn, sending it"     # sending is not drawing: no progress is looked for now
 if [ "$RR" -eq 0 ] && curl -sf -m 1800 --retry 3 --retry-all-errors -X PUT --data-binary @/root/seg.tgz "$PART_PUT"; then
   say "PART $PART uploaded $(du -h /root/seg.tgz | cut -f1) in $(( $(date +%s) - T0 ))s"
 else

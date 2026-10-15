@@ -16,10 +16,13 @@ already shown in the list as "coming".
 The small server never makes videos, so it does not slow them down. One machine plans the film and draws a share of
 the shots; the others only draw their share and are switched off as soon as it is sent. If no machine is free, the film
 waits and tries again every 2 minutes (up to an hour). If a drawing machine cannot be rented or fails, another one is
-tried, or the planning machine draws that share itself. If the planning machine dies or freezes, a new one carries on
-from the saved plan, so nothing is planned or paid for twice. A Vast computer that proves slow (over 1.6 times slower
-than the film's fastest machine) is skipped for a week, and one that cannot start a machine for 6 hours. If the website restarts in the middle of a film, the
-machines carry on and the film appears when it is done.
+tried, or the planning machine draws that share itself. A drawing machine that stops drawing (it is still on and
+sends its log, but has drawn no new shot for 5 minutes by its own clock) says so itself and counts as failed; the
+website checks too, allowing 5 minutes more so that a machine whose clock is up to 5 minutes slow is never taken for one that stopped.
+If the planning machine dies or freezes, a new one carries on from the saved plan, so nothing is planned or paid for
+twice. A Vast computer that proves slow (over 1.6 times slower than the film's fastest machine) is skipped for a week,
+and one that cannot start a machine for 6 hours. If the website restarts in the middle of a film, the machines carry on
+and the film appears when it is done.
 
 Keep some money on both accounts (RunPod and Vast.ai) and turn on automatic top-up: at $0 RunPod switches every machine
 off and the films in progress are lost. The page shows both balances, in red when they run low.

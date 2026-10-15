@@ -5,6 +5,7 @@ import importlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -762,6 +763,7 @@ class Split(unittest.TestCase):
         self.assertEqual([r[0] for r in self.src.rents], [f"mrtruth-web-{jid}-a1-d2", f"mrtruth-web-{jid}-a1-d3"])
         name, env, script, kw = self.src.rents[0]
         self.assertEqual((env["PART"], env["NPARTS"], kw["max_hr"], kw["ram"]), ("2", "3", self.J.DRAWER_MAX_HR, 24))
+        self.assertEqual(env["STALL"], str(self.J.STALL_S))                     # it judges a stall by its own clock
         self.assertIs(script, self.J.DRAW_SCRIPT)
         self.assertFalse(any(k.startswith("K_") for k in env))                   # a drawer gets no keys
         self.assertIn(K["rpkg"], env["PKG_GET"])
@@ -847,6 +849,215 @@ class Split(unittest.TestCase):
         got = {d["part"]: (d["state"], d["why"]) for d in self.drawers(jid)}
         self.assertEqual(got, {2: ("skipped", "never started"), 3: ("skipped", "vanished"), 4: ("skipped", "froze")})
         self.assertEqual(self.b.get_bytes(K["skip"](2)), b"never started")
+
+    @staticmethod
+    def drawing(*lines, now=None):
+        """A drawing machine's log as it writes it: (seconds ago, text), the times on its UTC clock."""
+        now = time.time() if now is None else now
+        return "".join(f"{time.strftime('%H:%M:%S', time.gmtime(now - a))} {t}\n" for a, t in lines).encode()
+
+    def stalled(self, k, last=660):
+        """Film 261014-f4625c's share 3 on a machine whose heartbeat did not say it failed (the website's backstop):
+        DRAW start, then the renderer stops; the log is still sent every 30 s. `last`: past STALL_S + CLOCK_SLACK_S."""
+        return self.drawing((last + 600, "apt ok, waiting for the plan"),
+                            (last + 180, f"DRAW start: share {k}/3, workers 5"),
+                            (last + 150, "DRAW progress (renderer starting)"), (last + 120, "DRAW progress 0/54"),
+                            (last, "DRAW progress 3/54"))
+
+    def test_a_drawer_that_stopped_drawing_is_switched_off_and_the_planner_draws_its_share(self):
+        """The website's backstop: its log still sent just now (so it never froze), but its last progress 11 minutes
+        old (STALL_S + CLOCK_SLACK_S: 10 min) and no failed line from its heartbeat, while the planner has drawn its
+        own share: switched off and marked at once - no replacement this late."""
+        jid, K = self.film(3, self.running(2, 3, seen=True, started=time.time() - 1500))
+        self.b.put_bytes(K["dlog"](2), self.drawing((600, "DRAW start: share 2/3, workers 5"),
+                                                    (90, "DRAW progress 30/54"), (60, "DRAW progress 33/54")))
+        self.b.put_bytes(K["dlog"](3), self.stalled(3))
+        self.s._stat = lambda b, key: time.time()
+        self.s._drawers(jid, self.b, K, "PICTURES done\nRENDER start: 160 shots in 3 share(s), workers 5 here\n"
+                                         "PART 1 drawn here exit=0 seconds=982")
+        got = {d["part"]: (d["state"], d.get("why")) for d in self.drawers(jid)}
+        self.assertEqual(got, {2: ("running", None), 3: ("skipped", "stopped drawing")})
+        self.assertEqual(self.b.get_bytes(K["skip"](3)), b"stopped drawing")      # the planner draws share 3 now
+        self.assertEqual((self.src.ended, self.src.rents), (["d3"], []))
+
+    def test_a_drawer_that_stopped_drawing_while_the_planner_draws_its_own_share_is_replaced(self):
+        jid, K = self.film(3, self.running(2, 3, seen=True, started=time.time() - 1500))
+        self.b.put_bytes(K["dlog"](2), self.drawing((600, "DRAW start: share 2/3, workers 5"),
+                                                    (20, "DRAW progress 9/54")))
+        self.b.put_bytes(K["dlog"](3), self.stalled(3))
+        self.s._stat = lambda b, key: time.time()
+        log = "PICTURES done\nRENDER start: 160 shots in 3 share(s), workers 5 here"
+        self.s._drawers(jid, self.b, K, log)
+        ds = self.drawers(jid)
+        self.assertEqual([(d["part"], d["state"], d.get("why")) for d in ds[:2]],
+                         [(2, "running", None), (3, "ended", "stopped drawing")])
+        self.assertEqual((ds[2]["part"], ds[2]["state"], ds[2]["replaces"], ds[2]["desc"]),
+                         (3, "wanted", 1, "replacing a machine that stopped drawing"))
+        self.assertFalse(self.b.exists(K["skip"](3)))
+        self.s._drawers(jid, self.b, K, log)                                      # the second machine is rented
+        self.assertEqual(self.src.rents[-1][0], f"mrtruth-web-{jid}-a1-d3r1")
+        self.b.put_bytes(K["dlog"]("3r1"), self.stalled(3, last=700))           # and stops drawing too
+        self.s._drawers(jid, self.b, K, log)
+        self.assertEqual(self.drawers(jid)[2]["state"], "skipped")
+        self.assertEqual(self.b.get_bytes(K["skip"](3)), b"stopped drawing")
+        self.assertEqual(self.src.ended, ["d3", "m1"])
+
+    def test_a_drawer_drawing_sending_or_on_the_older_script_is_left_alone(self):
+        jid, K = self.film(5, self.running(2, 3, 4, 5, seen=True, started=time.time() - 2400))
+        self.b.put_bytes(K["dlog"](2), self.drawing((1500, "DRAW start: share 2/5, workers 5"),          # drawing
+                                                    (1470, "DRAW progress 0/30"), (100, "DRAW progress 28/30")))
+        self.b.put_bytes(K["dlog"](3), self.drawing((1500, "DRAW start: share 3/5, workers 5"),          # sending
+                                                    (900, "DRAW progress 30/30"), (890, "PART 3 drawn, sending it")))
+        self.b.put_bytes(K["dlog"](4), self.drawing((1800, "DRAW start: share 4/5, workers 5")))       # older script
+        self.b.put_bytes(K["dlog"](5), self.drawing((1800, "apt ok, waiting for the plan")))           # no plan yet
+        self.s._stat = lambda b, key: time.time()
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=982")
+        self.assertEqual({d["part"]: d["state"] for d in self.drawers(jid)},
+                         {2: "running", 3: "running", 4: "running", 5: "running"})
+        self.assertEqual(self.src.ended, [])
+        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in (2, 3, 4, 5)))
+        self.s._stat = lambda b, key: time.time() - self.J.FROZEN_S - 30       # the older script is judged as before
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=982")
+        self.assertEqual({d["part"]: d.get("why") for d in self.drawers(jid)},
+                         {2: "froze", 3: "froze", 4: "froze", 5: "froze"})
+
+    def test_a_drawing_log_that_runs_past_midnight(self):
+        """The machine's clock is UTC and its lines carry only the time of day: at 00:08 a line written at 23:57:30
+        is 10.5 minutes old (past STALL_S + CLOCK_SLACK_S), and the latest line is the last one in the log, not the
+        latest time of day."""
+        T = 86400 * 20000 + 480                                                  # 00:08:00 UTC
+        two = b"23:56:30 DRAW start: share 2/3, workers 5\n23:57:00 DRAW progress (renderer starting)\n" \
+              b"23:57:30 DRAW progress 0/54\n"
+        three = b"23:57:00 DRAW start: share 3/3, workers 5\n23:57:30 DRAW progress 0/54\n00:06:30 DRAW progress 4/54\n"
+        with mock.patch.object(self.J.time, "time", return_value=T):
+            log_time = self.J.Studio._log_time
+            self.assertEqual(log_time(two.decode(), ("DRAW start", "DRAW progress"), last=True), T - 630)
+            self.assertEqual(log_time(three.decode(), ("DRAW start", "DRAW progress"), last=True), T - 90)
+            self.assertEqual(log_time(three.decode(), "DRAW start"), T - 660)       # the first, as before
+            jid, K = self.film(3, self.running(2, 3, seen=True, started=T - 900))
+            self.b.put_bytes(K["dlog"](2), two)
+            self.b.put_bytes(K["dlog"](3), three)
+            self.s._stat = lambda b, key: T
+            self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=982")
+        got = {d["part"]: (d["state"], d.get("why")) for d in self.drawers(jid)}
+        self.assertEqual(got, {2: ("skipped", "stopped drawing"), 3: ("running", None)})
+
+    def test_a_drawing_machine_whose_clock_is_a_little_ahead_at_midnight(self):
+        """Its clock a few seconds ahead of ours (2026-10-15 review): a line it wrote at 00:00:05, just after its
+        midnight, read at our 23:59:55, is 10 s ahead - not yesterday's, 24 h old - so it has not stopped drawing."""
+        now = 86400 * 20000 - 5                                                  # 23:59:55 UTC
+        log = "23:50:00 DRAW start: share 3/3, workers 5\n23:59:30 DRAW progress 10/54\n00:00:05 DRAW progress 11/54\n"
+        with mock.patch.object(self.J.time, "time", return_value=now):
+            self.assertEqual(self.J.Studio._log_time(log, ("DRAW start", "DRAW progress"), last=True), now + 10)
+            self.assertEqual(self.J.Studio._log_time(log, "DRAW start"), now - 595)
+            self.assertFalse(self.J.Studio._stalled(log, 3, now))
+
+    def test_a_drawer_whose_log_could_not_be_sent_for_a_while_is_left_to_froze(self):
+        """Its last progress 10.5 min old in R2, but that copy was sent 4 min ago (its uploads failing, under
+        FROZEN_S): judged when it was sent (6.5 min old then, under STALL_S + CLOCK_SLACK_S) it was drawing - left
+        alone, as before 2026-10-15; the same log sent just now: it stopped drawing. When R2 cannot say when it was
+        sent: looked at again on the next pass."""
+        jid, K = self.film(3, self.running(2, 3, seen=True, started=time.time() - 1500))
+        for k in (2, 3):
+            self.b.put_bytes(K["dlog"](k), self.drawing((1200, f"DRAW start: share {k}/3, workers 5"),
+                                                        (660, "DRAW progress 20/54"), (630, "DRAW progress 22/54")))
+        log = "PICTURES done\nPART 1 drawn here exit=0 seconds=982"
+        self.s._stat = lambda b, key: None
+        self.s._drawers(jid, self.b, K, log)
+        self.assertEqual([d["state"] for d in self.drawers(jid)], ["running", "running"])
+        sent = {K["dlog"](2): 240, K["dlog"](3): 0}                            # seconds ago
+        self.s._stat = lambda b, key: time.time() - sent[key]
+        self.s._drawers(jid, self.b, K, log)
+        got = {d["part"]: (d["state"], d.get("why")) for d in self.drawers(jid)}
+        self.assertEqual(got, {2: ("running", None), 3: ("skipped", "stopped drawing")})
+        self.assertFalse(self.b.exists(K["skip"](2)))
+        self.assertEqual(self.src.ended, ["d3"])
+        sent[K["dlog"](2)] = self.J.FROZEN_S + 30                              # its uploads still failing: froze
+        self.s._drawers(jid, self.b, K, log)
+        self.assertEqual((self.drawers(jid)[0]["why"], self.src.ended), ("froze", ["d3", "d2"]))
+
+    def test_a_drawer_that_says_it_stopped_drawing_is_handled_as_failed(self):
+        """The machine's own judgement, by its own clock (owner 2026-10-15): its heartbeat said "PART 3 failed
+        (stopped drawing ...)" - handled as any failure at once, though its last progress (6 min old) is too recent
+        for the website's own check: a replacement while the planner still draws its own share; the skip mark once
+        that share is drawn, so the planner draws share 3 now."""
+        drew = self.drawing((900, "DRAW start: share 3/3, workers 5"), (390, "DRAW progress 0/54"),
+                            (360, "DRAW progress 3/54"))
+        said = drew + self.drawing((30, "PART 3 failed (stopped drawing: no shot drawn for 330 s)"))
+        self.assertFalse(self.J.Studio._stalled(drew.decode(), 3, time.time()))     # not the website's own call
+        for planner, want in (("PICTURES done\nRENDER start: 160 shots in 3 share(s), workers 5 here", "replaced"),
+                              ("PICTURES done\nPART 1 drawn here exit=0 seconds=982", "skipped")):
+            with self.subTest(want):
+                ended = len(self.src.ended)
+                jid, K = self.film(3, self.running(2, 3, seen=True, started=time.time() - 1500))
+                self.b.put_bytes(K["dlog"](2), self.drawing((600, "DRAW start: share 2/3, workers 5"),
+                                                            (40, "DRAW progress 30/54")))
+                self.b.put_bytes(K["dlog"](3), said)
+                self.s._stat = lambda b, key: time.time()
+                self.s._drawers(jid, self.b, K, planner)
+                ds = self.drawers(jid)
+                self.assertEqual(self.src.ended[ended:], ["d3"])                  # switched off; share 2 drawing on
+                if want == "replaced":
+                    self.assertEqual([(d["part"], d["state"], d.get("why")) for d in ds],
+                                     [(2, "running", None), (3, "ended", "failed"), (3, "wanted", None)])
+                    self.assertEqual(ds[2]["desc"], "replacing a machine that failed")
+                    self.assertFalse(self.b.exists(K["skip"](3)))
+                else:
+                    self.assertEqual([(d["part"], d["state"], d.get("why")) for d in ds],
+                                     [(2, "running", None), (3, "skipped", "failed")])
+                    self.assertEqual(self.b.get_bytes(K["skip"](3)), b"failed")
+
+    def test_a_healthy_drawer_whose_clock_is_slow_is_not_switched_off_by_the_website(self):
+        """The 2026-10-15 review: the website reads the machine's clock against R2's, so on a drawer whose clock is
+        4 min slow every line looks 4 min older than it is. Healthy - its count moved 170 s ago, about the longest a
+        healthy one goes - it looked 410 s stalled, past STALL_S alone; with CLOCK_SLACK_S it is left drawing. The
+        website calls a stall only past STALL_S + CLOCK_SLACK_S."""
+        slow = 240
+        jid, K = self.film(3, self.running(2, 3, seen=True, started=time.time() - 1500))
+        two = self.drawing((1200 + slow, "DRAW start: share 2/3, workers 5"), (290 + slow, "DRAW progress 20/54"),
+                           (170 + slow, "DRAW progress 22/54"))
+        self.b.put_bytes(K["dlog"](2), two)
+        self.b.put_bytes(K["dlog"](3), self.drawing((1200 + slow, "DRAW start: share 3/3, workers 5"),
+                                                    (60 + slow, "DRAW progress 40/54")))
+        self.s._stat = lambda b, key: time.time()
+        self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=982")
+        self.assertEqual({d["part"]: (d["state"], d.get("why")) for d in self.drawers(jid)},
+                         {2: ("running", None), 3: ("running", None)})
+        self.assertEqual(self.src.ended, [])
+        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in (2, 3)))
+        now = time.time()
+        looks = now - self.J.Studio._log_time(two.decode(), ("DRAW start", "DRAW progress"), last=True)
+        self.assertGreater(looks, self.J.STALL_S)                    # what STALL_S alone called "stopped drawing"
+        edge = self.J.STALL_S + self.J.CLOCK_SLACK_S
+        for ago, stalled in ((edge - 5, False), (edge + 5, True)):   # the website's own line
+            dl = self.drawing((ago + 600, "DRAW start: share 2/3, workers 5"), (ago, "DRAW progress 22/54"),
+                              now=now).decode()
+            with mock.patch.object(self.J.time, "time", return_value=now):
+                self.assertIs(self.J.Studio._stalled(dl, 2, now), stalled, ago)
+
+    def test_the_drawers_are_looked_at_on_every_pass_of_the_watch(self):
+        """A stall is acted on within about STALL_S + 2 min only because each drawer's log is read on every pass of
+        the watch (20 s), not every BEAT_EVERY_S or CHECK_EVERY_S: five passes with the clock standing still, five
+        looks."""
+        jid, K = self.film(3)
+        self.b.put_bytes(K["log"], b"10:00:00 PLAN start\n10:20:00 PICTURES done\n")
+        self.s.store.update(jid, log_tail="10:00:00 PLAN start")
+        looks, waits = [], []
+        def look(jid_, b, K_, log):
+            looks.append(log)
+            if len(looks) == 5:
+                self.b.put_bytes(K["done"], b'{"ok":true}')
+        self.s._drawers, self.s._finish = look, lambda *a: None
+        self.s.stop.wait = lambda t=None: waits.append(t)
+        with mock.patch.object(self.J.time, "time", return_value=time.time()):
+            self.s._watch(jid)
+        self.assertEqual(len(looks), 5)
+        self.assertTrue(all(w <= 30 for w in waits) and len(waits) == 5, waits)
+        # worst case after the last shot drawn: the renderer's count (30 s) + the machine's beat that sees it (30 s) +
+        # the beat that says "PART k failed (stopped drawing ...)", the first past STALL_S on the machine's own clock
+        # (about 30 s), sending it at once + one pass + the planner's look for the skip mark (15 s) on top of STALL_S -
+        # about the 2 minutes the owner allowed
+        self.assertLessEqual(30 + 30 + 30 + max(waits) + 15, 2 * 60 + 5)
 
     def test_a_storage_hiccup_does_not_end_a_working_drawer(self):
         old = time.time() - self.J.START_LIMIT_S - 10
@@ -1029,12 +1240,143 @@ date(){{ if [ -f {root}/clock ]; then echo $(( $(cat {root}/clock) + 1000 )); el
         self.assertIn("RR=1", r.stdout)
 
     def test_the_drawing_script(self):
+        S = self.J.DRAW_SCRIPT
         for need in ('"$PKG_GET"', '"$PART_PUT"', "remote_render.py --part \"$PART/$NPARTS\"", "PART $PART failed",
-                     "PART $PART uploaded", "waiting for the plan"):
-            self.assertIn(need, self.J.DRAW_SCRIPT)
-        self.assertNotIn("K_", self.J.DRAW_SCRIPT)
-        r = subprocess.run(["bash", "-n"], input=self.J.DRAW_SCRIPT, text=True, capture_output=True)
+                     "PART $PART uploaded", "waiting for the plan", 'say "PART $PART drawn, sending it"'):
+            self.assertIn(need, S)
+        self.assertNotIn("K_", S)
+        self.assertLess(S.index("DRAW start: share"), S.index("PART $PART drawn, sending it"))
+        self.assertLess(S.index("PART $PART drawn, sending it"), S.index('--data-binary @/root/seg.tgz "$PART_PUT"'))
+        # drawing is marked from DRAW start until the share is drawn or failed, so the heartbeat looks for a stall
+        # only then (by this machine's clock, after $STALL s, the website's STALL_S) - never while it sends the share
+        self.assertIn('"${STALL:-300}"', S)
+        self.assertLess(S.index('say "DRAW start: share'), S.index("touch /root/.drawing"))
+        self.assertLess(S.index("touch /root/.drawing"), S.index("\ndraw1; RR=$?"))
+        done = S.rindex("rm -f /root/.drawing")             # the one after the drawing (another clears it at boot)
+        self.assertLess(S.index("rm -f /root/.drawing"), S.index("say(){"))     # a mark left from before a restart
+        self.assertLess(S.index("one more try after an error"), done)
+        self.assertLess(done, S.index('say "PART $PART drawn, sending it"'))
+        self.assertLess(done, S.index('say "PART $PART failed (exit'))
+        self.assertIn('say(){ echo "$(date -u +%T) $*"', S)                    # its clock read as UTC, as the website does
+        r = subprocess.run(["bash", "-n"], input=S, text=True, capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_drawing_machine_says_its_progress(self):
+        """DRAW_SCRIPT's heartbeat, run in bash with sleep and curl faked: at each beat render.log grows as
+        remote_render.py writes it (the renderer prints its count every 30 s, moved or not). A progress line is said
+        only when the count moves or another line comes, before the log is sent - and never as a broken line, while
+        the main script says its own lines at the same time."""
+        S = self.J.DRAW_SCRIPT
+        a, z = S.index("say(){"), S.index("\n", S.index("( while true; do sleep 30; progress;"))
+        root = Path(tempfile.mkdtemp(dir=self.d))
+        beats = [("", None),                                           # not drawing yet: no render.log at all
+                 ("installing the renderer's packages (npm ci)...\n", "(renderer starting)"),
+                 ("", None),
+                 ("\nadded 162 packages in 4s\n20 shot(s) to draw on 80 cores: 5 process(es) x 4 frames\n",
+                  "(renderer starting)"),
+                 ("  0/20 shots drawn, 30s\n", "0/20"),
+                 ("  0/20 shots drawn, 60s\n", None),                     # the count did not move: no progress
+                 ("  0/20 shots drawn, 90s\n  2/20 shots drawn, 120s\n", "2/20"),
+                 ("  2/20 shots drawn, 150s\n", None),
+                 ("  2/20 shots drawn, 180s\n", None),
+                 ("  7/20 shots drawn, 210s\n", "7/20"),
+                 ("renderer failed: boom\n13 shot(s) to draw on 80 cores: 5 process(es) x 4 frames\n", "7/20"),
+                 ("  7/20 shots drawn, 30s\n", None),                     # the second try, not moved yet
+                 ("  12/20 shots drawn, 60s\n", "12/20"),
+                 ("done in 75s -> /root/seg.tgz (40.1 MB)\n", "12/20")]
+        for i, (text, _) in enumerate(beats, 1):
+            (root / f"beat_{i}").write_text(text)
+        sh = f"""
+set -u
+N=0
+sleep(){{ N=$((N+1)); [ -f {root}/beat_$N ] || exit 0
+  [ -s {root}/beat_$N ] && cat {root}/beat_$N >> {root}/render.log; command sleep 0.02; }}
+curl(){{ cp {root}/log.txt {root}/sent_$N.txt 2>/dev/null; return 0; }}
+""" + S[a:z].replace("/root/", f"{root}/") + """
+for i in $(seq 1 150); do say "main line $i" >/dev/null; done
+wait
+"""
+        r = subprocess.run(["bash", "-c", sh], text=True, capture_output=True, timeout=60,
+                           env=dict(os.environ, LOG_PUT="x"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = (root / "log.txt").read_text().splitlines()
+        progress =[ln for ln in lines if " DRAW progress " in ln]
+        mains = [ln for ln in lines if " main line " in ln]
+        for ln in progress:
+            self.assertRegex(ln, r"^\d\d:\d\d:\d\d DRAW progress (\d+/\d+|\(renderer starting\))$")
+        for ln in mains:
+            self.assertRegex(ln, r"^\d\d:\d\d:\d\d main line \d+$")
+        self.assertEqual(len(progress) + len(mains), len(lines))                # nothing broken or mixed
+        self.assertEqual([ln.split()[-1] for ln in mains], [str(i) for i in range(1, 151)])
+        self.assertEqual([ln.split(" DRAW progress ")[1] for ln in progress], [w for _, w in beats if w])
+        for i, (_, said) in enumerate(beats, 1):                       # each beat sends the log with its line in it
+            sent = [ln.split(" DRAW progress ")[1] for ln in (root / f"sent_{i}.txt").read_text().splitlines()
+                    if " DRAW progress " in ln] if (root / f"sent_{i}.txt").exists() else []
+            self.assertEqual(sent, [w for _, w in beats[:i] if w], i)
+        self.assertFalse([ln for ln in lines if " failed" in ln])               # never drawing: never judged
+
+    def heartbeat(self, beats, stall="300"):
+        """DRAW_SCRIPT's heartbeat run in bash with sleep, curl and the machine's own clock (date +%s) faked, each beat
+        30 s on that clock. `beats`: (text the renderer adds to render.log, "+" the main script marks that it draws
+        (DRAW start) / "-" it is drawn or failed / ""). Returns the log's lines and the lines each beat sent."""
+        S = self.J.DRAW_SCRIPT
+        a, z = S.index("say(){"), S.index("\n", S.index("( while true; do sleep 30; progress;"))
+        root = Path(tempfile.mkdtemp(dir=self.d))
+        for i, (text, mark) in enumerate(beats, 1):
+            (root / f"beat_{i}").write_text(text)
+            (root / f"mark_{i}").write_text(mark)
+        sh = f"""
+set -u
+N=0
+sleep(){{ N=$((N+1)); [ -f {root}/beat_$N ] || exit 0
+  [ -s {root}/beat_$N ] && cat {root}/beat_$N >> {root}/render.log
+  case "$(cat {root}/mark_$N)" in +) touch {root}/.drawing;; -) rm -f {root}/.drawing;; esac; }}
+date(){{ if [ "${{1:-}}" = +%s ]; then echo $((1800000000 + 30 * N)); else command date "$@"; fi; }}
+curl(){{ cp {root}/log.txt {root}/sent_$N.txt 2>/dev/null; return 0; }}
+""" + S[a:z].replace("/root/", f"{root}/") + "\nwait\n"
+        env = {k: v for k, v in os.environ.items() if k != "STALL"}
+        env.update(LOG_PUT="x", PART="3", **({"STALL": stall} if stall is not None else {}))
+        r = subprocess.run(["bash", "-c", sh], text=True, capture_output=True, timeout=60, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = (root / "log.txt").read_text().splitlines() if (root / "log.txt").exists() else []
+        sent = [(root / f"sent_{i}.txt").read_text().splitlines() if (root / f"sent_{i}.txt").exists() else []
+                for i in range(1, len(beats) + 1)]
+        return lines, sent
+
+    def test_the_drawing_machine_judges_a_stall_by_its_own_clock(self):
+        """Owner 2026-10-15: the drawing machine itself, by its own clock, says "PART 3 failed (stopped drawing: no
+        shot drawn for N s)" once no progress came for over $STALL s while it draws - once only, in the log that very
+        beat sends; never before DRAW start or while it sends its share (however long), never while the count moves."""
+        count = lambda d, s: (f"  {d}/20 shots drawn, {s}s\n", "")
+        starting = [("installing the renderer's packages (npm ci)...\n", ""),
+                    ("\nadded 162 packages in 4s\n20 shot(s) to draw on 80 cores: 5 process(es) x 4 frames\n", "")]
+        fail = r"^\d\d:\d\d:\d\d PART 3 failed \(stopped drawing: no shot drawn for (\d+) s\)$"
+        # a slow but healthy share: 6 min waiting for the plan, drawing (the count moving every 300 s, never more),
+        # then 6.5 min sending it
+        healthy = ([("", "")] * 12 + [("", "+")] + starting + [count(0, 30)] + [count(0, 60)] * 9 + [count(1, 330)]
+                   + [count(1, 360)] * 9 + [count(20, 660)] + [("done in 690s -> /root/seg.tgz (40.1 MB)\n", "-")]
+                   + [("", "")] * 13)
+        lines, sent = self.heartbeat(healthy)
+        self.assertEqual([ln.split(" DRAW progress ")[1] for ln in lines if " DRAW progress " in ln],
+                         ["(renderer starting)", "(renderer starting)", "0/20", "1/20", "20/20", "20/20"])
+        self.assertFalse([ln for ln in lines if " failed" in ln], lines)
+        # a share whose renderer stops after 3 shots: said at the first beat over 300 s after its last progress
+        stops = [("", "")] * 2 + [("", "+")] + starting + [count(0, 30), count(3, 60)] + [count(3, 90)] * 23
+        for stall, beat, secs in (("300", 18, 330), (None, 18, 330), ("120", 12, 150)):   # None: the default, 300
+            with self.subTest(stall=stall):
+                lines, sent = self.heartbeat(stops, stall)
+                said = [ln for ln in lines if " failed" in ln]
+                self.assertEqual(len(said), 1, lines)
+                self.assertEqual(int(re.match(fail, said[0]).group(1)), secs)
+                self.assertEqual(lines.index(said[0]), len(lines) - 1)        # after every progress line
+                self.assertNotIn(said[0], sent[beat - 2])                    # the beat before: not yet
+                self.assertEqual(sent[beat - 1][-1], said[0])                # said before that beat sends the log
+                self.assertTrue(all(said[0] in s for s in sent[beat - 1:]))
+        # drawing begins and the renderer never writes a line: from the moment the mark was first seen
+        lines, sent = self.heartbeat([("", "")] * 3 + [("", "+")] + [("", "")] * 14)
+        self.assertEqual([int(re.match(fail, ln).group(1)) for ln in lines if " failed" in ln], [330])
+        self.assertEqual(lines, [ln for ln in lines if " failed" in ln])      # no progress line at all
+        self.assertTrue(sent[14] and not sent[13])                            # beat 15: 11 beats after the mark
 
 
 class Machines(unittest.TestCase):
