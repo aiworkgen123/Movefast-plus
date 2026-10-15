@@ -2076,6 +2076,9 @@ def assign(engine, rows: list, opps: list, script: str, cues: list, dossier: dic
 
 # ── 4b. overlay coverage (owner 2026-10-08): chapters mandatory, every group used, nothing dominates ───────────
 CHAPTERS_MIN, CHAPTERS_MAX = 2, 3
+CHAPTERS_LOOK = 48                      # the most chapters of an answer its choice looks at (2026-10-15)
+CHAPTER_KEEP_FIRST_MS = 15000           # the choice keeps the plan's first chapter where that makes the longest stretch
+                                        # without a chapter at most this much longer (owner 2026-10-15)
 OVERLAY_EVERY_S = 12.0                  # aim: something on screen about every 10-15 s (typed captions included)
 TYPED_CAPTION_SLOTS = 10                # reserved for typed_captions(), which runs after this
 OVERLAY_GROUPS = {                      # group: (templates, minimum a film, maximum a film)
@@ -2161,8 +2164,9 @@ def _chapter_fit(rows: list, k: int, head: str, last: float, dossier: dict, name
     chapter placed before it: (the heading as it would be set, the heading it was cut from or "", None when it can be
     placed, else (kind, why): "long", no whole heading of it fits in 25 characters (the heading is returned as it came);
     "seat", the shot is in the opening, within 30 s of the chapter before it, or the title shot). Read by the placement
-    in fill_overlays and by Token Supply's pre-check (_chapters_placed), which passes the headings it has placed in its
-    head in `also` (normalised) and leaves the rows as they are."""
+    in fill_overlays and by its run in the head (_chapters_try: Token Supply's pre-check and the choice of chapters),
+    which passes the headings it has placed in its head in `also` (normalised) and leaves the rows as they are; the
+    choice (_chapter_choice, 2026-10-15) reads its rules alone first, `last` -1e9."""
     src = ""
     if len(head) > 25:                           # never cut inside a word (owner 2026-10-10) nor before its head noun
         used = {_norm((x.get("device") or {}).get("heading")) for x in rows if (x.get("device") or {}).get("id") == "chapter-plate"}
@@ -2184,30 +2188,130 @@ def _chapter_fit(rows: list, k: int, head: str, last: float, dossier: dict, name
     return head, src, None
 
 
-def _chapters_placed(rows: list, got: dict, dossier: dict, names) -> tuple:
-    """(how many of an answer's chapters fill_overlays would place, why each other one would not): its placement loop
-    run in the head on the rows as they are (Token Supply's pre-check, owner 2026-10-14). A chapter after the third
-    placed one is left out as there."""
-    placed, last, also, refused = 0, -1e9, set(), []
-    chapters = [c for c in (got.get("chapters") if isinstance(got.get("chapters"), list) else []) if isinstance(c, dict)]
-    for c in sorted(chapters, key=lambda c: int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1):
+def _chapter_asked(got: dict) -> tuple:
+    """An answer's chapters as the placement reads them: (its chapter entries in that order - by shot number, one
+    whose shot is not a whole number first -, [(shot number or None, heading whitespace-tidied)] of each). An entry that
+    is not an object, or a "chapters" that is not a list, is no chapter (they had ended the placement with an error)."""
+    def by(c):
+        try:
+            return int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1
+        except (TypeError, ValueError):              # ("--5", "²": they had ended it too)
+            return -1
+    told = sorted((c for c in (got.get("chapters") if isinstance(got.get("chapters"), list) else [])
+                   if isinstance(c, dict)), key=by)
+    todo = []
+    for c in told:
         try:
             k = int(c["shot"])
         except (KeyError, TypeError, ValueError):
-            continue
-        head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
-        if not head or placed >= CHAPTERS_MAX:
+            k = None
+        todo.append((k, re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")))
+    return told, todo
+
+
+def _chapters_try(rows: list, todo: list, dossier: dict, names, cap: int) -> tuple:
+    """The chapter placement's loop run in the head on the rows as they are (they are left as they are), over `todo`
+    as _chapter_asked gives it, in its order: (the positions in `todo` it would place, [(position, why)] of each it
+    would refuse before `cap` are placed). A heading is read against the ones placed before it, as the placement reads
+    it (_chapter_fit's `also`). Read by Token Supply's pre-check (_chapters_placed) and the choice (_chapter_choice)."""
+    placed, last, also, refused = [], -1e9, set(), []
+    for n, (k, head) in enumerate(todo):
+        if k is None or not head or len(placed) >= cap:
             continue
         if not 0 <= k < len(rows):
-            refused.append(f"shot {k} is not a shot of this film")
+            refused.append((n, f"shot {k} is not a shot of this film"))
             continue
         set_as, _, no = _chapter_fit(rows, k, head, last, dossier, names, also)
         if no:
-            refused.append(f"shot {k} at {rows[k]['startMs'] / 1000:.0f} s {no[1]}")
+            refused.append((n, f"shot {k} at {rows[k]['startMs'] / 1000:.0f} s {no[1]}"))
             continue
-        placed, last = placed + 1, rows[k]["startMs"]
+        placed.append(n)
+        last = rows[k]["startMs"]
         also.add(_norm(set_as))
     return placed, refused
+
+
+def _chapter_choice(rows: list, todo: list, dossier: dict, names) -> tuple:
+    """Which chapters are placed when an answer has more that could be placed than CHAPTERS_MAX (owner 2026-10-15, every
+    planner: Token Supply's answer proposed five, the first three in film order were placed and the film had no chapter
+    for its last 4 min 23 s; all four blind reviewers cited it). Of the chapters _chapter_fit's own rules let in (a
+    heading that fits, past the opening, not on the title shot, a shot of this film; at most CHAPTERS_LOOK of them,
+    evenly through the film), the CHAPTERS_MAX at least 30 s apart that spread best: the smallest longest stretch
+    without a chapter (the film's start to the first, between two, the last to the film's end), then the smallest sum
+    of the stretches squared, then the earliest in film order - and whose headings are all set when placed in turn
+    (_chapters_try); the best of those that keep the plan's first chapter (the earliest that could be placed) instead,
+    where its longest stretch is at most CHAPTER_KEEP_FIRST_MS longer (owner 2026-10-15). `todo` as _chapter_asked
+    gives it, on the rows before any chapter is placed: (the positions in `todo` in the order the placement reads them,
+    the kept ones, {position: (heading as set, start ms)} of each placeable one left out). When the cap would leave out
+    none - every answer with CHAPTERS_MAX or fewer that could be placed, Sonnet's nearly always - todo's own order,
+    nothing kept or left out: the chapters, the rows and the log exactly as before."""
+    every = range(len(todo))
+    start = lambda n: rows[todo[n][0]]["startMs"] if todo[n][0] is not None and 0 <= todo[n][0] < len(rows) else -1
+    film = sorted(every, key=lambda n: (start(n), n))   # todo's order, but for a shot written "12.0" (read first there)
+    if len(_chapters_try(rows, [todo[n] for n in film], dossier, names, len(todo))[0]) <= CHAPTERS_MAX:
+        return every, (), {}                         # (no cap, in film order: the most that can be placed)
+    can = []                                         # (start, position, heading as set), in film order
+    for n, (k, head) in enumerate(todo):
+        if k is not None and head and 0 <= k < len(rows):
+            set_as, _, no = _chapter_fit(rows, k, head, -1e9, dossier, names)
+            if not no:
+                can.append((rows[k]["startMs"], n, set_as))
+    can.sort(key=lambda x: x[:2])
+    # a garbage answer of hundreds (it may run to 8000 tokens) is not searched whole (review 2026-10-15: 97 headings cut
+    # to one dossier title took 22 s, 600 early ones 20 s, 300 of the first kind did not end): CHAPTERS_LOOK of them,
+    # evenly through the film. Every answer of CHAPTERS_LOOK or fewer that could be placed is searched whole, as before
+    seen = set()                                     # (a repeat, same shot and heading, is never kept with its first)
+    look = [c for c in can if not (todo[c[1]] in seen or seen.add(todo[c[1]]))]
+    look = look if len(look) <= CHAPTERS_LOOK else [look[j * (len(look) - 1) // (CHAPTERS_LOOK - 1)]
+                                                     for j in range(CHAPTERS_LOOK)]
+    end, best = rows[-1]["endMs"], []
+
+    def go(i0, ix, prev, most, sq):                  # every CHAPTERS_MAX of them 30 s apart, in film order; a branch
+        if len(ix) == CHAPTERS_MAX:                  # whose stretch so far is longer than the best one's longest is cut
+            tail = end - prev                        # (and one whose headings so far cannot all be set, nor then later)
+            key = (max(most, tail), sq + tail * tail, tuple(ix))
+            if (not best or key < best[0]) and len(_chapters_try(rows, [todo[look[i][1]] for i in ix], dossier, names,
+                                                                 len(ix))[0]) == len(ix):
+                best[:] = [key]
+            return
+        for i in range(i0, len(look) - (CHAPTERS_MAX - len(ix)) + 1):
+            gap = look[i][0] - prev
+            if ix and gap < 30000:
+                continue
+            if best and max(most, gap) > best[0][0]:
+                break                                # (a later one only stretches it further)
+            if ix and len(ix) + 1 < CHAPTERS_MAX and len(_chapters_try(rows, [todo[look[j][1]] for j in ix + [i]],
+                                                                       dossier, names, len(ix) + 1)[0]) <= len(ix):
+                continue                             # (a whole set is checked only when it beats the best, above)
+            go(i + 1, ix + [i], look[i][0], max(most, gap), sq + gap * gap)
+    go(0, [], 0, 0, 0)
+    if not best:                                     # (only when the CHAPTERS_LOOK looked at have no CHAPTERS_MAX whose
+        return every, (), {}                         # headings can all be set: the order and the placement as before)
+    # the plan's first chapter (owner 2026-10-15: the rule alone left out the first one of every real answer it chose
+    # on; on 261014-f4625c the one at 127 s on the film's central object, and the 4-minute stretch moved from the ending
+    # to the opening): the best set that keeps the earliest one looked at (look[0], the earliest that could be placed)
+    # is taken where its longest stretch is at most CHAPTER_KEEP_FIRST_MS longer than the rule's best one's, else the
+    # rule's. (When the rule's best keeps it already, it is that set.)
+    top = best[0]
+    if top[2][0] != 0:
+        best.clear()
+        go(1, [0], look[0][0], look[0][0], look[0][0] ** 2)
+        if not (best and best[0][0] <= top[0] + CHAPTER_KEEP_FIRST_MS):
+            best[:] = [top]
+    keep = tuple(look[i][1] for i in best[0][2])
+    return film, keep, {n: (h, t) for t, n, h in can if n not in keep}   # (every placeable one not kept is logged)
+
+
+def _chapters_placed(rows: list, got: dict, dossier: dict, names) -> tuple:
+    """(how many of an answer's chapters fill_overlays would place, why each other one would not): its placement loop
+    run in the head on the rows as they are (Token Supply's pre-check, owner 2026-10-14), with its choice (2026-10-15):
+    more that could be placed than CHAPTERS_MAX, the CHAPTERS_MAX that spread best are placed and the others left out,
+    not refused (_chapter_choice). A chapter after the last one placed is not looked at, as there."""
+    _, todo = _chapter_asked(got)
+    seq, _, out = _chapter_choice(rows, todo, dossier, names)
+    placed, refused = _chapters_try(rows, [(None, "") if n in out else todo[n] for n in seq], dossier, names,
+                                    CHAPTERS_MAX)
+    return len(placed), [why for _, why in refused]
 
 
 def _ts_chapters(engine, prompt: str, rows: list, got: dict, dossier: dict, names) -> dict:
@@ -2293,14 +2397,29 @@ def fill_overlays(engine, job: Path, rows: list, script: str, dossier: dict, bui
     def at(n: int) -> int:
         return next((j for j, x in enumerate(rows) if 0 <= n < len(snap) and x is snap[n]), -1)
 
-    # chapters first: mandatory, so they may take a shot from a lesser template and hold their picture
+    # chapters first: mandatory, so they may take a shot from a lesser template and hold their picture. More that could
+    # be placed than CHAPTERS_MAX (owner 2026-10-15: five proposed, the first three placed, none in the film's last
+    # 4 min 23 s): the CHAPTERS_MAX that spread best through the film (keeping the plan's first one where that costs at
+    # most CHAPTER_KEEP_FIRST_MS), in film order, through the same placement, and each other placeable one left out and
+    # logged (_chapter_choice). Otherwise the order and the placement as before
     chapters, last = 0, -1e9
-    for c in sorted(got.get("chapters") or [], key=lambda c: int(c.get("shot", -1)) if str(c.get("shot", "")).lstrip("-").isdigit() else -1):
+    told, todo = _chapter_asked(got)
+    seq, keep, left = _chapter_choice(rows, todo, dossier, names)
+    kept_at = {rows[todo[n][0]]["startMs"] for n in keep}   # (before any hold, as `left`'s times)
+    for p in seq:
+        c = told[p]
         try:
             k = at(int(c["shot"]))
         except (KeyError, TypeError, ValueError):
             continue
         head = re.sub(r"\s+", " ", str(c.get("heading") or "")).strip().rstrip(".")
+        if p in left and left[p][1] in kept_at:  # a second one on a kept one's shot: as 1caaf6d logged it, never placed
+            engine.log(f"      chapter '{left[p][0]}' at shot {k} skipped (opening, too close, or the title shot)")
+            continue                             # (review 2026-10-15: "left out" read as if the kept one was dropped)
+        if p in left:                           # (its row untouched)
+            engine.log(f"      chapter '{left[p][0]}' at {left[p][1] / 1000:.0f}s left out (the {len(keep)} kept "
+                       f"spread better through the film)")
+            continue
         if k < 0 or not head or chapters >= CHAPTERS_MAX:
             continue
         head, src, no = _chapter_fit(rows, k, head, last, dossier, names)

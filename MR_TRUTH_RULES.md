@@ -37,7 +37,9 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   Anthropic's; Anthropic's own answer is always kept; its share of the bill is shown on its own. On every planner: the
   chapters filled in to reach the mandatory 2 keep the chapters' spacing (never within 30 s of another chapter, never
   in the opening 25 s) where that places all of them, and are filled as before where it cannot (a film under about
-  90 s); a filled chapter had landed 11 s after a planned one.
+  90 s); a filled chapter had landed 11 s after a planned one. When a plan proposes more chapters than a film takes,
+  the three that spread best through the film are kept, keeping the plan's first chapter where that costs at most
+  15 s (2026-10-15: a film had none in its last 4.5 minutes).
 
 ## Picture checks (locked, "option A")
 
