@@ -160,8 +160,11 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   hour, instead of failing. A drawing machine that cannot be found yet is looked for again while it can still help;
   otherwise the planner draws that share. A planning machine that dies, freezes (no sign of life for 12 minutes) or
   never starts is replaced automatically, up to twice, and the new one carries on from the saved plan: nothing is
-  planned or paid for again. A frozen or failed drawing machine gets one replacement. Every machine is switched off
-  when its part is done. Several films can run at once.
+  planned or paid for again. A frozen or failed drawing machine gets one replacement. One that stops drawing (still
+  on, but no new shot drawn for 5 minutes) says so itself, judged by its own clock, and counts as failed; the website
+  checks too, with 5 minutes' slack so a machine whose clock is up to 5 minutes slow is never taken for one that stopped (owner
+  2026-10-15: a film waited 23 minutes for such a machine). Every machine is switched off when its part is done.
+  Several films can run at once.
 - An NVIDIA GPU does not speed this tool up; the drawing is processor-bound.
 - Keys live only in the website's Settings (`keys.env` on the server) and as private settings on the machine while it
   runs. **Never in git.**
