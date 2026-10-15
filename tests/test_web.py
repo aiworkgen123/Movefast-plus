@@ -903,23 +903,163 @@ class Split(unittest.TestCase):
         self.assertEqual(self.src.ended, ["d3", "m1"])
 
     def test_a_drawer_drawing_sending_or_on_the_older_script_is_left_alone(self):
-        jid, K = self.film(5, self.running(2, 3, 4, 5, seen=True, started=time.time() - 2400))
-        self.b.put_bytes(K["dlog"](2), self.drawing((1500, "DRAW start: share 2/5, workers 5"),          # drawing
+        # (one still waiting for the plan once the planner has drawn its own share is no longer left alone, owner
+        # 2026-10-15: test_a_drawer_not_drawing_yet_when_the_planner_has_drawn_its_own_share_hands_it_over)
+        jid, K = self.film(4, self.running(2, 3, 4, seen=True, started=time.time() - 2400))
+        self.b.put_bytes(K["dlog"](2), self.drawing((1500, "DRAW start: share 2/4, workers 5"),          # drawing
                                                     (1470, "DRAW progress 0/30"), (100, "DRAW progress 28/30")))
-        self.b.put_bytes(K["dlog"](3), self.drawing((1500, "DRAW start: share 3/5, workers 5"),          # sending
+        self.b.put_bytes(K["dlog"](3), self.drawing((1500, "DRAW start: share 3/4, workers 5"),          # sending
                                                     (900, "DRAW progress 30/30"), (890, "PART 3 drawn, sending it")))
-        self.b.put_bytes(K["dlog"](4), self.drawing((1800, "DRAW start: share 4/5, workers 5")))       # older script
-        self.b.put_bytes(K["dlog"](5), self.drawing((1800, "apt ok, waiting for the plan")))           # no plan yet
+        self.b.put_bytes(K["dlog"](4), self.drawing((1800, "DRAW start: share 4/4, workers 5")))       # older script
         self.s._stat = lambda b, key: time.time()
         self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=982")
-        self.assertEqual({d["part"]: d["state"] for d in self.drawers(jid)},
-                         {2: "running", 3: "running", 4: "running", 5: "running"})
+        self.assertEqual({d["part"]: d["state"] for d in self.drawers(jid)}, {2: "running", 3: "running", 4: "running"})
         self.assertEqual(self.src.ended, [])
-        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in (2, 3, 4, 5)))
+        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in (2, 3, 4)))
         self.s._stat = lambda b, key: time.time() - self.J.FROZEN_S - 30       # the older script is judged as before
         self.s._drawers(jid, self.b, K, "PICTURES done\nPART 1 drawn here exit=0 seconds=982")
-        self.assertEqual({d["part"]: d.get("why") for d in self.drawers(jid)},
-                         {2: "froze", 3: "froze", 4: "froze", 5: "froze"})
+        self.assertEqual({d["part"]: d.get("why") for d in self.drawers(jid)}, {2: "froze", 3: "froze", 4: "froze"})
+
+    def test_a_drawer_not_drawing_yet_when_the_planner_has_drawn_its_own_share_hands_it_over(self):
+        """Owner 2026-10-15: once the planner has drawn its own share, a drawer with no DRAW start in its log yet -
+        still waiting for the plan, or no log at all - cannot send its share sooner than the planner can draw it now:
+        switched off and its skip mark written at once, with the reason the planner says (no replacement this late).
+        One drawing (DRAW start, recent progress) is judged as before; one whose share arrived is done; one whose log
+        could not be read is looked at again. Before that, nothing changes."""
+        now = time.time()
+        jid, K = self.film(6, self.running(2, 4, 5, 6, seen=True, started=now - 1500)
+                           + self.running(3, started=now - 600))                 # 3: rented 10 min ago, no log yet
+        waiting = self.drawing((1500, "ip 1.2.3.4 nproc=16 cpus=16 mem=32GB node=v22.11.0 share 2/6"),
+                               (420, "apt ok, waiting for the plan"))
+        self.b.put_bytes(K["dlog"](2), waiting)
+        self.b.put_bytes(K["dlog"](4), self.drawing((500, "apt ok, waiting for the plan"),
+                                                    (300, "DRAW start: share 4/6, workers 4"),
+                                                    (270, "DRAW progress 0/27"), (30, "DRAW progress 9/27")))
+        self.b.put_bytes(K["dlog"](5), waiting)                 # its share arrived; this copy of its log is older
+        self.b.put_bytes(K["dlog"](6), waiting)
+        get = self.b.get_bytes                                  # 6: a storage hiccup (not a 404) reading its log
+        self.b.get_bytes = lambda key: ((_ for _ in ()).throw(self.J.S3Error("Storage network request failed"))
+                                        if key == K["dlog"](6) else get(key))
+        self.s._stat = lambda b, key: time.time()               # every log sent just now: none froze
+        drawing = "PICTURES done\nPACKAGE uploaded 96M\nRENDER start: 160 shots in 6 share(s), workers 5 here"
+        self.s._drawers(jid, self.b, K, drawing)                # the planner still draws its own share
+        self.assertEqual({d["part"]: (d["state"], d.get("why")) for d in self.drawers(jid)},
+                         {k: ("running", None) for k in (2, 3, 4, 5, 6)})
+        self.assertEqual((self.src.ended, self.src.rents), ([], []))
+        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in range(2, 7)))
+        self.b.put_bytes(K["part"](5), b"tgz")
+        self.s._drawers(jid, self.b, K, drawing + "\nPART 1 drawn here exit=0 seconds=982")
+        why = "not drawing yet when the planner had drawn its own share"
+        self.assertEqual(self.J.NOT_DRAWING_YET, why)
+        ds = self.drawers(jid)
+        self.assertEqual({d["part"]: (d["state"], d.get("why")) for d in ds},
+                         {2: ("skipped", why), 3: ("skipped", why), 4: ("running", None), 5: ("done", "done"),
+                          6: ("running", None)})
+        self.assertEqual(len(ds), 5)                                              # no replacement this late
+        self.assertTrue(all(d["mark"] for d in ds if d["state"] == "skipped"))
+        self.assertEqual([self.b.get_bytes(K["skip"](k)) for k in (2, 3)], [why.encode()] * 2)
+        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in (4, 5, 6)))
+        self.assertEqual((sorted(self.src.ended), self.src.rents), (["d2", "d3", "d5"], []))
+        self.b.get_bytes = get                                  # 6's log read on the next pass: waiting too
+        self.s._drawers(jid, self.b, K, drawing + "\nPART 1 drawn here exit=0 seconds=982")
+        got = {d["part"]: (d["state"], d.get("why")) for d in self.drawers(jid)}
+        self.assertEqual((got[4], got[6]), (("running", None), ("skipped", why)))  # 4 draws on
+        self.assertEqual(self.b.get_bytes(K["skip"](6)), why.encode())
+        self.assertEqual((sorted(self.src.ended), self.src.rents), (["d2", "d3", "d5", "d6"], []))
+
+    def test_the_2026_10_15_slow_start_end_to_end(self):
+        """Films 261015-608a6b and 261015-336268: two drawers on the failing Vast computer (three of the films' drawers
+        landed there), 18 min setting up, then still waiting for the 96 MB package sent at 13:57, their logs sent every
+        30 s (so never frozen) and no DRAW start (so no stall). The planner drew its own share by 14:17 and waited its
+        fixed T_OWN / 2 + 900 s (about 24 min) before drawing theirs. Now: left alone while the planner draws its own
+        share; both switched off and marked once it is drawn; the planner draws both shares on its first look, not
+        after its fixed wait."""
+        now = time.time()
+        jid, K = self.film(3, self.running(2, 3, seen=True, started=now - 2700))
+        for k in (2, 3):                                        # 13:32 rented, 13:50 set up, 14:17 still waiting
+            self.b.put_bytes(K["dlog"](k), self.drawing(
+                (2640, f"ip 5.6.7.8 nproc=16 cpus=16 mem=48GB node=v22.11.0 share {k}/3"),
+                (1620, "apt ok, waiting for the plan"), now=now))
+        self.s._stat = lambda b, key: time.time()
+        planner = self.drawing((2400, "PICTURES done"), (1500, "PLAN exit=0 seconds=2210"),
+                               (1200, "PACKAGE uploaded 96M"),
+                               (1150, "RENDER start: 160 shots in 3 share(s), workers 5 here"), now=now).decode()
+        self.s._drawers(jid, self.b, K, planner)                # 13:58-14:17: the planner draws its own share
+        self.assertEqual([(d["part"], d["state"]) for d in self.drawers(jid)], [(2, "running"), (3, "running")])
+        self.assertEqual(self.src.ended, [])
+        planner += self.drawing((0, "PART 1 drawn here exit=0 seconds=1150"), now=now).decode()
+        self.s._drawers(jid, self.b, K, planner)                # 14:17: its own share drawn
+        why = self.J.NOT_DRAWING_YET
+        self.assertEqual([(d["part"], d["state"], d.get("why")) for d in self.drawers(jid)],
+                         [(2, "skipped", why), (3, "skipped", why)])
+        self.assertEqual((sorted(self.src.ended), self.src.rents), (["d2", "d3"], []))
+        marks = {k: self.b.get_bytes(K["skip"](k)).decode() for k in (2, 3)}
+        self.assertEqual(marks, {2: why, 3: why})
+        root, r, log = self.collect(skip=marks, n=3)            # the planner's next look (every 15 s)
+        self.assertIn(f"PART 2 drawing it here (its machine: {why})", log)
+        self.assertIn(f"PART 3 drawing it here (its machine: {why})", log)
+        self.assertNotIn("was late", log)                       # not after its fixed wait
+        self.assertTrue(log.endswith("DRAWN 2 3"), log)
+        self.assertIn(f"SEGS=--segments {root}/seg_1.tgz --segments {root}/seg_2.tgz --segments {root}/seg_3.tgz "
+                      f"RR=0", r.stdout)
+        said = "\n".join(ln for ln in log.splitlines() if ln.startswith("PART "))
+        self.s._drawers(jid, self.b, K, planner + said)         # the website's next pass: nothing more to do
+        self.assertEqual([(d["part"], d["state"]) for d in self.drawers(jid)], [(2, "skipped"), (3, "skipped")])
+        self.assertEqual((sorted(self.src.ended), self.src.rents), (["d2", "d3"], []))
+
+    def test_drawers_rented_minutes_before_the_planner_has_drawn_its_own_share_are_left_to_start(self):
+        """2026-10-15 review: two drawers rented 2 min before "PART 1 drawn" (the 2-minute retries when none was free,
+        or two one-time replacements) are booting normally; the planner draws the shares handed to it one after
+        another, so handing both over would cost a whole share (about 17 min). Left alone until NOT_DRAWING_GRACE_S
+        old; then one that started drawing draws on, and one still not drawing is handed over on the next pass."""
+        now = time.time()
+        rented = now - 120
+        jid, K = self.film(3, self.running(2, 3, started=rented))
+        self.b.put_bytes(K["dlog"](2), self.drawing((60, "ip 1.2.3.4 nproc=16 cpus=16 mem=32GB share 2/3"),
+                                                    (10, "apt ok, waiting for the plan"), now=now))  # 3: no log yet
+        self.s._stat = lambda b, key: time.time()
+        drawn = "PICTURES done\nPACKAGE uploaded 96M\nPART 1 drawn here exit=0 seconds=982"
+        self.s._drawers(jid, self.b, K, drawn)
+        self.assertEqual([(d["part"], d["state"], d.get("why")) for d in self.drawers(jid)],
+                         [(2, "running", None), (3, "running", None)])
+        self.assertEqual((self.src.ended, self.src.rents), ([], []))
+        self.assertFalse(any(self.b.exists(K["skip"](k)) for k in (2, 3)))
+        grace = rented + self.J.NOT_DRAWING_GRACE_S
+        with mock.patch.object(self.J.time, "time", return_value=grace - 5):     # just short of it: still left alone
+            self.s._drawers(jid, self.b, K, drawn)
+        self.assertEqual([d["state"] for d in self.drawers(jid)], ["running", "running"])
+        self.assertEqual(self.src.ended, [])
+        self.b.put_bytes(K["dlog"](2), self.drawing((60, "DRAW start: share 2/3, workers 5"),
+                                                    (30, "DRAW progress 0/27"), now=grace + 5))  # 2 started drawing
+        with mock.patch.object(self.J.time, "time", return_value=grace + 5):     # past it
+            self.s._drawers(jid, self.b, K, drawn)
+        self.assertEqual([(d["part"], d["state"], d.get("why")) for d in self.drawers(jid)],
+                         [(2, "running", None), (3, "skipped", self.J.NOT_DRAWING_YET)])
+        self.assertEqual((self.src.ended, self.src.rents), (["d3"], []))
+        self.assertEqual(self.b.get_bytes(K["skip"](3)), self.J.NOT_DRAWING_YET.encode())
+        self.assertFalse(self.b.exists(K["skip"](2)))
+
+    def test_a_film_carried_on_from_its_saved_plan_keeps_the_drawers_it_just_rented(self):
+        """2026-10-15 review: an attempt carried on from its saved plan with share 1 kept says "PLAN exit=0 ...
+        resumed" (its drawers are rented) and "PART 1 kept from an earlier attempt" seconds later, before any of them
+        could say DRAW start: they are left to start, not all switched off with every share handed to the planner."""
+        jid, K = self.film(4)
+        self.s.store.update(jid, run="web-r-2", runs=json.dumps([{"run": "web-r-1", "commit": "c", "plan": "web-r-1"},
+                                                                 {"run": "web-r-2", "commit": "c", "plan": "web-r-1"}]))
+        K2 = self.s.keys_of(jid, "T", "web-r-2")
+        resumed = "PLAN exit=0 seconds=0 resumed"
+        self.s._drawers(jid, self.b, K2, resumed)                                # rents d2, d3 and d4
+        self.assertEqual([(d["part"], d["state"]) for d in self.drawers(jid)],
+                         [(2, "running"), (3, "running"), (4, "running")])
+        self.b.put_bytes(K2["dlog"](2), self.drawing((5, "ip 1.2.3.4 nproc=16 cpus=16 mem=32GB node=v22.11.0 "
+                                                         "share 2/4")))           # 3 and 4: no log yet
+        self.s._stat = lambda b, key: time.time()
+        with mock.patch.object(self.J.time, "time", return_value=time.time() + 45):  # the planner's next log copy
+            self.s._drawers(jid, self.b, K2, resumed + "\nPART 1 kept from an earlier attempt")
+        self.assertEqual([(d["part"], d["state"], d.get("why")) for d in self.drawers(jid)],
+                         [(2, "running", None), (3, "running", None), (4, "running", None)])
+        self.assertEqual((self.src.ended, len(self.src.rents)), ([], 3))
+        self.assertFalse(any(self.b.exists(K2["skip"](k)) for k in (2, 3, 4)))
 
     def test_a_drawing_log_that_runs_past_midnight(self):
         """The machine's clock is UTC and its lines carry only the time of day: at 00:08 a line written at 23:57:30
@@ -1182,9 +1322,10 @@ setTimeout(() => { if (bad) { console.error('boom'); process.exit(1); }
         self.assertIn(f"SEGS=--segments {root}/seg_1.tgz --segments {root}/seg_2.tgz --segments {root}/seg_3.tgz "
                       f"--segments {root}/seg_4.tgz RR=0", r.stdout)
 
-    def collect(self, skip=(), parts=(), late=(), nosend=False, fail=()):
+    def collect(self, skip=(), parts=(), late=(), nosend=False, fail=(), n=4):
         """PLAN_SCRIPT's collection of the shares, run in bash with curl, the clock and the drawing faked. `late`:
-        shares that arrive while the planner draws another one; `fail`: shares whose drawing here fails."""
+        shares that arrive while the planner draws another one; `fail`: shares whose drawing here fails; `n`: the
+        film's shares (machines)."""
         a = self.J.PLAN_SCRIPT.index('  SEGS="--segments /root/seg_1.tgz"')
         z = self.J.PLAN_SCRIPT.index('  T2=$(date +%s)')
         root = Path(tempfile.mkdtemp(dir=self.d))
@@ -1206,8 +1347,8 @@ curl(){{ local out="" url=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; 
   [ -f "$url" ] || return 22; if [ -n "$out" ]; then cp "$url" "$out"; else cat "$url"; fi; }}
 draw(){{ echo "$1" >> {root}/drawn.txt; touch {root}/seg_$1.tgz; {arrive} case " {' '.join(map(str, fail))} " in *" $1 "*) return 1;; esac; }}
 sleep(){{ :; }}
-NPARTS=4; RR=0; T_OWN=0; {"NOSEND=1" if nosend else ""}
-""" + "".join(f"PART_GET_{k}={root}/r2/part{k}; SKIP_GET_{k}={root}/r2/skip{k}\n" for k in (2, 3, 4)) + f"""
+NPARTS={n}; RR=0; T_OWN=0; {"NOSEND=1" if nosend else ""}
+""" + "".join(f"PART_GET_{k}={root}/r2/part{k}; SKIP_GET_{k}={root}/r2/skip{k}\n" for k in range(2, n + 1)) + f"""
 date(){{ if [ -f {root}/clock ]; then echo $(( $(cat {root}/clock) + 1000 )); else command date "$@"; fi; }}
 """ + body.replace("PENDING=$LEFT;", f"PENDING=$LEFT; command date +%s > {root}/clock;") + 'echo "SEGS=$SEGS RR=$RR"\n'
         r = subprocess.run(["bash", "-c", sh], text=True, capture_output=True, timeout=60)

@@ -19,6 +19,9 @@ waits and tries again every 2 minutes (up to an hour). If a drawing machine cann
 tried, or the planning machine draws that share itself. A drawing machine that stops drawing (it is still on and
 sends its log, but has drawn no new shot for 5 minutes by its own clock) says so itself and counts as failed; the
 website checks too, allowing 5 minutes more so that a machine whose clock is up to 5 minutes slow is never taken for one that stopped.
+Once the planning machine has drawn its own share, a drawing machine that has not started drawing yet (still setting
+up, or still waiting for the plan) and was rented over 8 minutes ago is switched off and the planning machine draws
+that share at once (one rented just before is given time to start).
 If the planning machine dies or freezes, a new one carries on from the saved plan, so nothing is planned or paid for
 twice. A Vast computer that proves slow (over 1.6 times slower than the film's fastest machine) is skipped for a week,
 and one that cannot start a machine for 6 hours. If the website restarts in the middle of a film, the machines carry on

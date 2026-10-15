@@ -82,7 +82,8 @@ SETUP_S, PLAN_S_MIN, DRAW_S_MIN, FINISH_S = 240, 100, 85, 150
 START_LIMIT_S = 25 * 60                       # a machine that has written no log line by then never started
 # reliability (owner 2026-10-12): a film waits for a machine instead of failing; a planner that dies, freezes or never
 # starts is replaced automatically (carrying on from the saved plan when there is one); a frozen drawer is replaced
-# (2026-10-15: and one that stopped drawing, STALL_S)
+# (2026-10-15: and one that stopped drawing, STALL_S; one not drawing yet when the planner has drawn its own share
+# hands that share to the planner at once, NOT_DRAWING_YET)
 RENT_WAIT_S, RENT_RETRY_S = 60 * 60, 120       # how long a film waits for a planner, and how often it tries
 FROZEN_S = 12 * 60                             # no sign of life (the log is sent every 30-45 s) for this long: frozen
 # a drawing machine that still answers but stopped drawing (owner 2026-10-15: film 261014-f4625c's share 3 drew nothing
@@ -105,6 +106,25 @@ STALL_S = 5 * 60                               # drawing, no new DRAW progress t
 CLOCK_SLACK_S = 5 * 60                         # the website's own check waits this much longer: a machine clock up to
 #                                                ~5 min slow is never mistaken for a stall; the machine's own judgement
 #                                                comes first at STALL_S
+# a drawing machine that has not started drawing when the planner has drawn its own share (owner 2026-10-15: films
+# 261015-608a6b and 261015-336268 - three drawers on one failing Vast computer took 17-18 min to set up (normally 1-2)
+# and still had not got the 80-96 MB package 25+ min after it was sent; their logs kept coming ("apt ok, waiting for
+# the plan"), so FROZEN_S never fired, and with no DRAW start the stall check did not apply either; the planners drew
+# their own share by 14:17 and then waited their fixed T_OWN / 2 + 900 s, about 24 min, before drawing those shares):
+# once the planner's log says its own share is done (_drawers' `late`), a drawer whose log has no "DRAW start" yet
+# (setting up, waiting for the package, or no log at all) cannot send its share sooner than the planner, set up and
+# with the package, can draw it now - switched off and its skip mark written at once (no replacement this late), and
+# the planner draws that share on its next look (every 15 s). A drawer that has said DRAW start is judged as before
+# (stall, froze, failed, done); nothing changes while the planner still draws its own share; the planner's own fixed
+# wait stays as the backstop. The reason is the skip mark's text, which the planner says in its log.
+NOT_DRAWING_YET = "not drawing yet when the planner had drawn its own share"
+# ...but only a drawer rented over NOT_DRAWING_GRACE_S ago (2026-10-15 review): one rented minutes before - on a retry
+# (none free), as a one-time replacement, or every drawer of an attempt carried on from its saved plan (its "PART 1
+# kept" comes seconds after the "PLAN exit=0 ... resumed" that rents them) - is booting normally (SETUP_S plus the
+# package, about 3-5 min) and sends its share about when the planner could draw it; the planner draws the shares
+# handed to it one after another, so each one queued behind another cost a whole share (16-20 min; simulated: 2-4
+# such drawers 19.5 -> 36.5-72.5 min). One still not drawing at that age is handed over on the pass it crosses it
+NOT_DRAWING_GRACE_S = 8 * 60
 AUTO_RETRIES = 2                               # replacements for a planning machine before the film stops
 BEAT_EVERY_S, CHECK_EVERY_S = 120, 300         # how often the log's age and a machine's state are looked at
 # the drawing machines are rented while the planner is still choosing pictures (the longest part of planning: about 66-72 s
@@ -807,7 +827,9 @@ class Studio:
         """The drawing machines: wanted once the planner's pictures are chosen, rented (or tried again every
         RENT_RETRY_S while one could still help), then watched. A share that arrived, or that the planner took over,
         switches its machine off; one that failed, froze, stopped drawing, vanished or never started gets a replacement
-        while there is time, else a skip mark - and the planner draws that share itself."""
+        while there is time, else a skip mark - and the planner draws that share itself. Once the planner has drawn its
+        own share, one not drawing yet (no DRAW start in its log) and rented over NOT_DRAWING_GRACE_S ago gets the skip
+        mark at once (NOT_DRAWING_YET)."""
         j = self.store.job(jid)
         n = int(j.get("machines") or 1)
         ds = json.loads(j.get("drawers") or "[]")
@@ -870,9 +892,9 @@ class Studio:
                 done, why = True, "taken over"              # no package for it: the planner draws every share
             else:
                 logkey = d.get("log") or K["dlog"](k)
-                dl, missing = "", False
+                dl, missing, read = "", False, False
                 try:
-                    dl = b.get_bytes(logkey).decode("utf-8", "replace")
+                    dl, read = b.get_bytes(logkey).decode("utf-8", "replace"), True
                     if not d.get("seen"):
                         d["seen"], changed = True, True
                         try:                                # started: its start script (with links) is not needed
@@ -890,6 +912,11 @@ class Studio:
                     why = "froze"
                 elif at and self._stalled(dl, k, at):         # the backstop (the machine judges first: "PART k
                     why = "stopped drawing"                   # failed" above), judged when its log was last sent
+                elif (late and "DRAW start" not in dl and now - d["started"] > NOT_DRAWING_GRACE_S
+                      and (read or (missing and not d.get("seen")))):
+                    why = NOT_DRAWING_YET                     # the planner draws it sooner now (2026-10-15); one just
+                    #                                           rented is left to start (NOT_DRAWING_GRACE_S); a log
+                    #                                           that could not be read (not a 404): looked at again
                 elif now - d.get("checked", d["started"]) >= CHECK_EVERY_S:
                     d["checked"] = now
                     changed = True
