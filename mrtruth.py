@@ -1892,6 +1892,11 @@ def _auto_title(dossier: dict, title: str = "", said: str = "", names=None):
     dossier = dossier or {}
     sections = dossier.get("sections") or []
     cand = [str(s.get("title") or "") for s in sections[:1]] + [re.sub(r"\s*[—:|(-].*$", "", str(title or ""))]
+    # ...then the title's part after its dash or colon, then the next sections' titles: a film whose first section and
+    # title were both too long stopped before drawing (owner 2026-10-31: a 58-letter title before its dash and a first
+    # section of 28 letters; the part after the dash, 23, fits)
+    cand += [p.strip(" -—–:|()") for p in re.split(r"\s+[—–|]\s+|\s+-\s+|:\s+", str(title or ""))[1:]]
+    cand += [str(s.get("title") or "") for s in sections[1:]]
     head = next((h for h in cand if h and len(h) <= 26 and p03_fits(h)), "")
     if not head:
         return None

@@ -1051,6 +1051,18 @@ class Titles(unittest.TestCase):
         self.assertEqual(M._auto_title(DOSSIER, "")["kicker"], M._whole_words(DOSSIER["setting"].split(",")[0], 24))
         self.assertEqual(M._kicker({"setting": "", "period": ""}, TITLE), "The story")
 
+    def test_a_title_too_long_for_the_opening_tries_its_part_after_the_dash_then_the_next_sections(self):
+        # owner 2026-10-31: a long title and a 28-letter first section stopped a film before drawing
+        long_ = "A lighthouse that would never go dark"
+        d = {"setting": "", "period": "", "sections": [{"title": long_}, {"title": "The keeper's logbook"}]}
+        self.assertEqual(M._auto_title(d, "Why the Harbour Board Paid For Forty Years of Lamp Oil — Until the Fire")
+                         ["headline"], "Until the Fire")
+        self.assertEqual(M._auto_title(d, "Why the Harbour Board Paid For Forty Years of Lamp Oil")["headline"],
+                         "The keeper's logbook")
+        self.assertEqual(M._auto_title({"sections": [{"title": "Short one"}]}, "Short one: and more")["headline"],
+                         "Short one")                                  # the first section still comes first
+        self.assertIsNone(M._auto_title({"sections": [{"title": long_}]}, long_ + " and on"))
+
     def test_a_long_heading_keeps_its_head_noun(self):
         A, B = word(907, 0).title(), word(907, 1).title()
         self.assertEqual(M._short_heading(f"The {A}'s Narrower Role", 25), f"{A}'s Narrower Role")  # the article first
