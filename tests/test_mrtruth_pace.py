@@ -310,5 +310,35 @@ class Downstream(G.Base):
         self.assertTrue(any(w.startswith("pacing:") for w in ctx["warnings"]))
 
 
+class EmptyOverlay(unittest.TestCase):
+    """A beat overlay with an empty text (owner 2026-11-09, film 261031-dc6405: the renderer refused the shot and the
+    film stopped at 67%) is dropped where the beats are read and never reaches a scene."""
+
+    def test_dropped_where_the_beats_are_read(self):
+        cues = narration_of(120)
+        rows = rows_on(cues, list(range(len(cues))))
+        rows[3]["overlay"] = {"kind": "name", "style": "fullFrame", "text": "", "atMs": rows[3]["startMs"]}
+        rows[5]["overlay"] = {"kind": "name", "style": "fullFrame", "text": "   "}
+        rows[7]["overlay"] = None
+        rows[9]["overlay"] = {"kind": "name", "style": "fullFrame", "text": "Anna Weber"}
+        keep = rows[9]["startMs"]
+        M._paced(ENG, rows, cues)
+        with_ov = [r for r in rows if "overlay" in r]
+        self.assertEqual([r["overlay"]["text"] for r in with_ov], ["Anna Weber"])
+        self.assertTrue(any(r["startMs"] <= keep < r["endMs"] for r in with_ov))
+
+    def test_a_scene_never_carries_an_overlay_without_words(self):
+        import tempfile
+        from unittest import mock
+        rows = G.film(n=4, texts=False)
+        rows[1]["overlay"] = {"kind": "name", "style": "fullFrame", "text": "", "atMs": 741360}
+        rows[2]["overlay"] = {"kind": "name", "style": "fullFrame", "text": "Anna Weber"}
+        with tempfile.TemporaryDirectory() as st, mock.patch.object(M, "_stage", lambda s, p: M._key(p)), \
+                mock.patch.object(M, "_ident", G.ident), mock.patch.object(M, "_luma", lambda p: 0.3):
+            sc = M.scenes(rows, Path(st), G.cues_of(rows))
+        self.assertIsNone(sc[1]["overlay"])
+        self.assertEqual(sc[2]["overlay"]["text"], "Anna Weber")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ On any Linux box (a rented pod, your own server):
     tar xzf render_package.tgz && python3 remote_render.py            # all cores
     python3 remote_render.py --limit 2                               # a quick test: 2 shots
     python3 remote_render.py --part 2/3 --out seg_2.tgz              # one machine's share of three
+    python3 remote_render.py --part 2/3 --check seg_2.tgz            # is a drawn share this plan's, whole and sound?
 Needs: node 20+ and the machine's Chromium libraries (apt install libnss3 libgbm1 libasound2 ...).
 Output: segments.tgz  -> copy it back and unpack into <job>/mrtruth/segments/ , then re-run MoveFast.
 No API keys, no Claude: every planning call already happened where the package was made.
@@ -43,6 +44,66 @@ def split_parts(tasks, n):
     return parts
 
 
+FPS = 30                                         # the renderer's frame rate (mrtruth.FPS)
+
+
+def probe_seconds(path):
+    """A drawn shot's length by ffprobe, or None for a file it cannot read (0 bytes, no moov atom, not a video)."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
+        return float(r.stdout.strip().split()[0]) if r.returncode == 0 and r.stdout.strip() else None
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def check_part(tgz, share, seg, probe=probe_seconds):
+    """A drawn share checked against this plan before it is used (owner 2026-11-09, film 261108-0af08c: a share from
+    its machine held shots of another plan version, and a share kept from an earlier attempt held a 0-byte shot; every
+    try of the film re-used them and failed the same way). It must hold exactly the names of its share, each a readable
+    mp4 with a non-zero size, as long as its scene (within 0.5 s of durationFrames/30). Its good shots are put in
+    `seg` (so a drawing here skips them and draws only the rest); a broken or missing shot's file is taken out of
+    `seg`, so it is drawn again. Returns (ok, the line that says so)."""
+    want = {t["name"]: frames_of(t) / FPS for t in share}
+    seg = Path(seg)
+    seg.mkdir(parents=True, exist_ok=True)
+    foreign, got, seen = [], [], set()
+    try:
+        with tarfile.open(tgz) as tar:
+            for m in tar.getmembers():
+                if not m.isfile():
+                    continue
+                name = Path(m.name).name
+                if name not in want or name in seen:
+                    foreign.append(name)                             # another share's or another plan's shot
+                    continue
+                tmp = seg / (name + ".check")
+                with tar.extractfile(m) as src, open(tmp, "wb") as f:
+                    shutil.copyfileobj(src, f)
+                got.append((name, tmp))
+                seen.add(name)
+    except (OSError, tarfile.TarError, EOFError) as e:
+        return False, f"it could not be read ({e})"
+    with ThreadPoolExecutor(max_workers=8) as ex:                    # ~90 shots in a few seconds
+        lengths = list(ex.map(lambda nt: probe(nt[1]) if nt[1].stat().st_size > 0 else None, got))
+    good, broken = set(), []
+    for (name, tmp), s in zip(got, lengths):
+        if s is not None and abs(s - want[name]) <= 0.5:
+            tmp.replace(seg / name)
+            good.add(name)
+        else:
+            tmp.unlink(missing_ok=True)
+            broken.append(name)
+    missing = [n for n in want if n not in good and n not in broken]
+    for n in broken + missing:                                       # never skipped by the drawing that mends it
+        (seg / n).unlink(missing_ok=True)
+    if not foreign and not broken and not missing:
+        return True, f"{len(good)} shot(s) as planned"
+    return False, (f"{len(foreign) + len(broken)} wrong/broken shot(s) ({len(foreign)} not in its share, "
+                   f"{len(broken)} unreadable, empty or the wrong length), {len(missing)} missing; "
+                   f"{len(good)} of {len(want)} kept")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workers", type=int, default=0, help="render processes (default: cores // 4)")
@@ -51,6 +112,8 @@ def main():
     ap.add_argument("--out", default="segments.tgz")
     ap.add_argument("--gl", default="", help="chromium gl backend, e.g. angle / swangle (default: remotion's own)")
     ap.add_argument("--part", default="", help="K/N: draw only this machine's share of N (split_parts)")
+    ap.add_argument("--check", default="", help="a drawn share's .tgz: check it against this plan's share (exit 3 if "
+                                                "it does not match), its good shots into work/segments")
     a = ap.parse_args()
     cores = os.cpu_count() or 4
     workers = a.workers or max(1, cores // 4)
@@ -66,13 +129,25 @@ def main():
     work = HERE / "work"
     seg = work / "segments"
     seg.mkdir(parents=True, exist_ok=True)
+    if a.check:
+        if not shutil.which("ffprobe"):              # cannot be checked here: used as it is (exit neither 0 nor 3)
+            sys.exit("no ffprobe on this machine: the share is not checked")
+        ok, said = check_part(a.check, tasks, seg)
+        print(said, flush=True)
+        sys.exit(0 if ok else 3)
     node = shutil.which("node")
     if not node:
         sys.exit("node is not installed (need 20+).")
     if not (renderer / "node_modules").exists():
         print("installing the renderer's packages (npm ci)...", flush=True)
         subprocess.run(["npm", "ci", "--no-audit", "--no-fund"], cwd=renderer, check=True)
-    todo = [dict(t, output=str(seg / t["name"])) for t in tasks if not (seg / t["name"]).exists()]
+    # a 0-byte file is not a drawn shot (owner 2026-11-09): removed and drawn again (render.mjs skips any file there)
+    for t in tasks:
+        f = seg / t["name"]
+        if f.exists() and f.stat().st_size == 0:
+            f.unlink()
+    todo = [dict(t, output=str(seg / t["name"])) for t in tasks
+            if not ((seg / t["name"]).exists() and (seg / t["name"]).stat().st_size > 0)]
     print(f"{len(todo)} shot(s) to draw on {cores} cores: {workers} process(es) x {a.concurrency} frames", flush=True)
     env = dict(os.environ)
     if a.gl:

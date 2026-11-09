@@ -1346,6 +1346,7 @@ say(){{ echo "$*" >> {root}/log.txt; }}
 curl(){{ local out="" url=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; -m) shift 2;; -*) shift;; *) url="$1"; shift;; esac; done
   [ -f "$url" ] || return 22; if [ -n "$out" ]; then cp "$url" "$out"; else cat "$url"; fi; }}
 draw(){{ echo "$1" >> {root}/drawn.txt; touch {root}/seg_$1.tgz; {arrive} case " {' '.join(map(str, fail))} " in *" $1 "*) return 1;; esac; }}
+fits(){{ return 0; }}
 sleep(){{ :; }}
 NPARTS={n}; RR=0; T_OWN=0; {"NOSEND=1" if nosend else ""}
 """ + "".join(f"PART_GET_{k}={root}/r2/part{k}; SKIP_GET_{k}={root}/r2/skip{k}\n" for k in range(2, n + 1)) + f"""
@@ -1355,6 +1356,116 @@ date(){{ if [ -f {root}/clock ]; then echo $(( $(cat {root}/clock) + 1000 )); el
         self.assertEqual(r.returncode, 0, r.stderr)
         drawn = (root / "drawn.txt").read_text().split() if (root / "drawn.txt").exists() else []
         return root, r, (root / "log.txt").read_text() + "\nDRAWN " + " ".join(drawn)
+
+    # owner 2026-11-09 (film 261108-0af08c): a drawn share is checked against this plan before it is used
+    def shares(self, kept=None, sent=None, n=2):
+        """PLAN_SCRIPT from the drawing helpers to the join, run in bash with curl faked but the real remote_render.py
+        (its --check with ffprobe) and a fake renderer that copies a 1-second mp4 for each shot it is asked to draw.
+        `kept`/`sent`: {name: what} for the share kept from an earlier attempt (1) / received from its machine (2):
+        "ok" a good shot, "empty" a 0-byte file, "long" a 3-second shot. Returns the folder, the log, the shots drawn
+        here and the names in each share."""
+        root = Path(tempfile.mkdtemp(dir=self.d))
+        rr = root / "rr"
+        (rr / "renderer" / "movefast").mkdir(parents=True)
+        (rr / "renderer" / "node_modules").mkdir()
+        (rr / "storage").mkdir()
+        (root / "r2").mkdir()
+        (root / "mf").mkdir()
+        shutil.copyfile(HERE / "remote_render.py", rr / "remote_render.py")
+        for sec in (1, 3):
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                            f"testsrc=size=64x36:rate=30:duration={sec}", "-pix_fmt", "yuv420p",
+                            str(root / f"tpl{sec}.mp4")], check=True)
+        (rr / "renderer" / "movefast" / "render.mjs").write_text(f"""
+import fs from 'fs';
+const req = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+for (const t of req.tasks) {{ fs.copyFileSync('{root}/tpl1.mp4', t.output);
+  fs.appendFileSync('{root}/drawn.txt', t.output.split('/').pop() + '\\n'); }}
+""")
+        tasks, names = self.share_names(n)
+        (rr / "manifest.json").write_text(json.dumps({"tasks": tasks}))
+
+        def pack(path, shots):
+            with tarfile.open(path, "w:gz") as t:
+                for name, what in shots.items():
+                    data = b"" if what == "empty" else (root / ("tpl3.mp4" if what == "long" else "tpl1.mp4")).read_bytes()
+                    info = tarfile.TarInfo(name); info.size = len(data); t.addfile(info, io.BytesIO(data))
+        if kept is not None:
+            pack(root / "r2" / "part1", kept)
+        if sent is not None:
+            pack(root / "r2" / "part2", sent)
+        S = self.J.PLAN_SCRIPT
+        a, z = S.index("  draw1(){"), S.index("  T2=$(date +%s)")
+        body = S[a:z].replace("/root/", f"{root}/").replace("python3 ", f"{sys.executable} ")
+        sh = f"""
+set -u
+say(){{ echo "$*" >> {root}/log.txt; }}
+curl(){{ local out="" url="" put=""; while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; -m|-X) shift 2;;
+  --data-binary) put="${{2#@}}"; shift 2;; -*) shift;; *) url="$1"; shift;; esac; done
+  if [ -n "$put" ]; then cp "$put" "$url.tmp" && mv "$url.tmp" "$url"; return; fi
+  [ -f "$url" ] || return 22; if [ -n "$out" ]; then cp "$url" "$out"; else cat "$url"; fi; }}
+sleep(){{ :; }}
+NPARTS={n}; WK=1; T1=$(date +%s); PART_PUT_1={root}/r2/put1
+{"PART_GET_1=" + str(root / "r2" / "part1") if kept is not None else ""}
+PART_GET_2={root}/r2/part2; SKIP_GET_2={root}/r2/skip2
+""" + body + 'echo "SEGS=$SEGS RR=$RR"\n'
+        r = subprocess.run(["bash", "-c", sh], text=True, capture_output=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        drawn = (root / "drawn.txt").read_text().split() if (root / "drawn.txt").exists() else []
+        return root, (root / "log.txt").read_text() + r.stdout, drawn, names
+
+    @staticmethod
+    def share_names(n=2):
+        """The invented film of shares(): six 1-second shots, and the names in each of its n shares."""
+        sys.path.insert(0, str(HERE))
+        from remote_render import split_parts
+        tasks = [{"name": f"{i:04d}_shot.mp4", "props": {"scene": {"durationFrames": 30}}} for i in range(6)]
+        return tasks, [[t["name"] for t in p] for p in split_parts(tasks, n)]
+
+    def members(self, path):
+        with tarfile.open(path) as t:
+            return sorted(m.name for m in t.getmembers() if m.isfile() and m.size > 0)
+
+    def test_good_shares_are_used_as_they_are(self):
+        names = self.share_names()[1]
+        root, log, drawn, names = self.shares(kept={n: "ok" for n in names[0]}, sent={n: "ok" for n in names[1]})
+        self.assertIn("PART 1 kept from an earlier attempt", log)
+        self.assertIn("PART 2 received from its machine", log)
+        self.assertNotIn("does not match", log)
+        self.assertEqual(drawn, [])                                        # nothing drawn again
+        self.assertFalse((root / "r2" / "put1").exists())                  # the kept share is not sent again
+        self.assertIn("RR=0", log)
+        self.assertEqual(self.members(root / "seg_2.tgz"), sorted(names[1]))
+
+    def test_a_share_holding_another_plans_shot_is_mended_here(self):
+        names = self.share_names()[1]
+        sent = {n: "ok" for n in names[1][1:]}                             # one of its own missing ...
+        sent["0099_other_plan.mp4"] = "ok"                                 # ... and a shot of another plan
+        sent[names[0][0]] = "ok"                                           # ... and one of the other share
+        root, log, drawn, names = self.shares(kept={n: "ok" for n in names[0]}, sent=sent)
+        self.assertIn("PART 2 from its machine does not match the plan: 2 wrong/broken shot(s) (2 not in its share, "
+                      "0 unreadable, empty or the wrong length), 1 missing", log)
+        self.assertEqual(drawn, [names[1][0]])                             # only the missing one is drawn here
+        self.assertEqual(self.members(root / "seg_2.tgz"), sorted(names[1]))
+        self.assertIn("RR=0", log)
+
+    def test_a_kept_share_with_an_empty_shot_is_mended_and_sent_back(self):
+        names = self.share_names()[1]
+        kept = {n: "ok" for n in names[0]}
+        kept[names[0][0]] = "empty"                                        # the 0-byte mp4 of film 261108-0af08c
+        kept[names[0][1]] = "long"                                         # and a shot of the wrong length
+        root, log, drawn, names = self.shares(kept=kept, sent={n: "ok" for n in names[1]})
+        self.assertIn("PART 1 from an earlier attempt does not match the plan: 2 wrong/broken shot(s) (0 not in its "
+                      "share, 2 unreadable, empty or the wrong length), 0 missing", log)
+        self.assertEqual(sorted(drawn), sorted(names[0][:2]))
+        self.assertIn("PART 1 mended here exit=0", log)
+        self.assertEqual(self.members(root / "seg_1.tgz"), sorted(names[0]))
+        for _ in range(100):                                               # sent in the background
+            if (root / "r2" / "put1").exists():
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.members(root / "r2" / "put1"), sorted(names[0]))  # over the bad one
+        self.assertIn("RR=0", log)
 
     def test_a_share_that_arrives_while_the_planner_draws_another_is_used(self):
         root, r, log = self.collect(skip={2: "failed"}, late=(3, 4))

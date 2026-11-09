@@ -1489,10 +1489,21 @@ def _pace_line(rows: list) -> str:
     return ", ".join(out)
 
 
+def _drop_empty_overlays(rows: list) -> list:
+    """A beat overlay whose text is empty is dropped where the beats are read (owner 2026-11-09, film 261031-dc6405:
+    the segmentation answer gave {"kind": "name", "style": "fullFrame", "text": ""}, the renderer refused the shot),
+    so no rule treats it as words on the shot (an overlay is never joined onto, starts on its words, ...)."""
+    for r in rows:
+        if "overlay" in r and not (isinstance(r["overlay"], dict) and str(r["overlay"].get("text") or "").strip()):
+            r.pop("overlay")
+    return rows
+
+
 def _paced(engine, rows: list, cues: list) -> list:
     """Claude's rows at the owner's pace: _pace, then _calm_short_runs as the safety net, two lines in the log."""
     if not rows:
         return rows
+    _drop_empty_overlays(rows)
     n0, a0 = len(rows), (rows[-1]["endMs"] - rows[0]["startMs"]) / 1000 / len(rows)
     info = _pace(rows, cues)
     calm = _calm_short_runs(rows)
@@ -11121,7 +11132,11 @@ def scenes(rows: list, storage: Path, cues: list = None) -> list:
               "motion": {"type": "kenBurns", "fromScale": m[0], "toScale": m[1], "fromX": m[2], "toX": m[3],
                          "fromY": m[4], "toY": m[5], "easing": "linearOut"},
               "transitionIn": r.get("tin") or {"type": "cut", "durationFrames": 0}, "transitionOut": r.get("tout"),
-              "prevAsset": None, "captions": [], "textCard": None, "overlay": r.get("overlay"), "device": dev,
+              # a beat overlay with no words is no overlay (owner 2026-11-09, film 261031-dc6405: the renderer's
+              # schema wants overlay text, refused the shot and stopped the film at 67%)
+              "prevAsset": None, "captions": [], "textCard": None,
+              "overlay": r["overlay"] if str((r.get("overlay") or {}).get("text") or "").strip() else None,
+              "device": dev,
               "companions": [_asset(storage, c) for c in r.get("companions") or []], "grade": dict(GRADE)}
         if sc["transitionIn"]["type"] in ("pushCut", "slide") and prev:
             pm = rows[i - 1].get("_move") or _MOVES[0]

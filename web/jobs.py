@@ -1345,9 +1345,28 @@ if [ -n "$PK" ] && [ "$RC" -eq 0 ]; then
   WK=$(workers)
   mkdir -p /root/rr && tar xzf "$PK" -C /root/rr && say "RENDER start: $(python3 -c "import json;print(len(json.load(open('/root/rr/manifest.json'))['tasks']))") shots in $NPARTS share(s), workers $WK here"
   draw1(){ (cd /root/rr && python3 remote_render.py --part "$1/$NPARTS" --out "/root/seg_$1.tgz" --workers $WK >> /root/mf/render.log 2>&1); }
-  draw(){ draw1 "$1" || { say "share $1: one more try after an error ($(tail -1 /root/mf/render.log | cut -c1-200))"; draw1 "$1"; }; }
+  # every share is checked against this plan before it is used (owner 2026-11-09, film 261108-0af08c: a share from
+  # its machine held another plan version's shots, one kept from an earlier attempt a 0-byte shot, and every try
+  # failed the same way at the join): exactly its share's names, each a readable mp4 as long as its scene (seconds
+  # for ~90 shots). A share that fails is not used: its good shots go to work/segments and only the missing or broken
+  # ones are drawn here (remote_render.py skips what is there). A share that cannot be checked at all (exit other
+  # than 3: an older package, no ffprobe) is used as it is, as before
+  fits(){ local m rc; m=$(cd /root/rr && python3 remote_render.py --part "$1/$NPARTS" --check "/root/seg_$1.tgz" 2>>/root/mf/render.log); rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$rc" -ne 3 ] && { say "PART $1 from $2 could not be checked (exit $rc): used as it is"; return 0; }
+    say "PART $1 from $2 does not match the plan: $m"; return 1; }
+  draw0(){ draw1 "$1" || { say "share $1: one more try after an error ($(tail -1 /root/mf/render.log | cut -c1-200))"; draw1 "$1"; }; }
+  # a share drawn here is checked too; a broken shot in it is drawn once more
+  draw(){ draw0 "$1" || return 1; fits "$1" "this machine" && return 0
+    say "PART $1: drawing its missing or broken shots once more"; draw1 "$1" && fits "$1" "this machine"; }
   if [ -n "${PART_GET_1:-}" ] && curl -sf -m 900 "$PART_GET_1" -o /root/seg_1.tgz && tar tzf /root/seg_1.tgz >/dev/null 2>&1; then
     RR=0; T_OWN=$(( $(date +%s) - T1 )); say "PART 1 kept from an earlier attempt"
+    if ! fits 1 "an earlier attempt"; then
+      say "PART 1 drawing its missing or broken shots here"; draw 1; RR=$?; T_OWN=$(( $(date +%s) - T1 ))
+      say "PART 1 mended here exit=$RR seconds=$T_OWN"
+      # the mended share over the bad one, so a later attempt keeps a good one
+      [ "$RR" -eq 0 ] && ( curl -sf -m 1800 --retry 3 --retry-all-errors -X PUT --data-binary @/root/seg_1.tgz "$PART_PUT_1" >/dev/null 2>&1 & )
+    fi
   else
     draw 1; RR=$?; T_OWN=$(( $(date +%s) - T1 )); say "PART 1 drawn here exit=$RR seconds=$T_OWN"
     # kept in R2 too, so a replacement machine need not draw it again
@@ -1364,6 +1383,9 @@ if [ -n "$PK" ] && [ "$RC" -eq 0 ]; then
         SG="SKIP_GET_$k"
         if [ "$RR" -ne 0 ]; then LEFT="$LEFT $k"
         elif got "$k"; then say "PART $k received from its machine"
+          if ! fits "$k" "its machine"; then
+            say "PART $k drawing its missing or broken shots here"
+            S0=$(date +%s); draw "$k" || RR=1; UNTIL=$(( UNTIL + $(date +%s) - S0 )); fi
         elif curl -sf -m 30 -o /dev/null "${!SG}"; then
           say "PART $k drawing it here (its machine: $(curl -sf -m 30 "${!SG}"))"
           S0=$(date +%s); draw "$k" || RR=1; UNTIL=$(( UNTIL + $(date +%s) - S0 ))   # the wait is for the others
@@ -1374,6 +1396,7 @@ if [ -n "$PK" ] && [ "$RC" -eq 0 ]; then
     for k in $PENDING; do                           # late: one more look, then drawn here
       [ "$RR" -ne 0 ] && break
       if [ -z "${NOSEND:-}" ] && got "$k"; then say "PART $k received from its machine (just in time)"
+        fits "$k" "its machine" || { say "PART $k drawing its missing or broken shots here"; draw "$k" || RR=1; }
       else [ -z "${NOSEND:-}" ] && say "PART $k drawing it here (its machine was late)"; draw "$k" || RR=1; fi
     done
     for k in $(seq 2 "$NPARTS"); do SEGS="$SEGS --segments /root/seg_$k.tgz"; done

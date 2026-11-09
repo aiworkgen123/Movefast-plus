@@ -29,17 +29,19 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   automatic backup**: a call Token Supply cannot answer goes to Anthropic, and a refused key, an empty wallet, three
   such calls or three steps whose answers could not be used switch Token Supply off for the rest of the film; a film
   never stops or waits because of Token Supply (a stream that only keeps itself alive is given up 2 minutes after its
-  retry window). Safeguards against the side effects of the coding tool it runs Sonnet in: a system text asking for
-  the answer and nothing else, streamed answers read as UTF-8, an answer with long prose around its JSON asked again
-  (after two, the step is Anthropic's, with today's three tries), a visual plan that stops early (its last template
-  before 75% of the script where its words stop too, or a quarter of it without one) asked again and then
-  Anthropic's, chapters the placement rules would refuse asked again with those rules spelled out and then
-  Anthropic's; Anthropic's own answer is always kept; its share of the bill is shown on its own. On every planner: the
-  chapters filled in to reach the mandatory 2 keep the chapters' spacing (never within 30 s of another chapter, never
-  in the opening 25 s) where that places all of them, and are filled as before where it cannot (a film under about
-  90 s); a filled chapter had landed 11 s after a planned one. When a plan proposes more chapters than a film takes,
-  the three that spread best through the film are kept, keeping the plan's first chapter where that costs at most
-  15 s (2026-10-15: a film had none in its last 4.5 minutes).
+  retry window). Safeguards against the side effects of the coding tool it runs Sonnet in: a system text asking for the
+  answer and nothing else, streamed answers read as UTF-8, an answer with long prose around its JSON asked again (after
+  two, the step is Anthropic's, with today's three tries), a visual plan that stops early (its last template before 75%
+  of the script where its words stop too, or a quarter of it without one) asked again and then Anthropic's, chapters the
+  placement rules would refuse asked again with those rules spelled out and then Anthropic's; Anthropic's own answer is
+  always kept; its share of the bill is shown on its own. An answer given as a call to the coding tool's own tools
+  instead of text (measured 2026-10-26) is no answer (owner 2026-11-09): the system text forbids tools, and such an
+  answer is asked again at once, twice at most, then waited for and handed to Anthropic as any call it cannot answer. On
+  every planner: the chapters filled in to reach the mandatory 2 keep the chapters' spacing (never within 30 s of
+  another chapter, never in the opening 25 s) where that places all of them, and are filled as before where it cannot (a
+  film under about 90 s); a filled chapter had landed 11 s after a planned one. When a plan proposes more chapters than
+  a film takes, the three that spread best through the film are kept, keeping the plan's first chapter where that costs
+  at most 15 s (2026-10-15: a film had none in its last 4.5 minutes).
 
 ## Picture checks (locked, "option A")
 

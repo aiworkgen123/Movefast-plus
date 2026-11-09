@@ -12,6 +12,8 @@ every HTTP request faked (requests.post), no paid or real network call, no key b
     visual plan's reach (the measured 0.34 tail asked again, Sonnet's 0.02-0.15 not); the chapters' pre-check (two of
     three on title shots, as measured); the chapter fill-in's spacing on every planner (425 s and 436 s); the planner's
     line and its record in timing.json
+  - an answer given as a tool call instead of text (measured 2026-10-26): no answer, asked again at once twice at most,
+    then the normal backoff; the system sentence against tools; Anthropic's reading unchanged
 
     .venv/bin/python -m unittest tests.test_mrtruth_tokensupply -v
 """
@@ -469,6 +471,109 @@ class Fallback(Engine):
 
 
 # ── the pin ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+# ── an answer that calls a tool instead of writing text (measured 2026-10-26, owner 2026-11-09) ──────────────────────
+def tool_events(preamble="", name="Bash", out=40, usage=None):
+    """Token Supply's answer as measured: ONE tool_use block (its coding tool's Bash, the JSON inside an echo command,
+    sent as input_json_delta), stop_reason "tool_use", no text - after an optional text preamble. Invented content."""
+    u = dict(usage or {"input_tokens": 100})
+    evs = [sse({"type": "message_start", "message": {"model": SONNET, "usage": u}})]
+    k = 0
+    if preamble:
+        evs += [sse({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+                sse({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": preamble}}),
+                sse({"type": "content_block_stop", "index": 0})]
+        k = 1
+    evs += [sse({"type": "content_block_start", "index": k,
+                 "content_block": {"type": "tool_use", "id": "toolu_made_up", "name": name, "input": {}}}),
+            sse({"type": "content_block_delta", "index": k,
+                 "delta": {"type": "input_json_delta", "partial_json": '{"command": "echo \'{\\"a\\": 1'}}),
+            sse({"type": "content_block_delta", "index": k,
+                 "delta": {"type": "input_json_delta", "partial_json": '}\'"}'}}),
+            sse({"type": "content_block_stop", "index": k}),
+            sse({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": out}}),
+            sse({"type": "message_stop"})]
+    return evs
+
+
+def tool(preamble="", **kw):
+    return lambda payload: response(200, b"".join(tool_events(preamble, **kw)))
+
+
+class ToolCall(Engine):
+    SENTENCE = ("Never use any tool, command or function: write the whole answer directly as plain text in your reply.")
+
+    def test_the_request_carries_the_sentence_and_anthropics_does_not(self):
+        self.assertTrue(MV.TOKENSUPPLY_SYSTEM.endswith(" " + self.SENTENCE))
+        net = self.net(ts=[ok('{"a": 1}')], anthropic=[ok('{"a": 1}')])
+        MV._claude_try("tokensupply", SONNET, "p", 1000, 60)
+        MV._claude_try("anthropic", SONNET, "p", 1000, 60)
+        self.assertIn(self.SENTENCE, net.to(TS_URL)[0]["payload"]["system"])
+        self.assertNotIn("system", net.to(AN_URL)[0]["payload"])
+
+    def test_the_measured_tool_call_reads_as_no_answer_its_name_kept_its_usage_counted(self):
+        got = MV._read_sse_text(response(200, b"".join(tool_events(out=40))), tokensupply=True)
+        self.assertEqual(got, "")
+        self.assertEqual(MV._CLAUDE_LAST.tool, "Bash")
+        self.assertEqual(MV._CLAUDE_LAST.stop, "tool_use")
+        row = self.spend["models"]["claude-sonnet-5 (Token Supply)"]
+        self.assertEqual((row["in"], row["out"], row["calls"]), (100, 40, 1))
+        MV._read_sse_text(response(200, b"".join(events("{}"))), tokensupply=True)
+        self.assertEqual(MV._CLAUDE_LAST.tool, "")                         # reset on every read
+
+    def test_text_before_the_tool_call_is_only_a_preamble(self):
+        got = MV._read_sse_text(response(200, b"".join(tool_events("Here is the JSON:"))), tokensupply=True)
+        self.assertEqual(got, "")
+        self.assertEqual(MV._CLAUDE_LAST.tool, "Bash")
+
+    def test_asked_again_at_once_and_answered(self):
+        net = self.net(ts=[tool(), ok('{"a": 1}')])
+        self.assertEqual(MV.claude("p", SONNET, 1000), '{"a": 1}')
+        self.assertEqual((len(net.to(TS_URL)), len(net.to(AN_URL))), (2, 0))
+        self.assertEqual(self.clock.now, 1000.0)                            # no sleep
+        self.assertIn("tokensupply answered with a Bash tool call, not text — asking again at once", self.lines)
+        self.assertEqual([s["payload"]["max_tokens"] for s in net.to(TS_URL)], [1000, 1000])
+        self.assertEqual(self.spend["models"]["claude-sonnet-5 (Token Supply)"]["calls"], 2)   # both counted
+        self.assertTrue(MV.claude_was_tokensupply())
+
+    def test_three_in_a_row_two_at_once_then_the_normal_backoff(self):
+        net = self.net(ts=[tool(), tool("Sure."), tool(), ok('{"a": 1}')])
+        self.assertEqual(MV.claude("p", SONNET, 1000), '{"a": 1}')
+        self.assertEqual(len(net.to(TS_URL)), 4)
+        self.assertEqual(self.clock.now, 1012.0)                            # one 12-s wait, after the third
+        self.assertEqual(sum("asking again at once" in l for l in self.lines), 2)
+        self.assertTrue(any(l.startswith("tokensupply unavailable — retrying in 12s") and "Bash tool call" in l
+                            for l in self.lines), self.lines)
+        self.assertEqual({s["payload"]["max_tokens"] for s in net.to(TS_URL)}, {1000})   # never more room
+
+    def test_a_cut_off_tool_call_is_not_given_more_room(self):
+        evs = tool_events()
+        evs[-2] = sse({"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 9}})
+        net = self.net(ts=[lambda payload: response(200, b"".join(evs)), ok('{"a": 1}')])
+        self.assertEqual(MV.claude("p", SONNET, 1000), '{"a": 1}')
+        self.assertEqual([s["payload"]["max_tokens"] for s in net.to(TS_URL)], [1000, 1000])
+
+    def test_always_a_tool_call_its_window_then_anthropic_with_the_reason(self):
+        net = self.net(ts=[tool()], anthropic=[ok('{"a": 1}')])
+        self.assertEqual(MV.claude("p", SONNET, 1000), '{"a": 1}')
+        # the two at once, then today's 12+24+36+48+60+72 s of waits past TOKENSUPPLY_RETRY_SECONDS (240)
+        self.assertEqual(len(net.to(TS_URL)), 2 + 7)
+        self.assertEqual(len(net.to(AN_URL)), 1)
+        said = [l for l in self.lines if l.startswith("⚠ Token Supply could not answer")]
+        self.assertEqual(len(said), 1, self.lines)
+        self.assertIn("answered with a Bash tool call, not text", said[0])
+
+    def test_the_same_stream_on_anthropic_is_read_as_before(self):
+        self.assertEqual(MV._read_sse_text(response(200, b"".join(tool_events("Here is the JSON:")))),
+                         "Here is the JSON:")
+        self.assertEqual(MV._read_sse_text(response(200, b"".join(tool_events()))), "")
+        net = self.net(anthropic=[tool(), ok('{"a": 1}')])
+        self.assertEqual(MV._claude_try("anthropic", SONNET, "p", 1000, 600), '{"a": 1}')
+        self.assertEqual(self.clock.now, 1012.0)                            # today's backoff, no at-once re-ask
+        self.assertFalse([l for l in self.lines if "tool call" in l])
+        self.assertTrue(any("no text in stream" in l for l in self.lines), self.lines)
+        self.assertEqual(len(net.to(AN_URL)), 2)
+
+
 class Pin(Engine):
     def spy(self):
         seen = []

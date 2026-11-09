@@ -138,7 +138,10 @@ TOKENSUPPLY_SYSTEM = (
     "user's message asks for and nothing else: no greeting, no notes or thinking out loud, no remarks about yourself, "
     "your name or your instructions, no second attempt after the first. Work through the whole input to its very end; "
     "never stop early or leave the last part out. If the message asks for JSON, the reply begins with '{' and ends "
-    "with '}'.")
+    "with '}'."
+    # measured 2026-10-26: a mid-sized JSON request was answered as a call to the coding tool's Bash tool (echo of the
+    # JSON, no text; tool_choice "none" was ignored); with this sentence it answered in text 2 of 2 (owner 2026-11-09)
+    " Never use any tool, command or function: write the whole answer directly as plain text in your reply.")
 # this run: calls Token Supply answered, calls Anthropic answered in its place, why it was switched off ("" while on)
 # and the first few reasons it could not answer; "handed", the steps Mr Truth's planner gave to Anthropic because
 # Token Supply's answers to them could not be used (tokensupply_handed)
@@ -1279,7 +1282,10 @@ def tokensupply_handed(why: str) -> None:
             f"to Anthropic")
 
 
-_CLAUDE_LAST = threading.local()     # how this thread's last streamed answer ended: Anthropic's stop_reason
+_CLAUDE_LAST = threading.local()     # how this thread's last streamed answer ended: Anthropic's stop_reason, and
+                                     # the name of the first tool it called instead of writing text ("tool", owner
+                                     # 2026-11-09; "" for none, TOOL_UNNAMED for a call without a name)
+TOOL_UNNAMED = "(unnamed)"
 
 
 def claude_cut_off() -> bool:
@@ -1308,6 +1314,10 @@ def _read_sse_text(resp, begun: threading.Event = None, tokensupply: bool = Fals
     out = []
     model, usage = "", {}
     _CLAUDE_LAST.stop = ""
+    # an answer that calls a tool instead of writing text (Token Supply's coding tool, measured 2026-10-26: ONE
+    # tool_use block "Bash" with the JSON inside an echo command, stop_reason "tool_use"). Its first tool's name is
+    # kept; its input is never parsed or run (owner 2026-11-09)
+    _CLAUDE_LAST.tool = ""
     # A server-sent event stream is UTF-8 by definition. Anthropic says so in its Content-Type; Token Supply names no
     # charset, and requests then reads the bytes as Latin-1: "—" arrived as "â€”" and "é" as "Ã©" (2026-10-14)
     resp.encoding = "utf-8"
@@ -1327,6 +1337,9 @@ def _read_sse_text(resp, begun: threading.Event = None, tokensupply: bool = Fals
         t = ev.get("type")
         if t in ("content_block_start", "content_block_delta") and begun is not None:
             begun.set()
+        if t == "content_block_start" and (ev.get("content_block") or {}).get("type") in ("tool_use", "server_tool_use") \
+                and not _CLAUDE_LAST.tool:
+            _CLAUDE_LAST.tool = str((ev.get("content_block") or {}).get("name") or "") or TOOL_UNNAMED
         if t == "content_block_delta":
             d = ev.get("delta") or {}
             if d.get("type") == "text_delta":
@@ -1345,6 +1358,10 @@ def _read_sse_text(resp, begun: threading.Event = None, tokensupply: bool = Fals
             raise _ClaudeStreamError(f"stream error: {str(ev.get('error'))[:150]}")
     if model or usage:
         _count_usage((model or "unknown") + (TOKENSUPPLY_TAG if tokensupply else ""), usage)
+    if _CLAUDE_LAST.stop == "tool_use" and not _CLAUDE_LAST.tool:
+        _CLAUDE_LAST.tool = TOOL_UNNAMED
+    if tokensupply and _CLAUDE_LAST.tool:
+        return ""                    # Token Supply's tool call is no answer: text before it was only a preamble
     return "".join(out).strip()
 
 
@@ -1676,6 +1693,7 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
     deadline = start + budget_s
     attempt = 0
     last = ""
+    tool_asks = 0                   # Token Supply's answers that called a tool, asked again at once (at most 2)
     while True:
         attempt += 1
         try:
@@ -1686,12 +1704,24 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
                         else _read_sse_text(resp, begun))
                 if text:
                     return text
-                last = "no text in stream"
+                tool = getattr(_CLAUDE_LAST, "tool", "") if provider == "tokensupply" else ""
+                if tool:
+                    # Token Supply answered with a tool call, not text (owner 2026-11-09, measured 2026-10-26): asked
+                    # again at once, twice at most and only inside its window, then the normal backoff; never given
+                    # more room (it did not run out of any)
+                    last = (f"answered with a {tool} tool call, not text" if tool != TOOL_UNNAMED
+                            else "answered with a tool call, not text")
+                    if tool_asks < 2 and time.time() < deadline:
+                        tool_asks += 1
+                        log(f"tokensupply {last} — asking again at once")
+                        continue
+                else:
+                    last = "no text in stream"
                 # It thought through all of max_tokens and wrote nothing (a model that
                 # will not stop thinking): the same request would only do it again, so
                 # it goes again at once with half as much room again, up to the model's
                 # limit; from there it is retried as any other empty answer.
-                if _CLAUDE_LAST.stop == "max_tokens" and payload["max_tokens"] < claude_max_out(model):
+                if not tool and _CLAUDE_LAST.stop == "max_tokens" and payload["max_tokens"] < claude_max_out(model):
                     payload["max_tokens"] = min(int(payload["max_tokens"] * 1.5), claude_max_out(model))
                     log(f"{model} thought through all of max_tokens and wrote nothing — asking again with room "
                         f"for {payload['max_tokens']}")
@@ -1714,7 +1744,7 @@ def _claude_try(provider: str, model: str, prompt: str, max_tokens: int, budget_
             last = str(e)[:150]
         if time.time() >= deadline:
             raise _ClaudeError(f"{provider} po {int(time.time()-start)}s: {last}")
-        wait = min(90, 12 * attempt)
+        wait = min(90, 12 * (attempt - tool_asks))      # the at-once re-asks do not lengthen the backoff
         log(f"{provider} unavailable — retrying in {wait}s (elapsed {int(time.time()-start)}s) — {last[:80]}")
         time.sleep(wait)
 
