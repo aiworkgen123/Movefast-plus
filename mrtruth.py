@@ -7110,7 +7110,7 @@ def _hl_pin(rows: list, x: dict, heard: list) -> int:
     ends and crowded out the page placed after it). The opening, a chapter, or words said nowhere near: its cut."""
     if heard is None or x is rows[0] or x.get("section_turn"):
         return x["startMs"]
-    at = _said_at(x, heard, x["startMs"] - 12000, x["endMs"] + 12000, (x["startMs"], x["endMs"]))
+    at = _said_at(x, heard, x["startMs"] - 12000, x["endMs"] + 12000, (x["startMs"], x["endMs"]), rank_own=False)
     return x["startMs"] if at is None else max(0, at - _lead_ms(x))
 
 
@@ -8137,6 +8137,12 @@ def _md_report(rows: list, heard: list) -> dict:
 SYNC_LEAD_MS = 150          # the overlay starts this much before its first word is heard
 SYNC_TOLERANCE_MS = 400     # closer than this is left alone
 SYNC_MIN_SHOT_MS = 1000     # no shot is squeezed below this when its neighbours are retimed
+SYNC_DRIFT_MS = 1000        # quick cuts stay on their words (owner 2026-10-26: "the fast shots ... don't match the vo"):
+                            # an overlay pinned on its own line rather than a stray earlier word runs past that line by
+                            # no more than this unless the stray word is nearer (_spoken_at), and in a burst of quick
+                            # shots a plain one opening further than this from its own line folds into the one before
+DRIFT_OPEN_MS = 30000       # ... never in the first 30 s (the owner's 7-8 shots there), and a host that opens there
+DRIFT_OPEN_HOST_MS = 6000   # takes a fold only while it stays within 6 s (his one long opening shot)
 SPOT_HEAD_MIN_MS = 1500     # the rest of a shot before a map or a date shorter than this goes to the shot before it
                             # when that one stays within its cap (review 2026-10-12: 1.09 s and 1.34 s flashes)
 SPOT_MOVE_AFTER_MS = 6000   # a block of words a spot displaced that no shot near it says moves to the first free shot
@@ -8145,6 +8151,17 @@ SPOT_MOVE_LATE_MS = 8000 + SPOT_MOVE_AFTER_MS + SYNC_LEAD_MS   # how late after 
                             # map's 8 s and the room after it): the gate's words rule notes it instead of moving it
 _SYNC_STOP = JOINING | {"his", "her", "its", "was", "were", "is", "are", "be", "been", "had", "has", "have", "that", "this",
                         "it", "he", "she", "they", "them", "not", "but", "or", "as", "so", "what", "which", "who", "one"}
+
+
+def _fix_on(name: str, default: bool = True) -> bool:
+    """A switch of the quick-cut fixes (owner 2026-10-26: quick cuts stay on their words), read when it is used:
+    MRTRUTH_<name> = off/0/false/no turns one that is on by default off; on/1/true/yes turns one that is off by default
+    on (FILLER_FITS). PIN_OWN, HEARD_OWN, SYNC_DRIFT and GATE_DRIFT are on; with all of them off a film is cut exactly
+    as before."""
+    v = os.environ.get(f"MRTRUTH_{name}", "").strip().lower()
+    if not v:
+        return default
+    return v not in ("off", "0", "false", "no") if default else v in ("on", "1", "true", "yes")
 
 
 def _overlay_words(r: dict) -> list:
@@ -8191,22 +8208,36 @@ def _heard_same(h: str, w: str) -> bool:
     return a is not None and a == _num(w) and ordinal(h) == ordinal(w)
 
 
-def _spoken_at(words: list, heard: list, lo: int, hi: int, same=None):
+def _spoken_at(words: list, heard: list, lo: int, hi: int, same=None, own: tuple = None, fit: int = None):
     """The ms where the overlay's words are heard as a group inside [lo, hi], or None. A label of one or two words
     needs one of them; a longer one needs two of its words within six seconds. Words match by stem (`same`: the words
-    of a wording repair by _heard_same)."""
+    of a wording repair by _heard_same). The most words found wins, then the earliest - or, given `own` (the shot's own
+    line, owner 2026-10-26: a stray earlier "pages" in "Five pages" pulled "First page" and the quick shots after it
+    seconds early), a group that starts inside that line (from SYNC_TOLERANCE_MS before it) before the earliest; but
+    not one the overlay would run on from past the line's end (`fit`: how long it runs from its first word) by more
+    than SYNC_DRIFT_MS and by more than the earliest comes before the line: the lesser miss wins."""
     if not words:
         return None
     want, same = set(words), same or _stem_same
     which = lambda h: next((w for w in want if same(h, w)), None)
     hits = [(ms, which(h)) for ms, h in heard if lo <= ms <= hi and h and which(h)]
     need = 1 if len(want) <= 2 else 2          # a two-word label is placed by its one distinctive word
-    best = None
+    best, groups = None, []
     for k, (ms, _) in enumerate(hits):
         got = {w for m2, w in hits[k:] if m2 - ms <= 6000}
         if len(got) >= need and (best is None or len(got) > best[1]):
             best = (ms, len(got))
-    return best[0] if best else None
+        if len(got) >= need:
+            groups.append((ms, len(got)))
+    if best is None or own is None:
+        return best[0] if best else None
+    at = next((ms for ms, n in groups if n == best[1] and own[0] - SYNC_TOLERANCE_MS <= ms < own[1]), None)
+    if at is None or at == best[0]:
+        return best[0]
+    late = at + (fit or 0) - own[1]
+    if fit is not None and late > SYNC_DRIFT_MS and late > own[0] - best[0]:
+        return best[0]
+    return at
 
 
 SYNC_MAX_LATE_MS = 350      # an overlay crowded by the one before may start this much after its word, no more (was
@@ -8232,9 +8263,17 @@ def _need_ms(r: dict) -> int:
     return int(1000 * _need_s(tid)) if tid in LIBRARY else SYNC_MIN_SHOT_MS
 
 
-def _said_at(r: dict, heard: list, lo: int, hi: int, own: tuple = None):
+def _own_fit(r: dict) -> int:
+    """How long an overlay runs on from its first word: what its shot needs, less the lead before the word."""
+    return max(0, _need_ms(r) - _lead_ms(r))
+
+
+def _said_at(r: dict, heard: list, lo: int, hi: int, own: tuple = None, rank_own: bool = True, pin_old: bool = None):
     """When an overlay's words are heard inside [lo, hi]: a page's main phrase word by word (_hl_said_at), inside its
-    own line first (`own`: a short phrase may be said again nearby), any other overlay's words as a group (_spoken_at)."""
+    own line first (`own`: a short phrase may be said again nearby), any other overlay's words as a group (_spoken_at),
+    a group on its own line before an earlier stray one (owner 2026-10-26, MRTRUTH_PIN_OWN) - but where a highlighted
+    page is placed (rank_own False: _hl_pin) and for the overlays a page is laid out from (row["_pin_old"], or
+    `pin_old` given) as before: the owner's pages never change."""
     dev = r.get("device") or {}
     if dev.get("id") == "highlight-page" and not r.get("typedCaption"):
         at = _hl_said_at(dev, heard, own[0] - SYNC_TOLERANCE_MS, own[1]) if own else None
@@ -8244,7 +8283,10 @@ def _said_at(r: dict, heard: list, lo: int, hi: int, own: tuple = None):
         return int(sp["ms"])                         # a map or a date: the very word places_and_dates heard it on
     if r.get("_md_moved") is not None and (dev or r.get("typedCaption")) and lo <= r["startMs"] + _lead_ms(r) <= hi:
         return r["startMs"] + _lead_ms(r)            # moved after a spot that says its words: its own shot's start
-    return _spoken_at(_overlay_words(r), heard, lo, hi, _heard_same if r.get("_worded") else None)
+    same = _heard_same if r.get("_worded") else None
+    if own is not None and rank_own and not (r.get("_pin_old") if pin_old is None else pin_old) and _fix_on("PIN_OWN"):
+        return _spoken_at(_overlay_words(r), heard, lo, hi, same, own=own, fit=_own_fit(r))
+    return _spoken_at(_overlay_words(r), heard, lo, hi, same)
 
 
 def _lead_ms(r: dict) -> int:
@@ -8418,6 +8460,20 @@ def _reseat(engine, rows: list, heard: list, tid, sentences: set) -> int:
     return moved
 
 
+class _LogHeld:
+    """The engine, its log lines held back (sync_overlays lays a stretch out again when a page's crowd grows: only the
+    pass that stands is logged)."""
+
+    def __init__(self, engine):
+        self._engine, self.lines = engine, []
+
+    def log(self, line):
+        self.lines.append(line)
+
+    def __getattr__(self, name):
+        return getattr(self._engine, name)
+
+
 def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
     """Every text overlay and typed caption starts when its words are heard (SYNC_LEAD_MS before), however the planner
     seated it, and the film is re-cut around them within the owner's limits (2026-10-10: no shot over SCENE_MAX_S,
@@ -8435,6 +8491,12 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
          moved, cuts snapped to subtitle starts, never past their caps). A plain shot that cannot keep
          SYNC_MIN_SHOT_MS goes. Time no shot may take (two overlays far apart with nothing between) stays on the shot
          before for now: cap_shots cuts it on the narration after the last sync.
+    Quick cuts stay on their words (owner 2026-10-26: four 1-second shots up to 4.3 s before their words): in step 2 an
+    overlay's words are looked for on its own line first (_said_at, MRTRUTH_PIN_OWN) - except the overlays a highlighted
+    page is laid out from (its crowd: _pin_old, decided once per template and words, so the page stays exactly as it
+    was); and in step 4 (MRTRUTH_SYNC_DRIFT) a burst of three or more shots under SHORT_S in which a plain one would
+    open more than SYNC_DRIFT_MS from its own line folds that one into the shot before it, its line heard under that
+    picture, and the stretch is laid out again (_drift_net).
     A second call changes nothing."""
     if not rows:
         return
@@ -8449,10 +8511,63 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
     for r in rows:                                   # the narration each shot was cut on, the same for every sync
         r.setdefault("_said", (r["startMs"], r["endMs"]))
     sentences, starts = _sentence_starts(cues), sorted({int(a) for a, b, t in cues})
-    seated = _reseat(engine, rows, heard, tid, set(sentences))
+    # the page's crowd (owner 2026-10-26, with PIN_OWN): the overlays whose words could reach a highlighted page's, or
+    # each other's in a chain to it, in crowding - by the old pin or the new, a late start or a later mention in their
+    # own line - and the chain after it keep their old pins; decided once per template and words (row["_pin_seen"]),
+    # looked at again after _reseat and after crowding drops until nothing new joins, within this first sync
+    pin_fix = _fix_on("PIN_OWN")
+    sig = lambda r: (tid(r), tuple(_overlay_words(r))) if tid(r) else None
+    decided = lambda r: r.get("_pin_seen") is not None and sig(r) is not None and tuple(r["_pin_seen"][1]) == sig(r)[1] \
+        and r["_pin_seen"][0] == sig(r)[0]
+    old = set()
+
+    def reach(r):                                    # (earliest start, latest end) its shot may take in crowding
+        t, (s0, e0) = tid(r), r["_said"]
+        if r is rows[0]:
+            return 0, _need_ms(r)
+        if t == "chapter-plate":
+            return s0 - CHAPTER_SHIFT_MS, s0 + CHAPTER_SHIFT_MS + _need_ms(r)
+        ats = [a for a in (_said_at(r, heard, s0 - 12000, e0 + 12000, (s0, e0), rank_own=False),
+                           _said_at(r, heard, s0 - 12000, e0 + 12000, (s0, e0), pin_old=False)) if a is not None]
+        if not ats:
+            return None
+        lead = _lead_ms(r)
+        return min(ats) - lead, max(max(ats) - lead + SYNC_MAX_LATE_MS, e0 - lead) + _need_ms(r)
+
+    def crowd(xs):                                   # the new signatures of a page's crowd among xs (film order)
+        groups, far = [], None
+        for r in xs:
+            span = reach(r)
+            if span is None:
+                continue
+            if groups and span[0] < far:
+                groups[-1].append(r)
+                far = max(far, span[1])
+            else:
+                groups.append([r])
+                far = span[1]
+        got = set()
+        for g, members in enumerate(groups):
+            if any(tid(r) == "highlight-page" for r in members):
+                got |= {sig(r) for r in members + (groups[g + 1] if g + 1 < len(groups) else []) if not decided(r)}
+        return got - old
+
+    def mark():
+        for r in rows:
+            if decided(r):
+                continue
+            if sig(r) in old:
+                r["_pin_old"] = True
+            else:
+                r.pop("_pin_old", None)
+
+    eng = _LogHeld(engine) if pin_fix else engine
+    if pin_fix:
+        snap = (rows[:], [(r, dict(r), dict(r["device"]) if isinstance(r.get("device"), dict) else None) for r in rows],
+                len(HL.get("dropped") or []), len(MD.get("dropped") or []), len(DEV_DROPS))
 
     def drop(r, why):
-        engine.log(f"      {tid(r)} at {r['startMs'] / 1000:.1f}s dropped: {why}")
+        eng.log(f"      {tid(r)} at {r['startMs'] / 1000:.1f}s dropped: {why}")
         if tid(r) == "highlight-page":
             HL.setdefault("dropped", []).append({"at_s": round(r["startMs"] / 1000, 1), "main": _hl_phrase(r["device"]),
                                                  "why": f"sync: {why}"})
@@ -8462,133 +8577,187 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
             r.pop(key, None)
         r["device"] = None
 
-    anchors = []                                     # [row, the ms its shot is pinned to]
-    for k, r in enumerate(rows):
-        if not tid(r):
-            continue
-        r["_seated"] = True                          # re-seated (or not) by the first sync that sees it, never again
-        s0, e0 = r["_said"]
-        if k == 0:
-            anchors.append([r, 0])
-        elif tid(r) == "chapter-plate":              # its sentence start, never its heading's words
-            near = [s for s in sentences if abs(s - s0) <= CHAPTER_SNAP_MS]
-            j = None if near else _chapter_back(rows, k, set(sentences))
-            if j is not None:                        # none that close (its shot opens mid-sentence, review 2026-10-11):
-                _chapter_to(rows, k, j)              # it steps back onto the shot its sentence opens on, else to a
-                r = rows[j]                          # sentence start later inside its own line, else onto the next
-                anchors.append([r, r["_said"][0]])   # shot when that one opens the next sentence (seated there when
-                continue                             # the loop reaches it), all within CHAPTER_SHIFT_MS
-            near = near or [s for s in sentences if s0 < s <= min(s0 + CHAPTER_SHIFT_MS, e0 - _need_ms(r))]
-            j = None if near else _chapter_fwd(rows, k, set(sentences))
-            if j is not None:
-                _chapter_to(rows, k, j)
+    for attempt in range(len(rows) + 2):             # each new attempt follows a grown crowd (old only grows)
+        if attempt:                                  # everything back as it came in, the crowd kept
+            order, saved, n_hl, n_md, n_dd = snap
+            rows[:] = order
+            for r, was, dev in saved:
+                r.clear()
+                r.update(was)
+                if dev is not None:
+                    r["device"] = dict(dev)
+            del HL.setdefault("dropped", [])[n_hl:]
+            del MD.setdefault("dropped", [])[n_md:]
+            del DEV_DROPS[n_dd:]
+            eng.lines.clear()
+        if pin_fix:
+            old |= crowd([r for r in rows if tid(r)])
+            mark()
+        seated = _reseat(eng, rows, heard, tid, set(sentences))
+        if pin_fix:
+            got = crowd([r for r in rows if tid(r)])
+            if got:
+                old |= got
                 continue
-            anchors.append([r, min(near, key=lambda s: (abs(s - s0), s)) if near else s0])
-        else:
-            at = _said_at(r, heard, s0 - 12000, e0 + 12000, (s0, e0))
-            if at is None:     # words the narrator does not say anywhere near: never on screen out of step with the voice
-                drop(r, "its words are not said near it")
+            mark()
+        anchors = []                                 # [row, the ms its shot is pinned to]
+        for k, r in enumerate(rows):
+            if not tid(r):
                 continue
-            anchors.append([r, max(0, at - _lead_ms(r))])        # a page: its main phrase highlighted as it is said
-    chapters = sum(1 for r, _ in anchors if tid(r) == "chapter-plate")
-    kept, late, again, shifted = [], 0, 0, 0
-    for r, t in anchors:                             # crowding, in film order; a pair is settled the same way each time
-        t0 = t
-        while r is not None and kept:
-            p, pt = kept[-1]
-            free = pt + _need_ms(p)
-            if t >= free:
-                break
-            chap = tid(r) == "chapter-plate"
-            if not chap and free - t0 <= SYNC_MAX_LATE_MS:            # a little late beats not at all
-                t, late = free, late + 1
-                break
-            if not chap:                                              # its words again, later in its own line
-                at = _said_at(r, heard, free + _lead_ms(r), max(r["_said"][1], free + _lead_ms(r)))
-                if at is not None:
-                    t, again = at - _lead_ms(r), again + 1
-                    break
-            if r.get("typedCaption") and tid(p) == "chapter-plate":  # the chapter steps back onto the shot of
-                k = next(j for j, x in enumerate(rows) if x is p)       # an earlier sentence
-                j = _chapter_back(rows, k, set(sentences), t)
-                lo = kept[-2][1] + _need_ms(kept[-2][0]) if len(kept) > 1 else 0
-                if j is not None and rows[j]["_said"][0] >= lo:
+            r["_seated"] = True                      # re-seated (or not) by the first sync that sees it, never again
+            s0, e0 = r["_said"]
+            if k == 0:
+                anchors.append([r, 0])
+            elif tid(r) == "chapter-plate":          # its sentence start, never its heading's words
+                near = [s for s in sentences if abs(s - s0) <= CHAPTER_SNAP_MS]
+                j = None if near else _chapter_back(rows, k, set(sentences))
+                if j is not None:                    # none that close (its shot opens mid-sentence, review 2026-10-11):
+                    _chapter_to(rows, k, j)          # it steps back onto the shot its sentence opens on, else to a
+                    r = rows[j]                      # sentence start later inside its own line, else onto the next
+                    anchors.append([r, r["_said"][0]])   # shot when that one opens the next sentence (seated there
+                    continue                         # when the loop reaches it), all within CHAPTER_SHIFT_MS
+                near = near or [s for s in sentences if s0 < s <= min(s0 + CHAPTER_SHIFT_MS, e0 - _need_ms(r))]
+                j = None if near else _chapter_fwd(rows, k, set(sentences))
+                if j is not None:
                     _chapter_to(rows, k, j)
-                    kept[-1], shifted = [rows[j], rows[j]["_said"][0]], shifted + 1
-                    break
-            if chap and p.get("typedCaption"):                       # ... or a sentence later, inside its own line
-                s = min((s for s in sentences if free <= s <= min(t0 + CHAPTER_SHIFT_MS, r["_said"][1] - _need_ms(r))),
-                        default=None)
-                if s is not None:
-                    t, shifted = s, shifted + 1
-                    break
-            loser = r if rank(r) <= rank(p) else p
-            other = p if loser is r else r
-            if loser.get("typedCaption") and tid(other) == "chapter-plate" and chapters > CHAPTERS_MIN:
-                loser, other = other, loser                           # a caption outlives a chapter the film can spare
-            if tid(loser) == "chapter-plate":
-                chapters -= 1
-            drop(loser, f"its words come too close to the {tid(other)}'s at {other['startMs'] / 1000:.1f}s")
-            if loser is r:
-                r = None
+                    continue
+                anchors.append([r, min(near, key=lambda s: (abs(s - s0), s)) if near else s0])
             else:
-                kept.pop()                                            # r meets the one before it, by the same rules
-        if r is not None:
-            kept.append([r, t])
+                at = _said_at(r, heard, s0 - 12000, e0 + 12000, (s0, e0))
+                if at is None:  # words the narrator does not say anywhere near: never on screen out of step with the voice
+                    drop(r, "its words are not said near it")
+                    continue
+                anchors.append([r, max(0, at - _lead_ms(r))])    # a page: its main phrase highlighted as it is said
+        chapters = sum(1 for r, _ in anchors if tid(r) == "chapter-plate")
+        kept, late, again, shifted = [], 0, 0, 0
+        for r, t in anchors:                         # crowding, in film order; a pair is settled the same way each time
+            t0 = t
+            while r is not None and kept:
+                p, pt = kept[-1]
+                free = pt + _need_ms(p)
+                if t >= free:
+                    break
+                chap = tid(r) == "chapter-plate"
+                if not chap and free - t0 <= SYNC_MAX_LATE_MS:            # a little late beats not at all
+                    t, late = free, late + 1
+                    break
+                if not chap:                                              # its words again, later in its own line
+                    at = _said_at(r, heard, free + _lead_ms(r), max(r["_said"][1], free + _lead_ms(r)))
+                    if at is not None:
+                        t, again = at - _lead_ms(r), again + 1
+                        break
+                if r.get("typedCaption") and tid(p) == "chapter-plate":  # the chapter steps back onto the shot of
+                    k = next(j for j, x in enumerate(rows) if x is p)       # an earlier sentence
+                    j = _chapter_back(rows, k, set(sentences), t)
+                    lo = kept[-2][1] + _need_ms(kept[-2][0]) if len(kept) > 1 else 0
+                    if j is not None and rows[j]["_said"][0] >= lo:
+                        _chapter_to(rows, k, j)
+                        kept[-1], shifted = [rows[j], rows[j]["_said"][0]], shifted + 1
+                        break
+                if chap and p.get("typedCaption"):                       # ... or a sentence later, inside its own line
+                    s = min((s for s in sentences if free <= s <= min(t0 + CHAPTER_SHIFT_MS, r["_said"][1] - _need_ms(r))),
+                            default=None)
+                    if s is not None:
+                        t, shifted = s, shifted + 1
+                        break
+                loser = r if rank(r) <= rank(p) else p
+                other = p if loser is r else r
+                if loser.get("typedCaption") and tid(other) == "chapter-plate" and chapters > CHAPTERS_MIN:
+                    loser, other = other, loser                           # a caption outlives a chapter the film can spare
+                if tid(loser) == "chapter-plate":
+                    chapters -= 1
+                drop(loser, f"its words come too close to the {tid(other)}'s at {other['startMs'] / 1000:.1f}s")
+                if loser is r:
+                    r = None
+                else:
+                    kept.pop()                                            # r meets the one before it, by the same rules
+            if r is not None:
+                kept.append([r, t])
+        if pin_fix:
+            got = crowd([r for r, _ in kept])
+            if got:
+                old |= got
+                continue
+        break
+    if pin_fix:
+        for line in eng.lines:
+            engine.log(line)
+        mark()                                       # (a chapter that stepped took its row's mark along)
+        for r in rows:                               # what was decided, for every later sync (the gate's re-cuts)
+            if decided(r):
+                continue
+            if sig(r) is None:
+                r.pop("_pin_seen", None)
+                r.pop("_pin_old", None)
+            else:
+                r["_pin_seen"] = [sig(r)[0], list(sig(r)[1])]
     if not kept:
         return
     # the layout: [plain shots] overlay [plain shots] overlay ... [plain shots]
     pos = {id(r): k for k, r in enumerate(rows)}
-    out, prev, prev_k, cursor, folded, pre_n = [], None, -1, 0, 0, 0
+    out, prev, prev_k, cursor, folded, pre_n, drifted = [], None, -1, 0, 0, 0, 0
     marks = kept + [[None, total]]
+    drift = _fix_on("SYNC_DRIFT")
+    line_end = (lambda x: max(x["_said"][1], x.get("_run_to") or 0)) if drift else (lambda x: x["_said"][1])
     for i, (r, t) in enumerate(marks):
         k = pos[id(r)] if r is not None else len(rows)
         plain = [x for x in rows[prev_k + 1:k] if not tid(x)]
         n0 = len(plain)
-        floors = lambda: sum(floor(x) for x in plain)
-        shortest = lambda: min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"], x["startMs"]))
-        keep = 0
-        if prev is not None:                         # 1. the overlay shot before: to the end of its own line, within
-            s_a = prev["startMs"]                    #    [its lead-in and animation, its cap]
-            keep = prev["_pin"] - s_a + _need_ms(prev)
-            while plain and t - s_a - keep < floors():
-                plain.remove(shortest())
-            nat = max(keep, min(_cap_ms(prev), prev["_said"][1] - s_a, t - s_a - floors()))
-            cursor = s_a + min(nat, t - s_a)
-        else:
-            while plain and t - cursor < floors():
-                plain.remove(shortest())
-        folded += n0 - len(plain)
-        pre, room = 0, 0                             # 2. a caption whose word comes later in its own line keeps the
-        if r is not None and r.get("typedCaption"):  #    line's cut and types in on the word (a pre-roll), never
-            (nr, nt), until = marks[i + 1], r["_said"][1]   # shortening the plain shots below their own lines, never
-            after = [x for x in rows[k + 1:pos[id(nr)] if nr is not None else len(rows)] if not tid(x)]
-            while after and nt - t - _need_ms(r) < sum(floor(x) for x in after):   # (the shots the next stretch
-                after.remove(min(after, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"], x["startMs"])))
-            if not after:                            #     keeps) past its cap when it must run on to the next overlay
-                until = max(until, nt)
-            room = _cap_ms(r) - min(_cap_ms(r), max(_need_ms(r), until - t))
-            had = sum(x["_said"][1] - x["_said"][0] for x in plain)
-            pre = max(0, min(t - max(r["_said"][0], cursor), room, t - cursor - max(had, floors())))
-        over = (t - pre - cursor) - sum(_cap_ms(x) for x in plain)
-        if over > 0 and prev is not None:            # 3. more time than the shots between may take: the overlay shot
-            ext = max(0, min(over, _cap_ms(prev) - (cursor - prev["startMs"])))   # before runs on to its cap ...
-            cursor, over = cursor + ext, over - ext
-        if over > 0 and r is not None and r.get("typedCaption"):                  # ... the caption's opens earlier
-            more = max(0, min(over, room - pre, t - cursor - floors() - pre))
-            pre, over = pre + more, over - more
-        if r is not None and not out and not plain:  # the film opens on this overlay's shot
-            pre = t
-        if plain and prev is not None and over <= 0:  # the overlay shot ends on a subtitle start too, where one is near
-            lo, hi = prev["startMs"] + keep, prev["startMs"] + _cap_ms(prev)
-            near = [s for s in starts if abs(s - cursor) <= SYNC_SNAP_MS and lo <= s <= hi
-                    and floors() <= t - pre - s <= sum(_cap_ms(x) for x in plain)]
-            if near:
-                cursor = min(near, key=lambda s: (abs(s - cursor), s))
-        if plain:                                    # 4. the plain shots between
+
+        def stretch(plain, cursor):                  # the stretch up to r laid out: nothing changed until it stands
+            plain = list(plain)
+            floors = lambda: sum(floor(x) for x in plain)
+            shortest = lambda: min(plain, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"], x["startMs"]))
+            keep = 0
+            if prev is not None:                     # 1. the overlay shot before: to the end of its own line, within
+                s_a = prev["startMs"]                #    [its lead-in and animation, its cap]
+                keep = prev["_pin"] - s_a + _need_ms(prev)
+                while plain and t - s_a - keep < floors():
+                    plain.remove(shortest())
+                nat = max(keep, min(_cap_ms(prev), line_end(prev) - s_a, t - s_a - floors()))
+                cursor = s_a + min(nat, t - s_a)
+            else:
+                while plain and t - cursor < floors():
+                    plain.remove(shortest())
+            pre, room = 0, 0                         # 2. a caption whose word comes later in its own line keeps the
+            if r is not None and r.get("typedCaption"):  # line's cut and types in on the word (a pre-roll), never
+                (nr, nt), until = marks[i + 1], r["_said"][1]   # shortening the plain shots below their own lines,
+                after = [x for x in rows[k + 1:pos[id(nr)] if nr is not None else len(rows)] if not tid(x)]
+                while after and nt - t - _need_ms(r) < sum(floor(x) for x in after):   # never (the shots the next
+                    after.remove(min(after, key=lambda x: (bool(dev_id(x)), x["endMs"] - x["startMs"], x["startMs"])))
+                if not after:                        #     stretch keeps) past its cap when it must run on to the next
+                    until = max(until, nt)           #     overlay
+                room = _cap_ms(r) - min(_cap_ms(r), max(_need_ms(r), until - t))
+                had = sum(line_end(x) - x["_said"][0] for x in plain)
+                pre = max(0, min(t - max(r["_said"][0], cursor), room, t - cursor - max(had, floors())))
+            over = (t - pre - cursor) - sum(_cap_ms(x) for x in plain)
+            if over > 0 and prev is not None:        # 3. more time than the shots between may take: the overlay shot
+                ext = max(0, min(over, _cap_ms(prev) - (cursor - prev["startMs"])))   # before runs on to its cap ...
+                cursor, over = cursor + ext, over - ext
+            if over > 0 and r is not None and r.get("typedCaption"):                  # ... the caption's opens earlier
+                more = max(0, min(over, room - pre, t - cursor - floors() - pre))
+                pre, over = pre + more, over - more
+            if r is not None and not out and not plain:  # the film opens on this overlay's shot
+                pre = t
+            if plain and prev is not None and over <= 0:  # the overlay shot ends on a subtitle start too, where one
+                lo, hi = prev["startMs"] + keep, prev["startMs"] + _cap_ms(prev)   # is near
+                near = [s for s in starts if abs(s - cursor) <= SYNC_SNAP_MS and lo <= s <= hi
+                        and floors() <= t - pre - s <= sum(_cap_ms(x) for x in plain)]
+                if near:
+                    cursor = min(near, key=lambda s: (abs(s - cursor), s))
+            lay = list(zip(plain, _lay(plain, int(cursor), int(t - pre), floor, starts))) if plain else []
+            return {"plain": plain, "cursor": cursor, "pre": pre, "lay": lay}
+
+        res, nf = stretch(plain, cursor), 0
+        if drift and res["plain"] and prev is not None and dev_id(prev) != "highlight-page":
+            res, nf = _drift_net(prev, plain, res, lambda p: stretch(p, cursor), dev_id, line_end, t)
+        cursor, pre = res["cursor"], res["pre"]
+        folded += n0 - nf - len(res["plain"])
+        drifted += nf
+        if res["plain"]:                             # 4. the plain shots between
             if prev is not None:
                 prev["endMs"] = int(cursor)
-            for x, (a, b) in zip(plain, _lay(plain, int(cursor), int(t - pre), floor, starts)):
+            for x, (a, b) in res["lay"]:
                 x["startMs"], x["endMs"] = a, b
                 out.append(x)
         elif out:                                    # nothing between: the shot before runs on to the next word
@@ -8610,7 +8779,75 @@ def sync_overlays(engine, job: Path, rows: list, cues: list) -> None:
                + (f", {pre_n} captions typing in on their word inside their own shot" if pre_n else "")
                + (f", {late} a little late, {again} on a later mention" if late or again else "")
                + (f", {shifted} chapters moved a sentence to make room" if shifted else "")
-               + f"), {folded} plain shots folded away")
+               + f"), {folded} plain shots folded away"
+               + (f", {drifted} quick shot(s) off their words folded into the shot before (heard under it)"
+                  if drifted else ""))
+
+
+def _drift_net(prev: dict, plain: list, res: dict, relay, dev_id, line_end, t: int) -> tuple:
+    """The safety net of sync_overlays' layout (owner 2026-10-26, MRTRUTH_SYNC_DRIFT): in the stretch after overlay
+    shot `prev`, a run of three or more shots under SHORT_S (prev counts when it is under SHORT_S) in which a BARE plain
+    shot (no template, caption, chapter, beat overlay or hold) would open more than SYNC_DRIFT_MS from its own line's
+    start and outside that line (from SYNC_TOLERANCE_MS before its first word to its end; a shot opening late inside
+    its own line is on its words - 2026-11-09, the pass bar's measure, so every good run stays as it was): the worst such shot folds into the shot before it - its line heard under that picture (the host's line runs
+    on: row["_run_to"], its own row["_said"] stays as it was; the text joins its "held" lines, so a second sync lays
+    the same cut) - and the stretch is laid out again (`relay`). Never into a hold, never in the first DRIFT_OPEN_MS
+    (a host that opens there only while it stays within DRIFT_OPEN_HOST_MS), only into a host whose cap lets it run
+    to within SYNC_DRIFT_MS of the folded line's end (or the stretch's end). A fold that leaves any shot further off
+    its line than both it and the folded one were is undone, and that shot is never folded (row["_drift_keep"]). A
+    lone shot off its line outside a run stays (folding those dropped the quick share and the pace out of band).
+    Each round folds a shot or marks one: at most 2n+1 rounds. (the stretch laid out, how many folded)"""
+    folds = 0
+    for _ in range(2 * len(plain) + 1):
+        seq = [(prev, prev["startMs"], res["cursor"])] + [(y, a, b) for y, (a, b) in res["lay"]]
+        quick = [b - a < SHORT_S * 1000 for _, a, b in seq]
+        in_run, k0 = set(), 0
+        while k0 < len(seq):
+            k1 = k0
+            while k1 < len(seq) and quick[k1]:
+                k1 += 1
+            if k1 - k0 >= 3:
+                in_run.update(range(k0, k1))
+            k0 = max(k1, k0 + 1)
+        cands = []
+        for n, (y, a, b) in enumerate(seq):
+            if not n or n not in in_run or dev_id(y) or not _bare(y) or y.get("_drift_keep"):
+                continue
+            off = abs(a - y["_said"][0])
+            if y["_said"][0] - SYNC_TOLERANCE_MS <= a < line_end(y):
+                continue                             # opens inside its own line: on its words (2026-11-09)
+            if off <= SYNC_DRIFT_MS or min(a, y["_said"][0]) < DRIFT_OPEN_MS:
+                continue
+            host, ha, _ = seq[n - 1]
+            if host.get("hold") or host.get("_hold"):
+                continue
+            if ha < DRIFT_OPEN_MS and b - ha > DRIFT_OPEN_HOST_MS:
+                continue
+            if ha + _cap_ms(host) < min(line_end(y), int(t - res["pre"])) - SYNC_DRIFT_MS:
+                continue
+            cands.append((-off, n, y, host))
+        if not cands:
+            break
+        _, _, x, host = min(cands, key=lambda c: (c[0], c[1]))
+        before = {id(y): abs(a - y["_said"][0]) for y, (a, _) in res["lay"]}
+        had = {key: host[key] for key in ("_run_to", "held", "spare") if key in host}
+        j = plain.index(x)
+        plain.remove(x)
+        host["_run_to"] = max(line_end(host), line_end(x))
+        host["held"] = list(host.get("held") or []) + [x.get("text") or ""] + list(x.get("held") or [])
+        if x.get("pick") and not x["pick"].get("ai"):
+            host["spare"] = list(host.get("spare") or []) + [x["pick"]]
+        new = relay(plain)
+        after = {id(y): abs(a - y["_said"][0]) for y, (a, _) in new["lay"]}
+        if any(v > before.get(i, 0) and v > before[id(x)] for i, v in after.items()):
+            plain.insert(j, x)                       # it would only move the miss onto another shot: undone
+            for key in ("_run_to", "held", "spare"):
+                host.pop(key, None)
+            host.update(had)
+            x["_drift_keep"] = True
+            continue
+        res, folds = new, folds + 1
+    return res, folds
 
 
 def _merge(rows: list, k: int) -> None:
@@ -8629,6 +8866,8 @@ def _merge(rows: list, k: int) -> None:
             seen.add(c.get("photo"))
     m["spare"] = spare
     m["entities"] = list(dict.fromkeys(list(lead.get("entities") or []) + list(other.get("entities") or [])))
+    if a.get("_run_to") or b.get("_run_to"):         # a line the sync's net folded in still runs on under it, so a
+        m["_run_to"] = max(a.get("_run_to") or 0, b.get("_run_to") or 0)   # later sync lays the same cut
     rows[k] = m
 
 
@@ -9153,6 +9392,17 @@ def _gaps(rows: list, spots: bool = False) -> list:
     return [(a, b) for a, b in zip(marks, marks[1:]) if b - a > OVERLAY_MAX_GAP_S * 1000]
 
 
+def _filler_fits(r: dict, tid: str) -> bool:
+    """MRTRUTH_FILLER_FITS (built with the quick-cut fixes, owner 2026-10-26, but OFF unless set to on: its replay
+    changed 2 of 25 good quick runs and opened stretches of 30 s and more without words): a gap filler only on a shot
+    whose own line is about as long as its template needs (SYNC_TOLERANCE_MS short at most), so the sync never holds it
+    past its line and squeezes the short lines after it seconds late."""
+    if tid not in LIBRARY or not _fix_on("FILLER_FITS", default=False):
+        return True
+    s0, e0 = r.get("_said") or (r["startMs"], r["endMs"])
+    return e0 - s0 >= int(1000 * _need_s(tid)) - SYNC_TOLERANCE_MS
+
+
 def fill_gaps(engine, job: Path, rows: list, build, force: bool = False) -> set:
     """After sync_overlays: refill every stretch longer than OVERLAY_MAX_GAP_S with overlays the narration itself
     says there. Returns the rows that received one (for _fit_devices and a second sync)."""
@@ -9196,7 +9446,7 @@ def fill_gaps(engine, job: Path, rows: list, build, force: bool = False) -> set:
         if any(abs(x["startMs"] - r["startMs"]) < 8000 for x in rows if x.get("typedCaption")
                or (x.get("device") and _overlay_words(x) and not _spot(x))):     # a map or a date never stands in for
             continue                                                             # a filler (owner, ruling 4)
-        if not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid):
+        if not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid) or not _filler_fits(r, tid):
             continue
         dev = build(tid, o, k)
         if not dev:
@@ -10979,7 +11229,8 @@ def fill_gaps_plain(engine, rows: list, build, skip: set = None, gaps: list = No
                 if r.get("device") or any(id(x) in added and abs(x["startMs"] - r["startMs"]) < 8000 for x in rows):
                     continue
                 for tid, lim in _filler_order(rows):
-                    if (id(r), tid) in skip or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid):
+                    if (id(r), tid) in skip or not _can(rows, k, tid, ignore_len=True) or not _open_room(r, tid) \
+                            or not _filler_fits(r, tid):
                         continue
                     phrase = next((p for p in _spoken_phrases(r["text"], lim, *_context(rows, k), names)
                                    if (ok is None or ok(k, tid, p)) and not _repeats_words(rows, p, r["startMs"])), "")
@@ -11983,6 +12234,75 @@ def _texts(rows: list) -> list:
     return out
 
 
+def _own_line(rows: list, k: int) -> tuple:
+    """The narration shot k was cut on (row["_said"]); when cap_shots cut an overlay's line off (_split_long: the part
+    after it opens where the line now ends), the line runs on to the end of that part."""
+    r = rows[k]
+    s0, e0 = r.get("_said") or (r["startMs"], r["endMs"])
+    nxt = rows[k + 1] if k + 1 < len(rows) else None
+    if nxt is not None and nxt.get("split") and (nxt.get("_said") or (None,))[0] == e0 and nxt["startMs"] == r["endMs"]:
+        e0 = max(e0, nxt["_said"][1])
+    return s0, e0
+
+
+def _gate_own(rows: list, k: int, words: list, ctx: dict, on: int, same=None):
+    """Where the words rule reads the words of the text on shot k (owner 2026-10-26, MRTRUTH_GATE_DRIFT): on the shot's
+    own line (_own_line) when sync would pin them there (_spoken_at with own, as _said_at), the group nearest the text's
+    start; else None (then the nearest anywhere, _words_near, as before). Not on a shot a highlighted page is laid out
+    from (row["_pin_old"]), nor in a read-back (no row["_said"]: the plan keeps no cut lines): read as before."""
+    import bisect
+    r = rows[k]
+    if r.get("_pin_old") or not r.get("_said") or not _fix_on("PIN_OWN"):
+        return None
+    s0, e0 = _own_line(rows, k)
+    heard, ms = ctx["heard"], ctx["heard_ms"]
+    pin = _spoken_at(words, heard, s0 - 12000, e0 + 12000, same, own=(s0, e0), fit=_own_fit(r))
+    if pin is None or not s0 - SYNC_TOLERANCE_MS <= pin < e0:
+        return None
+    lo, hi = bisect.bisect_left(ms, s0 - SYNC_TOLERANCE_MS), bisect.bisect_left(ms, e0)
+    is_ = same or _stem_same
+    hits = sorted({m for m, h in heard[lo:hi] if h and any(is_(h, w) for w in words)})
+    starts = [m for m in hits if _spoken_at(words, heard, m, m + 6000, same) == m]
+    return min(starts, key=lambda m: (abs(m - SYNC_LEAD_MS - on), m), default=None)
+
+
+def _drift_runs(rows: list) -> list:
+    """The gate's look at quick cuts off their words (owner 2026-10-26, MRTRUTH_GATE_DRIFT): in each run of three to
+    SHORT_RUN_MAX shots under SHORT_S, the bare plain shot (_bare) opening furthest from its own line's start, when more
+    than SYNC_DRIFT_MS - never in the first DRIFT_OPEN_MS, never in the stretch after a highlighted page (up to the
+    next shot sync pins), as the sync's own net (_drift_net). A shot that opens inside its own line (_own_line, from
+    SYNC_TOLERANCE_MS before its first word to its end) is on its words and never counts, however late in the line
+    (2026-11-09: a plain shot 3.5 s into its line after a chapter plate was flagged and folded away, a good run the
+    sync had left alone). [(run start k, run length, shot k, ms off)]."""
+    after, j = set(), None
+    for k, r in enumerate(rows):
+        if (r.get("device") or {}).get("id") == "highlight-page":
+            j = k
+        elif j is not None and _hl_pinned(r):
+            j = None
+        elif j is not None:
+            after.add(k)
+    def off(k):
+        if not rows[k].get("_said"):
+            return 0
+        s0, e0 = _own_line(rows, k)
+        e0 = max(e0, rows[k].get("_run_to") or 0)    # a line the sync's net folded in runs on, as there (line_end)
+        return 0 if s0 - SYNC_TOLERANCE_MS <= rows[k]["startMs"] < e0 else abs(rows[k]["startMs"] - s0)
+    out, run = [], []
+    for k, r in enumerate(rows + [None]):
+        if r is not None and r["endMs"] - r["startMs"] < SHORT_S * 1000:
+            run.append(k)
+            continue
+        if 3 <= len(run) <= SHORT_RUN_MAX:
+            bad = [j for j in run if _bare(rows[j]) and not _covered(rows[j]) and j not in after and off(j) > SYNC_DRIFT_MS
+                   and min(rows[j]["startMs"], rows[j]["_said"][0]) >= DRIFT_OPEN_MS]
+            if bad:
+                w = max(bad, key=lambda j: (off(j), -j))
+                out.append((run[0], len(run), w, off(w)))
+        run = []
+    return out
+
+
 def _words_near(words: list, ctx: dict, on: int, span: int = 12000, same=None):
     """Where the group of `words` is heard nearest to `on` (+ the usual lead), within `span` ms; None when nowhere.
     `same`: as _spoken_at."""
@@ -12537,7 +12857,9 @@ def _gate_find(rows: list, ctx: dict) -> list:
                  _overlay_words({"typedCaption": rows[k]["typedCaption"]}) if kind == "caption" else sorted(_wordset(text)))
         if not words:
             continue
-        at = _words_near(words, ctx, on, same=_heard_same if rows[k].get("_worded") else None)
+        same = _heard_same if rows[k].get("_worded") else None
+        at = _gate_own(rows, k, words, ctx, on, same) if kind != "overlay" and _fix_on("GATE_DRIFT") else None
+        at = _words_near(words, ctx, on, same=same) if at is None else at
         if at is None:
             add("words", k, f"{name} '{text[:40]}': its words are not heard near it", kind=kind)
             continue
@@ -12671,6 +12993,15 @@ def _gate_find(rows: list, ctx: dict) -> list:
         if run > SHORT_RUN_MAX:
             add("quick run", k - run, f"{run} shots under {SHORT_S:.0f}s in a row", run=run)
         run = 0
+    if _fix_on("GATE_DRIFT"):                        # ... and a shorter run with a plain shot off its words (owner
+        sig = _pace_sig(rows)                        # 2026-10-26): soft - one no repair mends is a warning
+        for k0, n, k, off in _drift_runs(rows):
+            what = (f"{n} shots under {SHORT_S:.0f}s in a row, the one at {rows[k]['startMs'] / 1000:.1f}s "
+                    f"{off / 1000:.1f}s off its words")
+            if ctx.get("drift_soft", {}).get(id(rows[k])) == sig:
+                ctx["warnings"].append(f"quick run: {what} (no shot before it can take its line)")
+            else:
+                add("quick run", k, what, run=n, drift=True)
     avg = sum(d) / len(d)
     # the pace by position (owner 2026-10-11): each section within its band (PACE_TOL), the first 30 s at 7-8 shots
     # with at most one over 6 s. Pacing never stops a film: a break goes to the repairs (_gate_fix), and one no repair
@@ -13145,7 +13476,7 @@ def _try_text(rows: list, k: int, tid: str, f: str, n, c: str, ctx: dict, build,
         if not _spoken_in(c, win):
             return False
     words = _overlay_words({"device": new})
-    if words and not _heard_here(rows, k, words, _overlay_words(r), ctx):
+    if words and not _heard_here(rows, k, words, _overlay_words(r), ctx, new={"device": new}):
         return False
     r["device"] = None
     again = _repeats_words(rows, c, r["startMs"])
@@ -13168,7 +13499,7 @@ def _try_template(rows: list, k: int, tid: str, c: str, ctx: dict, build) -> boo
     if not new:
         return False
     words = _overlay_words({"device": new})
-    if words and not _heard_here(rows, k, words, [], ctx) or _repeats_words(rows, c, r["startMs"]) \
+    if words and not _heard_here(rows, k, words, [], ctx, new={"device": new}) or _repeats_words(rows, c, r["startMs"]) \
             or not _set_device(rows, k, new):
         return False
     r["_worded"] = True
@@ -13235,21 +13566,30 @@ def _held_near(rows: list, j: int) -> bool:
     return bool(rows[j].get("overlay")) or _by_held(rows, j)
 
 
-def _heard_here(rows: list, k: int, words: list, was: list, ctx: dict, on: int = None) -> bool:
+def _heard_here(rows: list, k: int, words: list, was: list, ctx: dict, on: int = None, new: dict = None) -> bool:
     """New words for the text on shot k (the wording repair's own: matched as row["_worded"] has them matched,
     _heard_same) are heard near it (_words_near: the re-sync keeps them), and where the re-sync pins them
     (sync_overlays: _spoken_at around the narration the shot was cut on) moves no page, map, date or year plate and
     covers no beat overlay: a shot none sits beside (_by_held) that is shot k or carries no beat overlay (review
     2026-10-13, round 4: a line moved next to an overlay's shot was seated on it by _reseat, and the overlay was never
-    drawn), or the very moment the words they replace (`was`) are pinned."""
+    drawn), or the very moment the words they replace (`was`) are pinned. The re-sync looks on the shot's own line
+    first (owner 2026-10-26, MRTRUTH_HEARD_OWN, as _said_at does; `new`: the template or caption the words go into,
+    for how long it runs on from them): new words it would still pin outside that line are refused (a one-word label
+    the repair wrote was pinned on a stray earlier mention, and the quick shots after it went seconds early) - but
+    never words said at the very moment of the old ones, nor on a shot a highlighted page is laid out from
+    (row["_pin_old"])."""
     if _words_near(words, ctx, rows[k]["startMs"] if on is None else on, same=_heard_same) is None:
         return False
     s0, e0 = rows[k].get("_said") or (rows[k]["startMs"], rows[k]["endMs"])
-    at = lambda ws, same: _spoken_at(ws, ctx["heard"], s0 - 12000, e0 + 12000, same)
+    own = (s0, e0) if _fix_on("HEARD_OWN") and _fix_on("PIN_OWN") and not rows[k].get("_pin_old") else None
+    fit = _own_fit(new) if own is not None and new else None
+    at = lambda ws, same: _spoken_at(ws, ctx["heard"], s0 - 12000, e0 + 12000, same, own=own, fit=fit)
     t = at(words, _heard_same)
     j = next((j for j, x in enumerate(rows) if t is not None and x["startMs"] <= t < x["endMs"]), k)
     if was and t is not None and t == at(was, _heard_same if rows[k].get("_worded") else None):
         return True
+    if own is not None and t is not None and not s0 - SYNC_TOLERANCE_MS <= t < e0:
+        return False
     return not (_by_held(rows, k) or _by_held(rows, j) or j != k and rows[j].get("overlay"))
 
 
@@ -13258,7 +13598,7 @@ def _pinned(rows: list, ctx: dict, ok):
     date, year plate or beat overlay (_heard_here; review 2026-10-13, round 4: a refill's words said on the shot
     before were seated there, over its beat overlay)."""
     return lambda kk, tid, w: ok(kk, tid, w) and _heard_here(rows, kk, _overlay_words({"device": {"id": tid, "line": w}}),
-                                                             [], ctx)
+                                                             [], ctx, new={"device": {"id": tid}})
 
 
 def _refill(engine, rows: list, build, refused: set, ok, open_, avoid=(), names=()) -> set:
@@ -13516,7 +13856,8 @@ def _fix_wording(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
             if not new or not _said_ok(rows, k, " ".join(new), ctx, "statement", tid, "lines"):
                 continue
             words = _overlay_words({"typedCaption": {"lines": new}})
-            if words and not _heard_here(rows, k, words, _overlay_words(r), ctx, _on_screen_ms(r)):
+            if words and not _heard_here(rows, k, words, _overlay_words(r), ctx, _on_screen_ms(r),
+                                         new={"typedCaption": {"lines": new}}):
                 continue
             r["typedCaption"], r["_worded"] = dict(r["typedCaption"], lines=new), True
             return f"caption re-worded from the narration: '{' / '.join(new)}'", {id(r)}
@@ -13607,19 +13948,26 @@ def _fix_list(rows: list, k: int, xs: list, ctx: dict, build) -> tuple:
     return _elsewhere(rows, k, "bullet-checklist", " / ".join(words), words, xs[0]["what"], ctx, build)
 
 
-def _absorb(rows: list, k: int) -> bool:
+def _absorb(rows: list, k: int, no_hold: bool = False) -> bool:
     """A plain quick shot k folds into the shot before it when that one carries words (its start, on its words, stays)
-    and the two stay within its cap: a quick run nothing plain can calm."""
+    and the two stay within its cap: a quick run nothing plain can calm. `no_hold`: never into a planned hold - only
+    the gate's quick-cut-off-its-words repair asks it (owner 2026-10-26); the hard quick-run repair, the opening title
+    and the pace joins fold into a hold as before (2026-11-09: refusing it there could leave a run of five that stops
+    the film)."""
     if not 0 < k < len(rows) or not _bare(rows[k]) or _covered(rows[k]):
         return False
     p, x = rows[k - 1], rows[k]
     if _bare(p) or _covered(p) or x["endMs"] - p["startMs"] > _cap_ms(p) or not _open_ok(rows, k - 1, x["endMs"]):
         return False
+    if no_hold and (p.get("hold") or p.get("_hold")):
+        return False                                 # never into a planned hold (owner 2026-10-26)
     p["endMs"] = x["endMs"]
     if p.get("_said"):
         p["_said"] = (p["_said"][0], max(p["_said"][1], (x.get("_said") or (0, x["endMs"]))[1]))
     p["text"] = f"{p.get('text') or ''} {x.get('text') or ''}".strip()
     p["held"] = list(p.get("held") or []) + [x.get("text") or ""]
+    if x.get("_run_to"):                             # the line the sync's net folded into it goes with it
+        p["_run_to"] = max(p.get("_run_to") or 0, x["_run_to"])
     if x.get("pick") and not x["pick"].get("ai"):
         p["spare"] = list(p.get("spare") or []) + [x["pick"]]
     del rows[k]
@@ -14255,6 +14603,15 @@ def _gate_fix(engine, job: Path, rows: list, dossier: dict, cues: list, build, c
             did(x, "cut on the narration")
         for x in by.get("quick run", []):
             k = at(x["id"])
+            if x.get("drift"):                       # off its words (owner 2026-10-26): its line heard under the
+                # (never into a shot that opens in the first minute: the owner's 0-60 s pace stays as planned)
+                if k is not None and k > 0 and rows[k - 1]["startMs"] >= 60000 \
+                        and _absorb(rows, k, no_hold=True):   # shot before, never a hold; else a warning
+                    did(x, "the quick shot off its words folded into the one before it (its line heard there)")
+                else:
+                    ctx.setdefault("drift_soft", {})[x["id"]] = _pace_sig(rows)
+                    stuck(x, "no shot before it can take its line (plain, a hold, or over its cap)")
+                continue
             done = False
             for j in range(k or 0, min(len(rows), (k or 0) + x["run"] + 1)) if k is not None else ():
                 if rows[j]["endMs"] - rows[j]["startMs"] < SHORT_S * 1000 and _absorb(rows, j):
@@ -14401,6 +14758,9 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
         _gate_fix(engine, job, rows, dossier, cues, build, ctx, found)
     for x in [x for x in found if x["rule"] in ("average", "pace")]:   # pacing never stops a film (owner 2026-10-11)
         ctx["warnings"].append(f"pacing: {x['what']}")
+        found.remove(x)
+    for x in [x for x in found if x["rule"] == "quick run" and x.get("drift")]:   # quick cuts off their words
+        ctx["warnings"].append(f"quick run: {x['what']} - left as it is after every repair")   # (2026-10-26): soft
         found.remove(x)
     for x in [x for x in found if _wording_soft(x)]:   # word rules are heuristics: never a stop (2026-10-13); the
         why = next((y["why"] for y in ctx["stuck"] if y.get("id") == x["id"] and y["rule"] == x["rule"]), "")
@@ -14638,7 +14998,8 @@ def check(job: Path) -> list:
     found = _gate_find(rows, ctx)
     say = lambda x: f"{x['rule']}" + (f" shot {x['k']} ({x['at'] / 1000:.1f}s)" if x.get("k") is not None else "") \
         + f": {x['what']}"
-    soft = [x for x in found if _wording_soft(x)]    # the word rules never stop a film: a warning, as the gate gives
+    soft = [x for x in found if _wording_soft(x) or x.get("drift")]   # the word rules (and quick cuts off their
+    #                                                  words) never stop a film: a warning, as the gate gives
     found = [x for x in found if x not in soft]
     out += [f"FAIL  {say(x)}" for x in found]
     out += [f"LOOK  shot {k}: {tid} '{lab}' - the card check has no answer for this label on this picture"

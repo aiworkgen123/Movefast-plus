@@ -91,6 +91,12 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   in the first 30 s.
 - Text overlays land on their own words, within half a second. Chapters open at a sentence start, never in the middle
   of one.
+- **Quick cuts stay on their words** (owner 2026-10-26: "fast cut shots only for the sake of having fast cut shots"):
+  an overlay is pinned on its own line before a stray earlier mention of its words, and in a burst of three or more
+  quick shots a plain shot that would open outside its own line, more than 1 s from its start, folds into the shot
+  before it, its line heard under that picture (never in the first 30 s, never into a planned hold, never after a
+  highlighted page, which stays exactly as it was); a shot opening late but inside its own line is on its words and
+  stays; the gate checks the same and only warns where it cannot mend one.
 
 ## Text on screen
 
