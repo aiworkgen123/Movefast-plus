@@ -12141,6 +12141,7 @@ def _report(engine, sc_list: list) -> None:
 # reason. Nothing is checked after render: the after-render check() call and make_video's Gemini look are gone from
 # this channel, and `python mrtruth.py check <job>` reads gate.json and the code rules back off plan.json, read-only ──
 GATE_ROUNDS = 5                         # check -> repair rounds; what is still broken after them stops the run
+QUIET_SOFT_MS = 45000       # a stretch without words this long or shorter that no repair could fill: a warning (owner 2026-11-10)
 GATE_FILL_TRIES = 4                     # a quiet stretch: free shots tried in one round when the fit step takes one back
 GATE_AVG_S = (4.0, 4.6)                 # the film's average shot (the reference films 4.1-4.6 s; the aim 4.3)
 GATE_SAME_S, GATE_SAME_SHARE = 60.0, 0.6    # the same words on screen twice within 60 s (shots 180/184 of the pod film)
@@ -13011,7 +13012,7 @@ def _gate_find(rows: list, ctx: dict) -> list:
     marks = [0] + _text_times(rows, True) + [total]
     for a, b in _gaps(rows, True):
         add("quiet", next((k for k, r in enumerate(rows) if r["startMs"] >= a), None),
-            f"{(b - a) / 1000:.0f}s without words on screen ({a / 1000:.0f}-{b / 1000:.0f}s)")
+            f"{(b - a) / 1000:.0f}s without words on screen ({a / 1000:.0f}-{b / 1000:.0f}s)", gap_ms=b - a)
     # pacing: nothing over 8 s but a planned hold, at most four quick shots in a row, the average in its band
     for k, r in enumerate(rows):
         if r["endMs"] - r["startMs"] > _cap_ms(r) or r.get("hold") and not _hold_ok(rows, r) and d[k] > SCENE_MAX_S:
@@ -14791,6 +14792,14 @@ def gate(engine, job: Path, rows: list, dossier: dict, cues: list, build=None, t
         _gate_fix(engine, job, rows, dossier, cues, build, ctx, found)
     for x in [x for x in found if x["rule"] in ("average", "pace")]:   # pacing never stops a film (owner 2026-10-11)
         ctx["warnings"].append(f"pacing: {x['what']}")
+        found.remove(x)
+    # a stretch without words on screen that every repair left open (owner 2026-11-10: "go with a, up to 45 seconds,
+    # only when it is a must to keep the film going"): up to QUIET_SOFT_MS a warning, and the film goes on; longer, a
+    # stop as before. Only after the last round: every repair is tried first
+    for x in [x for x in found if x["rule"] == "quiet" and (x.get("gap_ms") or 10 ** 9) <= QUIET_SOFT_MS]:
+        why = next((y["why"] for y in ctx["stuck"] if y.get("id") == x["id"] and y["rule"] == "quiet"), "")
+        ctx["warnings"].append(f"quiet: {x['what']} - left open after every repair, the film goes on (up to "
+                               f"{QUIET_SOFT_MS // 1000}s allowed)" + (f" ({why})" if why else ""))
         found.remove(x)
     for x in [x for x in found if x["rule"] == "quick run" and x.get("drift")]:   # quick cuts off their words
         ctx["warnings"].append(f"quick run: {x['what']} - left as it is after every repair")   # (2026-10-26): soft

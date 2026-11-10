@@ -1991,6 +1991,29 @@ class Words(Base):
         self.assertFalse(M._gaps(rows))
         self.assertTrue(any(r.get("filler") for r in rows))
 
+    def test_a_stretch_no_repair_can_fill_goes_on_with_a_warning_up_to_45_s(self):
+        # owner 2026-11-10: "go with a, up to 45 seconds, only when it is a must to keep the film going"
+        def stuck_gate(rows):
+            with mock.patch.object(M, "_refill", lambda *a, **k: set()), \
+                    mock.patch.object(M, "_gap_room", lambda *a, **k: []):
+                return self.gate(rows)
+        rows = film()
+        rows[29].pop("typedCaption", None)                            # 103-142 s: 39 s nothing can fill
+        rec, _ = stuck_gate(rows)
+        self.assertNotEqual(rec["result"], "STOPPED", rec.get("left"))
+        self.assertTrue(any(w.startswith("quiet: ") and "the film goes on" in w for w in rec["warnings"]), rec["warnings"])
+        self.assertTrue(any(x["rule"] == "quiet" for x in rec["stuck"]))          # every repair was tried first
+        rows = film()
+        for k in (24, 29):                                            # 81.7-141.9 s: 60 s, over the 45 s
+            rows[k]["device"] = None
+            rows[k].pop("typedCaption", None)
+        try:
+            rec, _ = stuck_gate(rows)
+        except M.PlanningStopped:
+            return
+        self.assertEqual(rec["result"], "STOPPED")
+        self.assertTrue(any(x["rule"] == "quiet" for x in rec["left"]))
+
     def test_a_filler_the_fit_step_takes_back_gives_way_to_the_next_free_shot_in_the_same_round(self):
         # impl-z (2026-10-11): on the -long film the one filler of a 32 s stretch (a P05 naming a person over a picture
         # with none) was set and taken back in every round, the repair said done, and the film stopped after five

@@ -54,12 +54,15 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
 - Every answer is saved (`verdicts.py`, R2 `mrtruth/verdicts/`) and reused by later films.
 - Everything is checked **before** anything is drawn, with repairs; nothing is checked after render. Never a quietly
   worse film: stop and say why.
+  One exception (owner 2026-11-10): a stretch of up to 45 s without words on screen that every repair left open is a
+  warning, and the film goes on; longer, it stops as before.
 - Tested and rejected on quality: Gemini Flash-Lite, Seed 2.0 Mini and Lite, `gemini-3-flash-preview`. Not recommended
   without a test: DeepSeek V4.1 Flash, GLM-5.3 Flash (they score below Flash-Lite independently).
 
 ## Picture searches
 
-- **Bing first** for generic or mood shots (free).
+- **Bing first** for generic or mood shots (free). From 2026-11-10 Bing scrambles answers to cloud machines: Settings
+  -> Keys -> Bing proxy sends its searches through static ISP (home-type) proxies.
 - **Wikimedia Commons first** only for a shot that names a person, place or thing. Bing follows if Commons gives
   nothing usable.
 - **Brave** is only a backup, used when Bing fails completely (`MRTRUTH_BRAVE_LAST_MAX=0`).
