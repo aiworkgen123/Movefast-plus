@@ -47,9 +47,12 @@ KEYS = [
      "token-supply.com → API keys (Anthropic group); only needed when Planner is Claude through Token Supply"),
     ("WAVESPEED_API_KEY", "WaveSpeed (AI stand-in pictures)", True, "wavespeed.ai → API keys"),
     ("BRAVE_SEARCH_API_KEY", "Brave Search (backup search)", False, "only used when Bing fails"),
+    ("BING_PROXY", "Bing proxy (home-type internet address for picture search)", False,
+     "host:port:user:pass - several separated by spaces; empty = Bing asked directly"),
     ("EUROPEANA_API_KEY", "Europeana (archive search)", False, "optional"),
 ]
-POD_KEYS = ("GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "WAVESPEED_API_KEY", "EUROPEANA_API_KEY", "ANTHROPIC_API_KEY")
+POD_KEYS = ("GEMINI_API_KEY", "BRAVE_SEARCH_API_KEY", "WAVESPEED_API_KEY", "EUROPEANA_API_KEY", "ANTHROPIC_API_KEY",
+            "BING_PROXY")
 POD_PREFIX = "mrtruth-web-"                   # every machine this website rents is named so; the sweep owns only these
 # who plans a film (Settings → Planner; owner 2026-10-14): Claude Sonnet through Anthropic, as every film so far, or the
 # same Claude Sonnet resold by Token Supply at about 30% of the price, on test and off by default. A Token Supply film
@@ -1298,7 +1301,7 @@ CP=anthropic
 if [ "${PLANNER:-}" = "ts" ]; then CP=tokensupply; fi
 { echo "GEMINI_API_KEY=$K_GEMINI_API_KEY"; echo "BRAVE_SEARCH_API_KEY=$K_BRAVE_SEARCH_API_KEY"; echo "WAVESPEED_API_KEY=$K_WAVESPEED_API_KEY";
   echo "EUROPEANA_API_KEY=$K_EUROPEANA_API_KEY"; echo "ANTHROPIC_API_KEY=$K_ANTHROPIC_API_KEY";
-  echo "CLAUDE_PROVIDER=$CP"; echo "SCRIPT_PROVIDER=anthropic"; } > .env; chmod 600 .env
+  if [ -n "${K_BING_PROXY:-}" ]; then echo "BING_PROXY=$K_BING_PROXY"; fi; echo "CLAUDE_PROVIDER=$CP"; echo "SCRIPT_PROVIDER=anthropic"; } > .env; chmod 600 .env
 if [ "$CP" = "tokensupply" ]; then
   { echo "CLAUDE_FALLBACK=anthropic"; echo "TOKENSUPPLY_API_KEY=${K_TOKENSUPPLY_API_KEY:-}"; } >> .env
   if [ -n "${K_TOKENSUPPLY_API_KEY:-}" ]; then say "planner: Claude Sonnet through Token Supply (on test)"

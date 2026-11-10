@@ -2148,7 +2148,7 @@ class PlannerSetting(unittest.TestCase):
             self.skipTest("e8ef33b is not in this copy's git history")
         a = old.stdout.index('{ echo "GEMINI_API_KEY=')
         old = old.stdout[a:old.stdout.index("chmod 600 .env", a) + len("chmod 600 .env")]
-        keys = {f"K_{k}": f"v-{k}" for k in self.J.POD_KEYS}
+        keys = {f"K_{k}": f"v-{k}" for k in self.J.POD_KEYS if k != "BING_PROXY"}   # no proxy: as before
 
         def written(block, **env):
             with tempfile.TemporaryDirectory() as d:
@@ -2168,6 +2168,8 @@ class PlannerSetting(unittest.TestCase):
                          + "CLAUDE_FALLBACK=anthropic\nTOKENSUPPLY_API_KEY=ts-key\n")
         self.assertEqual(ts.count("CLAUDE_PROVIDER="), 1)
         self.assertEqual(said, "planner: Claude Sonnet through Token Supply (on test)\n")
+        px, _, _ = written(new, K_BING_PROXY="1.2.3.4:5183:u:p")           # a Bing proxy set (owner 2026-11-10): one
+        self.assertEqual(px, then[0].replace("CLAUDE_PROVIDER=", "BING_PROXY=1.2.3.4:5183:u:p\nCLAUDE_PROVIDER="))
         from dotenv import dotenv_values
         got = dotenv_values(stream=io.StringIO(ts))
         self.assertEqual((got["CLAUDE_PROVIDER"], got["CLAUDE_FALLBACK"], got["TOKENSUPPLY_API_KEY"],

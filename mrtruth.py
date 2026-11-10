@@ -32,6 +32,7 @@ import html
 import json
 import math
 import os
+import random
 import re
 import shutil
 import statistics
@@ -4387,11 +4388,43 @@ class _BingError(Exception):
     """kind: http_<code>, captcha, no_results, thin_page, unrelated, error:<Type>, curl_cffi missing."""
 
 
+def _proxy_url(v: str) -> str:
+    """One BING_PROXY entry as a proxy URL: "host:port:user:pass", "host:port" or a URL as it is."""
+    v = v.strip()
+    if "://" in v:
+        return v
+    parts = v.split(":")
+    if len(parts) == 4:
+        return f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+    return "http://" + v
+
+
+# Bing through home-type internet addresses (owner 2026-11-10): from 2026-11-10 Bing answered rented cloud machines
+# (and a real browser on one) with scrambled pictures - "Huey helicopter Vietnam" gave sorority clipart, "Bell UH-1 Huey
+# Vietnam" Christmas bells - while it answered the owner's home computer well. BING_PROXY (Settings -> Keys) lists
+# static ISP proxies, several separated by spaces or commas; each film starts on a random one and moves to the next
+# when one cannot be reached. Empty: Bing is asked directly, as before.
+BING_PROXIES = [_proxy_url(x) for x in re.split(r"[\s,]+", os.environ.get("BING_PROXY") or "") if x.strip()]
+_BING_PROXY_AT = [random.randrange(len(BING_PROXIES)) if BING_PROXIES else 0]
+
+
 def _bing_get(query: str):
-    """The one request to Bing Images."""
+    """The one request to Bing Images (through a BING_PROXY address when there are any: a proxy that cannot be reached
+    gives way to the next one, each tried once)."""
     from curl_cffi import requests as curl
-    return curl.get("https://www.bing.com/images/search", impersonate="chrome", timeout=20,
-                    params=dict(BING_PARAMS, q=query))
+    if not BING_PROXIES:
+        return curl.get("https://www.bing.com/images/search", impersonate="chrome", timeout=20,
+                        params=dict(BING_PARAMS, q=query))
+    last = None
+    for _ in range(len(BING_PROXIES)):
+        px = BING_PROXIES[_BING_PROXY_AT[0] % len(BING_PROXIES)]
+        try:
+            return curl.get("https://www.bing.com/images/search", impersonate="chrome", timeout=25,
+                            params=dict(BING_PARAMS, q=query), proxies={"http": px, "https": px})
+        except Exception as e:                                       # noqa: BLE001 - this proxy is down: the next
+            last = e
+            _BING_PROXY_AT[0] += 1
+    raise last
 
 
 def _bing_fetch(query: str) -> list:
