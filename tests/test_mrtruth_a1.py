@@ -266,6 +266,20 @@ class Canary(Base):
         self.assertFalse(ok)
         self.assertIn("captcha", detail)
 
+    def test_a_bad_answer_through_a_rotating_proxy_is_asked_again_before_it_counts(self):
+        # owner 2026-11-12: through a rotating proxy 3 of the first 8 searches came back empty and stopped the film
+        seq = [Resp(200, "<html></html>"), Resp(200, "<html></html>"), Resp(200, page(rows_for("codex leaf")))]
+        with mock.patch.object(M, "BING_PROXIES", ["http://u:p@h:1"]), \
+                mock.patch.object(M, "_bing_get", lambda q: seq.pop(0)), mock.patch.object(M, "_bing_ready", lambda: True):
+            got, why = M.bing_search("codex leaf", self.d)
+        self.assertEqual(why, "")
+        self.assertTrue(got)
+        self.assertEqual(M.SEARCH.get("bing_no_results", 0), 0)              # not counted against Bing
+        empty = lambda q: Resp(200, "<html></html>")
+        with mock.patch.object(M, "BING_PROXIES", ["http://u:p@h:1"]), mock.patch.object(M, "_bing_get", empty), \
+                mock.patch.object(M, "_bing_ready", lambda: True):
+            self.assertEqual(M.bing_search("codex other", self.d)[1], "no_results")   # every try bad: it counts
+
     def test_saved_degraded_pages_fail_the_canary(self):
         pages = Path(os.environ.get("MRTRUTH_BING_PAGES", "/nonexistent"))
         files = sorted(pages.glob("page_3.html"))         # a real degraded answer, kept outside the repo

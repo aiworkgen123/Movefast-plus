@@ -4405,6 +4405,7 @@ def _proxy_url(v: str) -> str:
 # static ISP proxies, several separated by spaces or commas; each film starts on a random one and moves to the next
 # when one cannot be reached. Empty: Bing is asked directly, as before.
 BING_PROXIES = [_proxy_url(x) for x in re.split(r"[\s,]+", os.environ.get("BING_PROXY") or "") if x.strip()]
+BING_PROXY_TRIES = 4             # asks of one search through BING_PROXY before a bad answer counts (bing_search)
 _BING_PROXY_AT = [random.randrange(len(BING_PROXIES)) if BING_PROXIES else 0]
 
 
@@ -4602,7 +4603,11 @@ def bing_search(query: str, folder: Path) -> tuple:
         _count("bing_while_off")
         return [], "off"
     kind, rows = "", []
-    for attempt in range(2):
+    # through a rotating proxy each request leaves from another home connection, and some of them get an empty or a
+    # scrambled page (owner 2026-11-12: 3 of the first 8 searches came back empty and stopped the film while the start
+    # check passed 18/20): a bad answer is asked again, up to BING_PROXY_TRIES times, before it counts
+    tries = BING_PROXY_TRIES if BING_PROXIES else 2
+    for attempt in range(tries):
         try:
             rows = _bing_fetch(query)
         except _BingError as e:
@@ -4618,6 +4623,9 @@ def bing_search(query: str, folder: Path) -> tuple:
             else:
                 share = _on_topic(query, rows)
                 kind = "unrelated" if share is not None and share < BING_UNRELATED else ""
+        if kind and BING_PROXIES and attempt < tries - 1 and kind != "curl_cffi missing":
+            _count("bing_proxy_retries")
+            continue
         break
     _bing_outcome(query, kind, rows)
     if kind:
