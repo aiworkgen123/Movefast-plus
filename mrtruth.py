@@ -4460,7 +4460,7 @@ def bing_canary() -> tuple:
     after CANARY_RETRY_S. 2-4 free requests."""
     res = []
     for q, words in CANARY:
-        good, note = False, ""
+        good, note, full = False, "", False
         for attempt in range(2):
             try:
                 rows = _bing_fetch(q)
@@ -4474,13 +4474,19 @@ def bing_canary() -> tuple:
                                                 for w in words))
                 note = f"'{q}' {hit}/{len(top)}" + ("" if len(rows) >= 20 else f" ({len(rows)} rows)")
                 good = len(rows) >= 20 and hit >= 0.4 * len(top)
+                full = len(rows) >= 20
                 if good:
                     break
             if attempt == 0:
                 time.sleep(CANARY_RETRY_S)
-        res.append((good, note))
+        res.append((good, note, full))
     _count("bing_canaries")
-    return all(g for g, _ in res), ", ".join(n for _, n in res)
+    # one search healthy and the other a full answer about something else is Bing's own ranking, not a block (owner
+    # 2026-11-12: through the proxy 'Codex Vaticanus' came back 0/20, twenty pictures of OpenAI's Codex, on five tries in
+    # a row, while 'Eiffel Tower 1889' was 16/20; scrambled Bing answered thinly, 0/12): it passes, and the watch over
+    # every answer (_bing_outcome: unrelated answers turn Bing off) stays on guard
+    ok = all(g for g, _, _ in res) or (any(g for g, _, _ in res) and all(g or f for g, _, f in res))
+    return ok, ", ".join(n for _, n, _ in res)
 
 
 def _bing_off(why: str) -> None:

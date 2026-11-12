@@ -266,6 +266,18 @@ class Canary(Base):
         self.assertFalse(ok)
         self.assertIn("captcha", detail)
 
+    def test_one_full_answer_about_something_else_beside_a_healthy_one_passes(self):
+        # owner 2026-11-12: through the proxy 'Codex Vaticanus' was twenty pictures of OpenAI's Codex five times in a
+        # row while 'Eiffel Tower 1889' was 16/20 - Bing's own ranking, not a block; both off, or a thin one, still fail
+        mixed = lambda q: Resp(200, page(rows_for(q, title="OpenAI Codex coding agent" if "Codex" in q else f"{q} photo")))
+        with mock.patch.object(M, "_bing_get", mixed):
+            ok, detail = M.bing_canary()
+        self.assertTrue(ok, detail)
+        self.assertIn("'Codex Vaticanus' 0/20", detail)
+        thin = lambda q: Resp(200, page(rows_for(q, title="OpenAI Codex")[:12] if "Codex" in q else rows_for(q, title=f"{q} photo")))
+        with mock.patch.object(M, "_bing_get", thin):
+            self.assertFalse(M.bing_canary()[0])
+
     def test_saved_degraded_pages_fail_the_canary(self):
         pages = Path(os.environ.get("MRTRUTH_BING_PAGES", "/nonexistent"))
         files = sorted(pages.glob("page_3.html"))         # a real degraded answer, kept outside the repo
