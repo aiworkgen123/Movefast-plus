@@ -808,7 +808,9 @@ THIS CHANNEL'S SEARCH RULES (they win over the brief above where they differ):
   show the person on at least every second sentence; the shots between show what he reads, holds or where he is.
 - WHEN A SHOT IS SET. Give every scene an extra field "era": the time and place of what this shot's picture shows, in
   at most 6 words ("late 1980s, Vatican Library", "4th-century Alexandria", "London, 1943"); "today" when the line is
-  about the present day or a picture from today is right for it; "" when you cannot tell (the film's period is used)."""
+  about the present day or a picture from today is right for it - a line about how an old place looks or measures when
+  someone examined it in our own time (this century) is "today", an examination with an earlier date takes that date;
+  "" when you cannot tell (the film's period is used). Every scene carries "era"."""
 def _cues(engine, srt: Path) -> list:
     return [(int(round(a * 1000)), int(round(b * 1000)), t) for a, b, t in
             engine._parse_srt_full(srt.read_text(encoding="utf-8")) if b > a]
@@ -821,6 +823,8 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     key = _hash([BEATS_V, script, dossier])
     got = None if force else _load(out)
     if isinstance(got, dict) and got.get("key") == key and got.get("rows"):
+        if _fill_eras(engine, got["rows"], dossier):                # cached before the eras were asked (2026-11-16)
+            _dump(out, got)
         return _paced(engine, got["rows"], _cues(engine, srt))     # the cache holds Claude's rows: paced on every load
     cues = _cues(engine, srt)
     if not cues:
@@ -934,18 +938,66 @@ def beats(engine, job: Path, srt: Path, script: str, dossier: dict, force: bool 
     rows = [r for r in rows if r["endMs"] - r["startMs"] >= 400] or rows
     for i, r in enumerate(rows):                    # a dropped sliver's time goes to the shot before it
         r["endMs"] = rows[i + 1]["startMs"] if i + 1 < len(rows) else end_ms
-    planned = json.loads(json.dumps(rows))          # Claude's own rows are what is cached: re-pacing never re-asks Claude
-    _paced(engine, rows, cues)
     if fell_back:
         engine.log(f"  ⚠ {fell_back} shot(s) could not be planned and are searched by their own words "
                    f"(not cached: the next run plans them again)")
-        if fell_back > max(2, 0.03 * len(planned)):
-            _stop(engine, f"Mr Truth stopped: {fell_back} of {len(planned)} shots could not be planned (Claude did not "
+        if fell_back > max(2, 0.03 * len(rows)):
+            _stop(engine, f"Mr Truth stopped: {fell_back} of {len(rows)} shots could not be planned (Claude did not "
                           f"answer for part of the narration) - run again; the planned parts are not lost")
-    else:
+    _fill_eras(engine, rows, dossier)               # after the stop above: a stopped run pays for no eras
+    planned = json.loads(json.dumps(rows))          # Claude's own rows are what is cached: re-pacing never re-asks Claude
+    _paced(engine, rows, cues)
+    if not fell_back:
         _dump(out, {"key": key, "rows": planned})
     engine.log(f"  {len(rows)} shots, {end_ms / 1000 / max(1, len(rows)):.1f}s each on average")
     return rows
+
+
+ERA_FILL_PROMPT = """You are the picture editor of a photos-only documentary. For each numbered shot below give "era": the
+time and place of what that shot's picture shows, in at most 6 words ("late 1980s, Vatican Library", "4th-century
+Alexandria", "London, 1943"). "today" only for our own time (this century): the person speaking or working now, their
+room, desk and tools, the notes they write now, a place as it looks when someone examines it in recent years. What
+someone remembers, and photographs or documents from an earlier time, take that earlier time; an examination with an
+earlier date takes that date ("1867, Warren's shaft, Jerusalem"). "" when you are unsure - never "today" as a guess.
+The lines before and after each shot are given for context only.
+"""
+
+
+def _fill_eras(engine, rows: list, dossier: dict) -> int:
+    """Shots Claude planned without the "era" field are asked for it in one call (film 261116-4daa15: two parts, 84 of 217
+    shots, came back without it, so present-day lines - the engineer, her folder - were checked against the film's
+    period, 70 AD: 99 of 130 AI drawings were refused, mostly as modern lamps, desks and bookshelves, and the gate had
+    no drawing left to repair the one shot it could not fix). A shot left without an answer keeps today's rule (the
+    film's period) and is asked again the next time the cached rows are loaded (beats); returns how many were filled."""
+    need = [k for k, r in enumerate(rows) if "era" not in r and not r.get("unplanned")]
+    if not need:
+        return 0
+    line = lambda j: " ".join(str(rows[j].get("text") or "").split())[:200] if 0 <= j < len(rows) else ""
+    lines = "\n".join(f"{n}. [{rows[k]['startMs'] // 1000}s] {' '.join(str(rows[k].get('text') or '').split())[:300]} "
+                      f"- picture: {' '.join(str(rows[k].get('visualIntent') or '').split())[:200]}"
+                      f" (before: \"{line(k - 1)}\"; after: \"{line(k + 1)}\")"
+                      for n, k in enumerate(need, 1))
+    prompt = (ERA_FILL_PROMPT + "\n" + _film_block(dossier) + "\n\nSHOTS:\n" + lines +
+              '\n\nReturn {"eras": [{"n": <number>, "era": "..."}]} with one entry for every shot.')
+    try:
+        got = _ask(engine, prompt, min(16000, 600 + 60 * len(need)), step="eras").get("eras") or []
+    except Exception as e:                                           # noqa: BLE001 - the film goes on without them
+        engine.log(f"  ⚠ {len(need)} shot(s) came back without their era and asking for it failed ({e}) - the film's "
+                   f"period is used for them")
+        return 0
+    done = 0
+    for x in got if isinstance(got, list) else []:
+        try:
+            n, era = int(x.get("n")), x.get("era")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if 1 <= n <= len(need) and isinstance(era, str) and "era" not in rows[need[n - 1]]:
+            rows[need[n - 1]]["era"] = " ".join(era.split())[:80]
+            done += 1
+    engine.log(f"  {len(need)} shot(s) came back without their era: {done} asked for it"
+               + ("" if done == len(need) else f" ({len(need) - done} keep the film's period)")
+               + (" - their pictures are checked again for the new era" if done else ""))
+    return done
 
 
 def _range_pace(f0: int, f1: int, end_ms: int) -> str:
@@ -3705,12 +3757,44 @@ def _past(period: str) -> bool:
     return bool(years) and min(years) <= time.localtime().tm_year - 5
 
 
+# an era that says it is the present day in a longer phrase (film 261116-4daa15: "contemporary, Jerusalem" 12 shots,
+# "modern, Jerusalem excavation" 6, "present-day, City of David tunnel") asks nothing, like a bare "today" - but never
+# when the phrase also names a past time (a century, an era word, a year: "Carthage, modern-day Tunisia, 146 BC",
+# "contemporary woodcut, 1520s", "Modern Olympics, Athens 1896" keep their check), never "present-day <Place>" (a place
+# on today's map), and "contemporary" / "modern" only as the first word ("Josephus, contemporary account" and "early
+# modern Europe" are the past; review 2026-11-16)
+_TODAY_LEAD = re.compile(r"^\W*(contemporary|modern)\b(?![- ](era|period|age|ages|history|state|olympics|art|greek|"
+                         r"engraving|woodcut|portrait|account|accounts|depiction|illustration|report|reports|map|print|"
+                         r"fresco|painting|drawing|chronicle|record|records|newspaper|relief|sketch)\b)", re.I)
+_TODAY_WORD = re.compile(r"\b(today|nowadays|the present|recent (years|decades)|currently|(present|modern)[- ]day)\b"
+                         r"(?!'s)", re.I)
+
+
+def _era_today(e: str) -> bool:
+    """The era names the present day: one of _TODAY, or a today word in a longer phrase that names no past time."""
+    e = " ".join(str(e or "").split())
+    if e.lower().strip(" .") in _TODAY:
+        return True
+    if _past(e) or re.search(r"\b(1[0-9]{3}|20[0-9]{2})s?\b|\b\d{1,4}\s*(ad|ce|bc|bce)\b|\b(ad|ce|bc|bce)\s*\d{1,4}\b",
+                             e, re.I):
+        return False
+    if re.match(r"^\W*(?i:modern|present)[- ](?i:day)\s+[A-Z]", e) or re.search(r"\brecent (years|decades) of\b", e, re.I):
+        return False                                 # "Modern-day Iraq, Babylon": a place on today's map
+    if _TODAY_LEAD.search(e):
+        return True
+    for m in _TODAY_WORD.finditer(e):                # "present-day Turkey": a place gloss (the capital after it)
+        after = e[m.end():]
+        if not re.match(r"\s+[A-Z]", after):
+            return True
+    return False
+
+
 def _era(r: dict, dossier: dict) -> str:
     """The time a shot's picture must not look later than, or "" when the period question is not asked (owner
     2026-10-10: the topics are mostly not history - the question only where the shot's time matters): the beat's own
     era; its "today" asks nothing; no era from the beat - the film's period, only when that lies in the past."""
     e = " ".join(str(r.get("era") or "").split())[:80]
-    if e.lower().strip(" .") in _TODAY:
+    if _era_today(e):
         return ""
     if e:
         return e

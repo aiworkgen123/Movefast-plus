@@ -699,7 +699,7 @@ class Caches(Engine):
             text = payload["messages"][0]["content"][-1]["text"]
             f0, f1 = (int(x) for x in re.search(r"FOCUS RANGE: (\d+)ms to (\d+)ms", text).groups())
             return json.dumps({"scenes": [{"startMs": a, "visualIntent": f"picture {a}", "queries": [f"q{a}", "", ""],
-                                           "entities": [], "mood": "dark", "sceneType": "imagery"}
+                                           "entities": [], "mood": "dark", "sceneType": "imagery", "era": ""}
                                           for a, b, _ in cues if f0 <= a < f1][::2]})
         net = self.net(ts=[ok(scenes)])
         job = Path(tempfile.mkdtemp())
@@ -1324,7 +1324,7 @@ def scenes_for(prompt):
     f0, f1 = (int(x) for x in re.search(r"FOCUS RANGE: (\d+)ms to (\d+)ms", prompt).groups())
     starts = [int(a) for a, b in re.findall(r"^> \[(\d+)-(\d+)\]", prompt, re.M)][::2]
     return json.dumps({"scenes": [{"startMs": a, "visualIntent": f"picture {a}", "queries": [f"q{a}", "", ""],
-                                   "entities": [], "mood": "dark", "sceneType": "imagery"} for a in starts if f0 <= a < f1]})
+                                   "entities": [], "mood": "dark", "sceneType": "imagery", "era": ""} for a in starts if f0 <= a < f1]})
 
 
 class Steps(unittest.TestCase):

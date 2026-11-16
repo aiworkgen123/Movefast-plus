@@ -69,6 +69,42 @@ class Engine:
         return self.answer(prompt)
 
 
+class BeatsEras(unittest.TestCase):
+    def test_shots_that_came_back_without_an_era_are_asked_for_it_once_and_cached(self):
+        # film 261116-4daa15: 84 of 217 shots came back without "era" and were checked against the film's period
+        cues = [(t, t + 1900, f"{WORDS[k % len(WORDS)]} line {k}.") for k, t in enumerate(range(0, 60000, 2000))]
+        with tempfile.TemporaryDirectory() as d:
+            job = Path(d)
+            (job / "mrtruth").mkdir()
+            (job / "subs.srt").write_text(srt_text(cues))
+
+            def answer(prompt):
+                if '"eras"' in prompt:
+                    n = len(re.findall(r"^\d+\. \[", prompt, re.M))
+                    return json.dumps({"eras": [{"n": i, "era": "today"} for i in range(1, n + 1)]})
+                sc = [{"startMs": int(a), "visualIntent": "x", "queries": ["x", "y", "z"], "entities": [], "mood": "",
+                       "sceneType": "imagery"} for a, b in re.findall(r"^> \[(\d+)-(\d+)\]", prompt, re.M)]
+                return json.dumps({"scenes": sc})
+            e = Engine(answer)
+            rows = M.beats(e, job, job / "subs.srt", " ".join(c[2] for c in cues), {})
+            self.assertEqual(len(e.calls), 2)                         # the one part, then the eras once
+            self.assertTrue(rows and all(r.get("era") == "today" for r in rows))
+            cached = json.loads((job / "mrtruth" / "beats.json").read_text())["rows"]
+            self.assertTrue(all(r.get("era") == "today" for r in cached))
+            # rows cached before the eras were asked: filled on the next load and written back, asked once
+            saved = json.loads((job / "mrtruth" / "beats.json").read_text())
+            for r in saved["rows"][1:]:
+                r.pop("era")
+            (job / "mrtruth" / "beats.json").write_text(json.dumps(saved))
+            e2 = Engine(answer)
+            rows = M.beats(e2, job, job / "subs.srt", " ".join(c[2] for c in cues), {})
+            self.assertEqual(len(e2.calls), 1)
+            self.assertTrue(all(r.get("era") == "today" for r in rows))
+            e3 = Engine(answer)
+            M.beats(e3, job, job / "subs.srt", " ".join(c[2] for c in cues), {})
+            self.assertEqual(e3.calls, [])
+
+
 class WholeWords(unittest.TestCase):
     def test_cut_at_a_word(self):
         self.assertEqual(M._whole_words("The Grand Northern Archive Library", 24), "The Grand Northern")
@@ -100,7 +136,7 @@ class BeatsGuard(unittest.TestCase):
 
             def answer(prompt):
                 sc = [{"startMs": int(a), "visualIntent": "x", "queries": ["x", "y", "z"], "entities": [], "mood": "",
-                       "sceneType": "imagery"} for a, b in re.findall(r"^> \[(\d+)-(\d+)\]", prompt, re.M)]
+                       "sceneType": "imagery", "era": ""} for a, b in re.findall(r"^> \[(\d+)-(\d+)\]", prompt, re.M)]
                 return json.dumps({"scenes": sc})
             e = Engine(answer)
             rows = M.beats(e, job, job / "subs.srt", " ".join(c[2] for c in cues), {})

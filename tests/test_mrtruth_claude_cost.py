@@ -62,7 +62,7 @@ def scenes_for(text):
     f0, f1 = (int(x) for x in re.search(r"FOCUS RANGE: (\d+)ms to (\d+)ms", text).groups())
     starts = [int(a) for a, b in re.findall(r"^> \[(\d+)-(\d+)\]", text, re.M)][::2]
     return {"scenes": [{"startMs": a, "visualIntent": f"picture {a}", "queries": [f"q{a}", f"c{a}", f"m{a}"],
-                        "entities": [], "mood": "dark", "sceneType": "imagery"} for a in starts if f0 <= a < f1]}
+                        "entities": [], "mood": "dark", "sceneType": "imagery", "era": ""} for a in starts if f0 <= a < f1]}
 
 
 def sse(ev):

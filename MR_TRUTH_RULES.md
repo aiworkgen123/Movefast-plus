@@ -56,6 +56,11 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
   worse film: stop and say why.
   One exception (owner 2026-11-10): a stretch of up to 45 s without words on screen that every repair left open is a
   warning, and the film goes on; longer, it stops as before.
+- **A shot's time** (`era`, the period a picture must not look later than): every shot carries one. Shots that come
+  back from planning without it are asked for it once (2026-11-16: 84 of 217 shots without it were checked against
+  70 AD, an engineer at her desk included, and the film ran out of drawings). "today" inside a longer label
+  ("contemporary, Jerusalem") counts as today, but never when the label also names a past time or a place on
+  today's map ("Carthage, modern-day Tunisia, 146 BC" is still checked).
 - Tested and rejected on quality: Gemini Flash-Lite, Seed 2.0 Mini and Lite, `gemini-3-flash-preview`. Not recommended
   without a test: DeepSeek V4.1 Flash, GLM-5.3 Flash (they score below Flash-Lite independently).
 

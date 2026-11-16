@@ -329,6 +329,52 @@ class Answers(unittest.TestCase):
         self.assertEqual(M._era({}, {"period": f"{time.localtime().tm_year - 1}"}), "")
         self.assertEqual(M._era({}, {}), "")
 
+    def test_an_era_that_says_today_in_a_longer_phrase_asks_nothing(self):
+        # film 261116-4daa15: "contemporary, Jerusalem" and "modern, City of David tunnel" were checked as periods
+        for e in ("contemporary, Jerusalem", "modern, Jerusalem excavation", "present-day, City of David tunnel",
+                  "Jerusalem, recent decades", "present day, field notebook", "today",
+                  "Jerusalem today", "present-day photograph of the tunnel"):
+            self.assertEqual(M._era({"era": e}, {"period": "70 AD, Jerusalem"}), "", e)
+        # a past time named anywhere, a place on today's map, "contemporary" as "of that time": still checked
+        for e in ("early modern Europe", "modern era Japan", "1st century AD", "70 AD, Jerusalem tunnel",
+                  "2004, Jerusalem excavation", "Second Temple period", "70 AD passage, present-day photograph",
+                  "Carthage, modern-day Tunisia, 146 BC", "4th century BC, present-day Turkey",
+                  "1666 London, contemporary engraving", "contemporary woodcut, 1520s", "Josephus, contemporary account",
+                  "Modern Olympics, Athens 1896", "modern Greek state, 1832", "Ur, present-day Iraq",
+                  "Babylon, near present-day Baghdad", "Ottoman Anatolia, today's Turkey",
+                  "Pompeii, 79 AD, contemporary fresco", "contemporary portrait of Napoleon",
+                  "contemporary engraving of the fire", "Contemporary depiction, Great Fire", "contemporary account of the siege",
+                  "contemporary newspaper report", "Modern-day Iraq, Babylon", "modern-day Tunisia", "Modern day Rome", "AD 70, Jerusalem today",
+                  "Modern art movement, Paris", "Modern Greek state", "recent decades of the Roman Republic"):
+            self.assertEqual(M._era({"era": e}, {"period": "70 AD"}), e, e)
+
+    def test_shots_planned_without_an_era_are_asked_for_it(self):
+        rows = [{"startMs": 0, "text": "Rome burned.", "visualIntent": "fire", "era": "64 AD, Rome"},
+                {"startMs": 4000, "text": "She asked me not to use her name.", "visualIntent": "a woman at a desk"},
+                {"startMs": 8000, "text": "The passage climbed steeply.", "visualIntent": "a rock-cut passage"},
+                {"startMs": 9000, "text": "raw line", "unplanned": True}]
+        seen = []
+        def ask(engine, prompt, size, **kw):
+            seen.append(prompt)
+            return {"eras": [{"n": 1, "era": "today"}, {"n": 2, "era": " 1st century,  Jerusalem "}, {"n": 9, "era": "x"},
+                             {"n": "bad"}, None]}
+        with mock.patch.object(M, "_ask", ask):
+            M._fill_eras(Engine(), rows, {"period": "70 AD"})
+        self.assertEqual([r.get("era") for r in rows], ["64 AD, Rome", "today", "1st century, Jerusalem", None])
+        self.assertEqual(len(seen), 1)
+        self.assertIn("She asked me not to use her name", seen[0])
+        self.assertIn('before: "Rome burned."', seen[0])                 # its neighbours for context
+        self.assertNotIn("] Rome burned", seen[0])                   # a shot with its era is not asked (only context)
+        self.assertNotIn("3. [", seen[0])
+        rows = [{"startMs": 0, "text": "a", "visualIntent": "b"}]
+        def broken(*a, **k):
+            raise RuntimeError("no answer")
+        with mock.patch.object(M, "_ask", broken):
+            M._fill_eras(Engine(), rows, {})                          # a failed call leaves the film as it was
+        self.assertNotIn("era", rows[0])
+        with mock.patch.object(M, "_ask", lambda *a, **k: self.fail("asked with nothing missing")):
+            M._fill_eras(Engine(), [{"startMs": 0, "era": ""}], {})
+
     def test_names_and_prompt(self):
         row = {"text": "The library opened.", "entities": ["Royal Library", "1987", "the 4th century"],
                "archive": "Bibliotheca Regia Aurea"}
