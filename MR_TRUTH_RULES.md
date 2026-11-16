@@ -62,7 +62,9 @@ rented RunPod machines, rendered with Remotion (`mrtruth_renderer/`), and made t
 ## Picture searches
 
 - **Bing first** for generic or mood shots (free). From 2026-11-10 Bing scrambles answers to cloud machines: Settings
-  -> Keys -> Bing proxy sends its searches through static ISP (home-type) proxies.
+  -> Keys -> Bing proxy sends its searches through home-type proxies (a rotating one since 2026-11-12). Through a
+  proxy, a bad answer - a search or Bing's start check - is asked again up to 4 times, each from a fresh home
+  connection, before it counts against Bing.
 - **Wikimedia Commons first** only for a shot that names a person, place or thing. Bing follows if Commons gives
   nothing usable.
 - **Brave** is only a backup, used when Bing fails completely (`MRTRUTH_BRAVE_LAST_MAX=0`).

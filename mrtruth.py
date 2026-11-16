@@ -4458,11 +4458,16 @@ def _bing_fetch(query: str) -> list:
 def bing_canary() -> tuple:
     """(ok, detail): the two CANARY searches. Each must answer with 20 rows or more, 40% of the first 20 carrying all
     its words (degraded Bing answered 'Codex Vaticanus' with OpenAI Codex, 0 of 20). A failing one is asked once more
-    after CANARY_RETRY_S. 2-4 free requests."""
+    after CANARY_RETRY_S. 2-4 free requests.
+    Through a rotating BING_PROXY each request leaves from another home connection and some get an empty or scrambled
+    page (owner 2026-11-16: 'Codex Vaticanus' no_results twice while 'Eiffel Tower 1889' was 19/20 stopped a film), so
+    a failing search is asked up to BING_PROXY_TRIES times, as bing_search does; a Bing that answers every connection
+    badly still fails."""
     res = []
+    tries = BING_PROXY_TRIES if BING_PROXIES else 2
     for q, words in CANARY:
         good, note = False, ""
-        for attempt in range(2):
+        for attempt in range(tries):
             try:
                 rows = _bing_fetch(q)
             except _BingError as e:
@@ -4477,7 +4482,9 @@ def bing_canary() -> tuple:
                 good = len(rows) >= 20 and hit >= 0.4 * len(top)
                 if good:
                     break
-            if attempt == 0:
+            if attempt < tries - 1:
+                if BING_PROXIES:
+                    _count("bing_proxy_retries")
                 time.sleep(CANARY_RETRY_S)
         res.append((good, note))
     _count("bing_canaries")

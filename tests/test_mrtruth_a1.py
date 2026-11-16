@@ -280,6 +280,30 @@ class Canary(Base):
                 mock.patch.object(M, "_bing_ready", lambda: True):
             self.assertEqual(M.bing_search("codex other", self.d)[1], "no_results")   # every try bad: it counts
 
+    def test_the_start_check_through_a_rotating_proxy_asks_a_bad_search_again(self):
+        # owner 2026-11-16: 'Codex Vaticanus' no_results twice, 'Eiffel Tower 1889' 19/20 - one bad connection stopped a film
+        empty = Resp(200, "<html></html>")
+        seq = {"Codex Vaticanus": [empty, empty, empty]}
+        def get(q):
+            left = seq.get(q)
+            return left.pop(0) if left else Resp(200, page(rows_for(q, title=f"{q} manuscript")))
+        with mock.patch.object(M, "BING_PROXIES", ["http://u:p@h:1"]), mock.patch.object(M, "_bing_get", get), \
+                mock.patch.object(M, "CANARY_RETRY_S", 0):
+            ok, detail = M.bing_canary()
+        self.assertTrue(ok, detail)
+        self.assertEqual(M.SEARCH.get("bing_proxy_retries"), 3)
+        calls = []
+        empty_all = lambda q: calls.append(q) or empty
+        with mock.patch.object(M, "BING_PROXIES", ["http://u:p@h:1"]), mock.patch.object(M, "_bing_get", empty_all), \
+                mock.patch.object(M, "CANARY_RETRY_S", 0):
+            ok, detail = M.bing_canary()
+        self.assertFalse(ok)                                          # every connection bad: Bing really is off
+        self.assertEqual(len(calls), 2 * M.BING_PROXY_TRIES)
+        calls.clear()
+        with mock.patch.object(M, "_bing_get", empty_all), mock.patch.object(M, "CANARY_RETRY_S", 0):
+            self.assertFalse(M.bing_canary()[0])
+        self.assertEqual(len(calls), 4)                               # no proxy: twice each, as before
+
     def test_saved_degraded_pages_fail_the_canary(self):
         pages = Path(os.environ.get("MRTRUTH_BING_PAGES", "/nonexistent"))
         files = sorted(pages.glob("page_3.html"))         # a real degraded answer, kept outside the repo
