@@ -133,14 +133,15 @@ class Sources:
                         "desc": f"{vcpu}-core processor-only ({flavor}), RunPod secure"})
         return sorted(out, key=lambda o: o["price"])
 
-    def vast_offers(self, min_vcpu: int, ram: int, max_dph: float = 2.0) -> list:
+    def vast_offers(self, min_vcpu: int, ram: int, max_dph: float = 2.0, most_cores: bool = False) -> list:
         """Vast.ai's free on-demand machines with at least `min_vcpu` effective cores and `ram` GB, in the countries
         above, reliable, with fast internet and a recent processor; priced with their traffic charges."""
         q = {"rentable": {"eq": True}, "rented": {"eq": False}, "verified": {"eq": True}, "type": "ondemand",
              "cpu_cores_effective": {"gte": int(min_vcpu)}, "cpu_ram": {"gte": int(ram) * 1000},
              "reliability": {"gte": VAST_MIN_RELIABILITY}, "inet_up": {"gte": VAST_MIN_NET_MBPS},
              "inet_down": {"gte": VAST_MIN_NET_MBPS}, "disk_space": {"gte": VAST_DISK_GB},
-             "dph_total": {"lte": float(max_dph)}, "allocated_storage": VAST_DISK_GB, "order": [["dph_total", "asc"]],
+             "dph_total": {"lte": float(max_dph)}, "allocated_storage": VAST_DISK_GB,
+             "order": [["cpu_cores_effective", "desc"], ["dph_total", "asc"]] if most_cores else [["dph_total", "asc"]],
              "limit": 200}
         r = requests.post(f"{VAST}/api/v0/bundles/", json=q, headers=self._vast_headers(), timeout=60)
         r.raise_for_status()
@@ -179,8 +180,8 @@ class Sources:
                     out += self.runpod_fallback(min_vcpu)
         if self.vast_key and usable.get("vast", True):
             try:
-                dearer = {"max_dph": float(max_hr)} if max_hr is not None and max_hr > 2.0 else {}
-                out += self.vast_offers(min_vcpu, ram, **dearer)    # a fast film's limit is over Vast's usual 2.0
+                fast = {"max_dph": max(2.0, float(max_hr or 0)), "most_cores": True} if fastest else {}
+                out += self.vast_offers(min_vcpu, ram, **fast)   # a fast film: its own limit, the biggest first
             except (requests.RequestException, ValueError, KeyError, TypeError) as e:
                 problems.append(f"Vast offers: {type(e).__name__}")
         if backup and self.runpod_key and usable.get("runpod", True):

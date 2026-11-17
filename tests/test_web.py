@@ -441,6 +441,37 @@ class Runner(unittest.TestCase):
         self.assertEqual([r[3]["min_vcpu"] for r in self.src.rents], [self.J.FAST_VCPU, self.J.SMALL_VCPU])
         self.assertEqual(self.s.store.job(jid)["status"], "done")
 
+    def test_a_fast_film_never_tries_again_at_once_after_a_lost_answer(self):
+        jid = self.job()
+        self.s.set_fast(jid, True)
+        self.src.free = 0
+        self.src.why = ["32-core x $1/h: lost answer"]
+        def later(name, env):
+            if len(self.src.rents) == 2:                      # the next pass (after the wait), not the same one
+                self.src.free = 1
+                self.answers(jid)
+                self.src.on_rent(name, env)
+        self.src.on_rent = later
+        self.s._guard(jid, self.s._run)
+        self.assertEqual([r[3]["min_vcpu"] for r in self.src.rents], [self.J.FAST_VCPU, self.J.FAST_VCPU])
+
+    def test_a_film_carried_on_from_its_plan_keeps_that_plans_share_count(self):
+        jid = self.job()
+        self.s.set_fast(jid, True)
+        self.answers(jid, video=False, ok=False)
+        self.s._guard(jid, self.s._run)
+        first = json.loads(self.s.store.job(jid)["runs"])[-1]
+        self.assertEqual(first["n"], self.J.MACHINES_MAX)
+        P = self.K(jid, first["plan"])
+        self.b.put_bytes(P["ckpt"], b"c")
+        self.b.put_bytes(P["rpkg"], b"r")
+        self.s.set_fast(jid, False)                           # the plan was split for every machine: kept
+        self.s.store.update(jid, status="starting", pod_id=None, error=None)
+        time.sleep(1.1)
+        self.answers(jid)
+        self.s._guard(jid, self.s._run)
+        self.assertEqual(self.src.rents[-1][1]["NPARTS"], str(self.J.MACHINES_MAX))
+
     def test_a_film_waits_for_a_machine_instead_of_failing(self):
         jid = self.job()
         self.src.free = 0
@@ -1735,8 +1766,8 @@ class Machines(unittest.TestCase):
     def test_a_fast_film_takes_the_most_cores_first_and_may_pay_more_on_vast(self):
         self.src.runpod_offers = lambda v, r: [{"src": "runpod", "price": 0.5, "vcpu": 32, "desc": "rp32"}]
         seen = {}
-        def vast(v, r, max_dph=2.0):
-            seen["dph"] = max_dph
+        def vast(v, r, max_dph=2.0, most_cores=False):
+            seen["dph"], seen["most"] = max_dph, most_cores
             return [{"src": "vast", "price": 0.3, "vcpu": 32, "desc": "va32"},
                     {"src": "vast", "price": 2.6, "vcpu": 128, "desc": "va128"},
                     {"src": "vast", "price": 1.1, "vcpu": 64, "desc": "va64"}]
@@ -1744,10 +1775,10 @@ class Machines(unittest.TestCase):
         self.src.backup_offers = lambda v, r: []
         got, _ = self.src.offers(32, 32, max_hr=3.0, fastest=True)
         self.assertEqual([o["desc"] for o in got], ["va128", "va64", "va32", "rp32"])
-        self.assertEqual(seen["dph"], 3.0)
+        self.assertEqual((seen["dph"], seen["most"]), (3.0, True))
         got, _ = self.src.offers(32, 32, max_hr=1.5)                 # every other film: cheapest first, as before
         self.assertEqual([o["desc"] for o in got], ["va32", "rp32", "va64"])
-        self.assertEqual(seen["dph"], 2.0)
+        self.assertEqual((seen["dph"], seen["most"]), (2.0, False))
 
     def test_without_runpods_price_list_only_the_planner_tries_the_fixed_list(self):
         self.src.runpod_offers = mock.Mock(side_effect=ValueError("down"))

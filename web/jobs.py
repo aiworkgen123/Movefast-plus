@@ -621,7 +621,12 @@ class Studio:
         self._drop_runs(b, jid, j, keep_commit=commit)          # other versions' files can never be carried on
         runs = [r for r in runs if r.get("commit") == commit[:12]]
         plan = self._plan_run(b, jid, j["title"], runs, commit)
-        runs.append({"run": run, "commit": commit[:12], "plan": plan or run})
+        # how many shares: a film carried on from its saved plan keeps the count that plan was split into (an earlier
+        # attempt's shares are reused by number), else every machine for a fast film, else Settings
+        fast = self.fast(jid)
+        n = next((int(r["n"]) for r in reversed(runs) if plan and (r.get("plan") or r["run"]) == plan and r.get("n")),
+                 None) or (MACHINES_MAX if fast else self.machines())
+        runs.append({"run": run, "commit": commit[:12], "plan": plan or run, "n": n})
         attempt = len(runs)
         P = self.keys_of(jid, j["title"], plan or run)
         self.store.update(jid, stage="Uploading your files", progress=2, commit_id=commit[:12], runs=json.dumps(runs))
@@ -636,8 +641,6 @@ class Studio:
                 b.put_file(k, p)
         max_min = max(150, 60 + 6 * int(j["minutes"] or 10))
         ttl = (max_min + 90) * 60 + RENT_WAIT_S
-        fast = self.fast(jid)
-        n = MACHINES_MAX if fast else self.machines()
         plan_hr = FAST_PLANNER_MAX_HR if fast else PLANNER_MAX_HR
         if fast:
             self._note(jid, f"made on the fastest machines: {n} machines, {FAST_VCPU}+ cores where free, up to "
@@ -707,7 +710,9 @@ class Studio:
                     pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT,
                                             min_vcpu=FAST_VCPU if fast else SMALL_VCPU if n > 1 else 32,
                                             ram=32, max_hr=plan_hr, fallback=True, ttl=ttl, fastest=fast)
-                    if fast and not pod:               # no big machine free: the biggest smaller one, not a wait
+                    # no big machine free: the biggest smaller one, not a wait - unless an answer was lost (a machine
+                    # may exist under this name after all: the next pass finds it by name, never a second one)
+                    if fast and not pod and not any("lost answer" in t for t in tried):
                         pod, more = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU, ram=32,
                                                max_hr=plan_hr, fallback=True, ttl=ttl, fastest=True)
                         tried += more
@@ -904,7 +909,7 @@ class Studio:
                     pod, tried = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=FAST_VCPU if fast else SMALL_VCPU,
                                             ram=24, max_hr=FAST_DRAWER_MAX_HR if fast else DRAWER_MAX_HR, ttl=ttl,
                                             fastest=fast)
-                    if fast and not pod:
+                    if fast and not pod and not any("lost answer" in t for t in tried):
                         pod, more = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=SMALL_VCPU, ram=24,
                                                max_hr=FAST_DRAWER_MAX_HR, ttl=ttl, fastest=True)
                         tried += more
