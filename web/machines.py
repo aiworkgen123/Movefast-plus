@@ -133,14 +133,14 @@ class Sources:
                         "desc": f"{vcpu}-core processor-only ({flavor}), RunPod secure"})
         return sorted(out, key=lambda o: o["price"])
 
-    def vast_offers(self, min_vcpu: int, ram: int) -> list:
+    def vast_offers(self, min_vcpu: int, ram: int, max_dph: float = 2.0) -> list:
         """Vast.ai's free on-demand machines with at least `min_vcpu` effective cores and `ram` GB, in the countries
         above, reliable, with fast internet and a recent processor; priced with their traffic charges."""
         q = {"rentable": {"eq": True}, "rented": {"eq": False}, "verified": {"eq": True}, "type": "ondemand",
              "cpu_cores_effective": {"gte": int(min_vcpu)}, "cpu_ram": {"gte": int(ram) * 1000},
              "reliability": {"gte": VAST_MIN_RELIABILITY}, "inet_up": {"gte": VAST_MIN_NET_MBPS},
              "inet_down": {"gte": VAST_MIN_NET_MBPS}, "disk_space": {"gte": VAST_DISK_GB},
-             "dph_total": {"lte": 2.0}, "allocated_storage": VAST_DISK_GB, "order": [["dph_total", "asc"]],
+             "dph_total": {"lte": float(max_dph)}, "allocated_storage": VAST_DISK_GB, "order": [["dph_total", "asc"]],
              "limit": 200}
         r = requests.post(f"{VAST}/api/v0/bundles/", json=q, headers=self._vast_headers(), timeout=60)
         r.raise_for_status()
@@ -163,9 +163,11 @@ class Sources:
                         "host": o.get("machine_id"), "desc": f"{cores}-core {cpu}, Vast {country}"})
         return sorted(out, key=lambda o: o["price"])
 
-    def offers(self, min_vcpu: int, ram: int, max_hr=None, fallback: bool = False, backup: bool = True) -> tuple:
-        """Every source's offers under `max_hr`, cheapest first, the backup last among equals; and what went wrong
-        reading them (a source that does not answer is left out, never the reason a film fails on its own)."""
+    def offers(self, min_vcpu: int, ram: int, max_hr=None, fallback: bool = False, backup: bool = True,
+               fastest: bool = False) -> tuple:
+        """Every source's offers under `max_hr`, cheapest first (`fastest`: the most cores first, then the cheapest),
+        the backup last among equals; and what went wrong reading them (a source that does not answer is left out,
+        never the reason a film fails on its own)."""
         out, problems = [], []
         usable = self.usable()
         if self.runpod_key and usable.get("runpod", True):
@@ -177,7 +179,8 @@ class Sources:
                     out += self.runpod_fallback(min_vcpu)
         if self.vast_key and usable.get("vast", True):
             try:
-                out += self.vast_offers(min_vcpu, ram)
+                dearer = {"max_dph": float(max_hr)} if max_hr is not None and max_hr > 2.0 else {}
+                out += self.vast_offers(min_vcpu, ram, **dearer)    # a fast film's limit is over Vast's usual 2.0
             except (requests.RequestException, ValueError, KeyError, TypeError) as e:
                 problems.append(f"Vast offers: {type(e).__name__}")
         if backup and self.runpod_key and usable.get("runpod", True):
@@ -185,7 +188,8 @@ class Sources:
         if max_hr is not None:
             out = [o for o in out if o["price"] is None or o["price"] <= max_hr]
         # cheapest first; an unknown price (the fixed list) after every known one; the backup after an equal offer
-        out.sort(key=lambda o: (o["price"] is None, o["price"] or 0, bool(o.get("backup"))))
+        out.sort(key=lambda o: (o["price"] is None, -int(o.get("vcpu") or 0) if fastest else 0, o["price"] or 0,
+                                bool(o.get("backup"))))
         for src, ok in usable.items():
             if not ok:
                 problems.append(f"{'RunPod' if src == 'runpod' else 'Vast'} balance too low")
@@ -256,9 +260,10 @@ class Sources:
                 "desc": f"{offer['desc']}, ${hr:.2f}/h"}
 
     def rent(self, name: str, env: dict, script: str, min_vcpu: int = 16, ram: int = 32, max_hr=None,
-             fallback: bool = False, backup: bool = True, stop=lambda: False, boot=None) -> tuple:
-        """The cheapest machine that really starts: (machine or None, what was tried - for the film's log)."""
-        offers, problems = self.offers(min_vcpu, ram, max_hr, fallback, backup)
+             fallback: bool = False, backup: bool = True, stop=lambda: False, boot=None, fastest: bool = False) -> tuple:
+        """The cheapest machine that really starts (`fastest`: the one with the most cores): (machine or None, what
+        was tried - for the film's log)."""
+        offers, problems = self.offers(min_vcpu, ram, max_hr, fallback, backup, fastest)
         tried = list(problems)
         for offer in offers:
             if stop():                                   # Stop pressed while renting: rent nothing more

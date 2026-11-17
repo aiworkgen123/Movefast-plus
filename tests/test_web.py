@@ -408,6 +408,39 @@ class Runner(unittest.TestCase):
         self.assertEqual(self.s.store.job(jid)["status"], "cancelled")
         self.assertIn("m1", self.src.ended)
 
+    def test_a_fast_film_gets_every_machine_and_the_most_cores(self):
+        jid, other = self.job(), self.job()
+        self.s.set_fast(jid, True)
+        self.assertTrue(self.s.fast(jid) and not self.s.fast(other))
+        self.answers(jid)
+        self.s._guard(jid, self.s._run)
+        name, env, script, kw = self.src.rents[0]
+        self.assertEqual(env["NPARTS"], str(self.J.MACHINES_MAX))
+        self.assertEqual((kw["min_vcpu"], kw["max_hr"], kw.get("fastest")),
+                         (self.J.FAST_VCPU, self.J.FAST_PLANNER_MAX_HR, True))
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+        self.answers(other)                                   # any other film: as before
+        self.s._guard(other, self.s._run)
+        name, env, script, kw = self.src.rents[-1]
+        self.assertEqual(env["NPARTS"], str(self.s.machines()))
+        self.assertEqual((kw["max_hr"], "fastest" in kw), (self.J.PLANNER_MAX_HR, False))
+        self.s.set_fast(jid, False)
+        self.assertFalse(self.s.fast(jid))
+
+    def test_a_fast_film_with_no_big_machine_free_takes_a_smaller_one_at_once(self):
+        jid = self.job()
+        self.s.set_fast(jid, True)
+        self.src.free = 0
+        def second(name, env):
+            if len(self.src.rents) == 2:                      # the 16-core try in the same pass
+                self.src.free = 1
+                self.answers(jid)
+                self.src.on_rent(name, env)
+        self.src.on_rent = second
+        self.s._guard(jid, self.s._run)
+        self.assertEqual([r[3]["min_vcpu"] for r in self.src.rents], [self.J.FAST_VCPU, self.J.SMALL_VCPU])
+        self.assertEqual(self.s.store.job(jid)["status"], "done")
+
     def test_a_film_waits_for_a_machine_instead_of_failing(self):
         jid = self.job()
         self.src.free = 0
@@ -1698,6 +1731,23 @@ class Machines(unittest.TestCase):
         got, problems = self.src.offers(16, 32, max_hr=1.0, backup=False)
         self.assertEqual([o["desc"] for o in got], ["rp", "rp48"])
         self.assertEqual(problems, ["Vast offers: ConnectionError"])
+
+    def test_a_fast_film_takes_the_most_cores_first_and_may_pay_more_on_vast(self):
+        self.src.runpod_offers = lambda v, r: [{"src": "runpod", "price": 0.5, "vcpu": 32, "desc": "rp32"}]
+        seen = {}
+        def vast(v, r, max_dph=2.0):
+            seen["dph"] = max_dph
+            return [{"src": "vast", "price": 0.3, "vcpu": 32, "desc": "va32"},
+                    {"src": "vast", "price": 2.6, "vcpu": 128, "desc": "va128"},
+                    {"src": "vast", "price": 1.1, "vcpu": 64, "desc": "va64"}]
+        self.src.vast_offers = vast
+        self.src.backup_offers = lambda v, r: []
+        got, _ = self.src.offers(32, 32, max_hr=3.0, fastest=True)
+        self.assertEqual([o["desc"] for o in got], ["va128", "va64", "va32", "rp32"])
+        self.assertEqual(seen["dph"], 3.0)
+        got, _ = self.src.offers(32, 32, max_hr=1.5)                 # every other film: cheapest first, as before
+        self.assertEqual([o["desc"] for o in got], ["va32", "rp32", "va64"])
+        self.assertEqual(seen["dph"], 2.0)
 
     def test_without_runpods_price_list_only_the_planner_tries_the_fixed_list(self):
         self.src.runpod_offers = mock.Mock(side_effect=ValueError("down"))

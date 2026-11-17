@@ -176,6 +176,7 @@ def _view(j: dict) -> dict:
     used = [d for d in ds if d.get("id")]
     if used:                                        # the drawing machines, shown with the planner's
         out["pod_desc"] = f"{j.get('pod_desc') or ''} + {len(used)} drawing ({', '.join(sorted({d['desc'].split(',')[0] for d in used}))})"
+    out["fast"] = studio.fast(j["id"])
     out["cost"] = json.loads(j.get("cost") or "{}")
     if j.get("status") == "done":
         try:
@@ -324,6 +325,15 @@ def retry_job(jid):
     store.update(jid, status="queued", stage="Waiting to start", progress=0, error=None, pod_id=None,
                  pod_started=None, finished=None, cost=None, log_tail=None, drawers=None, retries=0)
     return jsonify(ok=True)
+
+
+@app.post("/api/jobs/<jid>/fast")
+@need("owner")
+def fast_job(jid):
+    """This film on the fastest machines, whatever they cost (owner 2026-11-17); its next attempt picks it up."""
+    store.job(jid) or abort(404)
+    studio.set_fast(jid, bool((request.get_json(silent=True) or {}).get("on", True)))
+    return jsonify(ok=True, fast=studio.fast(jid))
 
 
 @app.post("/api/jobs/<jid>/delete")

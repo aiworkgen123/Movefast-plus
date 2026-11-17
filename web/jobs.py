@@ -72,6 +72,12 @@ MACHINES_DEFAULT, MACHINES_MAX = 3, 5
 SMALL_VCPU = 16
 PLANNER_MAX_HR = 1.50                          # none free under this: the film waits (never a $3/h machine)
 DRAWER_MAX_HR = 1.00                           # a drawer dearer than this is not rented: the planner draws that share
+# a film made as fast as the machines allow (owner 2026-11-17: "make sure it finishes fast, use the fastest machine
+# only for this one even if it means more expensive"): its id in the Settings key fast_films (POST /api/jobs/<id>/fast).
+# It gets MACHINES_MAX machines (smaller shares to draw), each with at least FAST_VCPU cores where one is free (else
+# SMALL_VCPU), the most cores first rather than the cheapest, up to these prices. Every other film is as before
+FAST_VCPU = 32
+FAST_PLANNER_MAX_HR, FAST_DRAWER_MAX_HR = 3.00, 2.50
 # where a film can be made (the website's "Run on" list); a place that is not ready is shown but cannot be picked
 RUN_ON = [
     {"id": "runpod", "label": "RunPod (cloud machines)", "ready": True,
@@ -566,6 +572,20 @@ class Studio:
         except ValueError:
             return MACHINES_DEFAULT
 
+    def fast(self, jid) -> bool:
+        """Whether this film is made on the fastest machines (FAST_VCPU)."""
+        try:
+            return jid in json.loads(self.store.get("fast_films", "[]") or "[]")
+        except (ValueError, TypeError):
+            return False
+
+    def set_fast(self, jid, on: bool) -> None:
+        try:
+            got = [x for x in json.loads(self.store.get("fast_films", "[]") or "[]") if x != jid]
+        except (ValueError, TypeError):
+            got = []
+        self.store.put("fast_films", json.dumps(got + [jid] if on else got))
+
     def planner(self) -> str:
         """Settings → Planner for new films: "sonnet" (the default) or "ts" (Claude Sonnet through Token Supply)."""
         got = self.store.get("planner", PLANNER_DEFAULT)
@@ -616,7 +636,12 @@ class Studio:
                 b.put_file(k, p)
         max_min = max(150, 60 + 6 * int(j["minutes"] or 10))
         ttl = (max_min + 90) * 60 + RENT_WAIT_S
-        n = self.machines()
+        fast = self.fast(jid)
+        n = MACHINES_MAX if fast else self.machines()
+        plan_hr = FAST_PLANNER_MAX_HR if fast else PLANNER_MAX_HR
+        if fast:
+            self._note(jid, f"made on the fastest machines: {n} machines, {FAST_VCPU}+ cores where free, up to "
+                            f"${FAST_PLANNER_MAX_HR:.2f}/h for the planner and ${FAST_DRAWER_MAX_HR:.2f}/h a drawer")
         env = {"PKG_URL": b.presign(pkg_key, ttl), "LOG_PUT": b.presign(K["log"], ttl, "PUT"),
                "NPARTS": str(n), "RPKG_PUT": b.presign(K["rpkg"], ttl, "PUT"), "CKPT_PUT": b.presign(K["ckpt"], ttl, "PUT"),
                "PART_PUT_1": b.presign(K["part"](1), ttl, "PUT"),
@@ -679,8 +704,13 @@ class Studio:
                     if not tries:                      # later tries keep the "Waiting for a machine" message
                         self.store.update(jid, stage="Renting a machine" + (
                             f" (Token Supply: {off} - Anthropic plans in its place)" if off else ""), progress=4)
-                    pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU if n > 1 else 32,
-                                            ram=32, max_hr=PLANNER_MAX_HR, fallback=True, ttl=ttl)
+                    pod, tried = self._rent(jid, K, name, env, PLAN_SCRIPT,
+                                            min_vcpu=FAST_VCPU if fast else SMALL_VCPU if n > 1 else 32,
+                                            ram=32, max_hr=plan_hr, fallback=True, ttl=ttl, fastest=fast)
+                    if fast and not pod:               # no big machine free: the biggest smaller one, not a wait
+                        pod, more = self._rent(jid, K, name, env, PLAN_SCRIPT, min_vcpu=SMALL_VCPU, ram=32,
+                                               max_hr=plan_hr, fallback=True, ttl=ttl, fastest=True)
+                        tried += more
                 tries += 1
                 if pod:
                     break
@@ -689,7 +719,7 @@ class Studio:
                     return self._cancelled(jid)
                 money = [t for t in tried if "balance too low" in t]
                 why = dry or (" and ".join(money) + " - please top up" if money else
-                              f"no machine free under ${PLANNER_MAX_HR:.2f}/h")
+                              f"no machine free under ${plan_hr:.2f}/h")
                 if time.time() >= deadline:
                     raise RuntimeError(f"{why} for {RENT_WAIT_S // 60} minutes - press Try again later")
                 self.store.update(jid, stage=f"Waiting for {'Claude' if dry else 'a machine'}: {why} (tried {tries}x, "
@@ -706,7 +736,8 @@ class Studio:
             return self._cancelled(jid)
         self._watch(jid)
 
-    def _rent(self, jid, K, name, env, script, min_vcpu=SMALL_VCPU, ram=32, max_hr=None, fallback=False, ttl=6 * 3600):
+    def _rent(self, jid, K, name, env, script, min_vcpu=SMALL_VCPU, ram=32, max_hr=None, fallback=False, ttl=6 * 3600,
+              fastest=False):
         """One machine for this film, the cheapest good one free now across the sources (see web/machines.py), or one
         already made under this exact name (an answer lost on the way, a website restart). The name stays in
         self.renting until the caller has saved the machine (or given up), so the sweep never switches it off."""
@@ -718,8 +749,9 @@ class Studio:
             hr = float(have.get("hr") or 0)
             return {"id": have["id"], "hr": hr, "desc": f"picked up again, ${hr:.2f}/h"}, ["already made"]
         stop = lambda: (self.store.job(jid) or {}).get("status") == "cancelling"
+        kw = {"fastest": True} if fastest else {}
         return src.rent(name, env, script, min_vcpu=min_vcpu, ram=ram, max_hr=max_hr, fallback=fallback, stop=stop,
-                        boot=self._boot(self.bucket(), K, ttl))
+                        boot=self._boot(self.bucket(), K, ttl), **kw)
 
     def _reattach(self, jid) -> None:
         j = self.store.job(jid)
@@ -868,8 +900,14 @@ class Studio:
                        "LOG_PUT": b.presign(logkey, ttl, "PUT"), "PART": str(k), "NPARTS": str(n),
                        "MAX_MIN": str(max(90, 30 + 3 * int(j["minutes"] or 10))), "STALL": str(STALL_S)}
                 try:
-                    pod, tried = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=SMALL_VCPU, ram=24,
-                                            max_hr=DRAWER_MAX_HR, ttl=ttl)
+                    fast = self.fast(jid)
+                    pod, tried = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=FAST_VCPU if fast else SMALL_VCPU,
+                                            ram=24, max_hr=FAST_DRAWER_MAX_HR if fast else DRAWER_MAX_HR, ttl=ttl,
+                                            fastest=fast)
+                    if fast and not pod:
+                        pod, more = self._rent(jid, K, name, env, DRAW_SCRIPT, min_vcpu=SMALL_VCPU, ram=24,
+                                               max_hr=FAST_DRAWER_MAX_HR, ttl=ttl, fastest=True)
+                        tried += more
                     d["tries"] = d.get("tries", 0) + 1
                     if pod:
                         d.update(state="running", id=pod["id"], hr=float(pod.get("hr") or 0), desc=pod["desc"],
